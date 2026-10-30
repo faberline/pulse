@@ -47,7 +47,7 @@ impl Store {
             .fetch_one(&pool)
             .await?;
         require(
-            schema <= 1,
+            schema <= 2,
             "database schema is newer than this application",
         )?;
         sqlx::migrate!().run(&pool).await?;
@@ -66,6 +66,108 @@ impl Store {
 
     pub async fn close(self) {
         self.pool.close().await;
+    }
+
+    /// Trusted application extension storage, never exposed to remote callers.
+    pub fn application_pool(&self) -> SqlitePool {
+        self.pool.clone()
+    }
+
+    pub async fn list_tasks(&self, limit: u32) -> Result<Vec<Task>> {
+        require((1..=100).contains(&limit), "task page must be 1..100")?;
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT data FROM tasks ORDER BY json_extract(data,'$.created_at') DESC,id LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|s| serde_json::from_str(&s).map_err(Error::from))
+            .collect()
+    }
+
+    /// Share the caller's transport transaction so limits and dispatch commit together.
+    pub async fn authorize_device_read(
+        db: &mut SqliteConnection,
+        id: &str,
+        revision: u64,
+        operation: &str,
+        now: i64,
+    ) -> Result<()> {
+        let mut task: Task = load(db, "tasks", id).await?;
+        require(
+            task.revision == revision
+                && task.scope == "pulse:read"
+                && !task.cancel_requested
+                && matches!(
+                    task.state,
+                    State::Queued | State::Blocked | State::WaitingDevice
+                )
+                && task.deadline > now
+                && task.tool_calls < 16
+                && !unresolved(db, id).await?,
+            "device read policy or limit",
+        )?;
+        task.tool_calls += 1;
+        task.state = State::Dispatched;
+        task.reason = Some("device_read_dispatched".into());
+        task.evidence.push(format!("dispatch:{operation}"));
+        put(db, "tasks", id, &task).await
+    }
+
+    /// Trusted transport observer. Records device evidence, never verifies the goal.
+    pub async fn device_observation(
+        &self,
+        id: &str,
+        revision: u64,
+        receipt_id: &str,
+        unknown: bool,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        Self::device_observation_in(&mut tx, id, revision, receipt_id, unknown).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+    pub async fn device_observation_in(
+        db: &mut SqliteConnection,
+        id: &str,
+        revision: u64,
+        receipt_id: &str,
+        unknown: bool,
+    ) -> Result<()> {
+        let mut task: Task = load(db, "tasks", id).await?;
+        let evidence = format!("device:{receipt_id}");
+        if !task.evidence.contains(&evidence) {
+            task.evidence.push(evidence);
+        }
+        let current = task
+            .evidence
+            .iter()
+            .rev()
+            .find(|s| s.starts_with("dispatch:"))
+            .is_none_or(|s| s == &format!("dispatch:{receipt_id}"));
+        if !task.state.terminal() && current {
+            if task.cancel_requested && !unresolved(db, id).await? {
+                task.state = State::Cancelled;
+                task.reason = Some("device_result_stopped_after_cancel".into());
+            } else if task.revision == revision && !task.cancel_requested {
+                task.state = if unknown {
+                    State::OutcomeUnknown
+                } else {
+                    State::Blocked
+                };
+                task.reason = Some(
+                    if unknown {
+                        "device_outcome_unknown"
+                    } else {
+                        "device_result_ready_model_not_connected"
+                    }
+                    .into(),
+                );
+                task.active_run = None;
+            }
+        }
+        put(db, "tasks", id, &task).await
     }
 
     /// Durable receipt only. Routing is a separate, replayable transaction.
@@ -974,7 +1076,8 @@ async fn receipt_in(db: &mut SqliteConnection, receipt: &Receipt) -> Result<Rece
 
 async fn unresolved(db: &mut SqliteConnection, task_id: &str) -> Result<bool> {
     let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM operations WHERE json_extract(data,'$.token.task_id')=? AND json_extract(data,'$.state') IN ('unknown','ambiguous')").bind(task_id).fetch_one(&mut *db).await?;
-    Ok(count > 0)
+    let reads:i64=sqlx::query_scalar("SELECT COUNT(*) FROM link_reads WHERE task_id=? AND state IN ('sent','accepted','unknown')").bind(task_id).fetch_one(db).await?;
+    Ok(count > 0 || reads > 0)
 }
 
 async fn tasks(db: &mut SqliteConnection) -> Result<Vec<Task>> {

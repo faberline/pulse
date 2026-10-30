@@ -1,10 +1,12 @@
 # Pulse
 
-Pulse 是單人使用的事件驅動助理。雲端保存任務狀態。預定以 Rust 桌面 app 提供同一對話、地端連線與受限工具。
+Pulse 是單人使用的事件驅動助理。雲端保存任務狀態。Rust 桌面 app 提供同一對話、地端連線與受限工具。
 
 ## 目前狀態
 
-目前提供 v0.2 Rust 任務核心候選、SQLite 保存、替身示例與故障測試。完整桌面、HTTP/WSS、真實模型與部署仍未實作。此 library 只供可信的同程序程式呼叫，尚無網路認證入口。
+目前提供 v0.2 任務核心，以及 v0.3 Rust 桌面與地端連線候選。桌面使用 iced。helper 提供配對、可靠重送與受限只讀工具。Axum 服務保存任務與裝置資料。
+
+本機 WebSocket 與恢復測試已建立。正式遠端 WSS、Keychain 配對閉環與完整效能驗收仍待實機驗證。真實模型與雲端部署尚未接入。
 
 Anthropic API 實測尚未執行。研究環境沒有設定 `ANTHROPIC_API_KEY`。v0.1 與相關研究 issue 保持開啟。
 
@@ -30,6 +32,8 @@ cargo test --workspace --locked
 
 [核心使用方式與驗證邊界](docs/v0.2-core.md) 列出對應契約、測試、coverage 命令與未實作項目。
 
+桌面試用方式、配對與撤銷命令見 [v0.3 桌面與連線](docs/v0.3-desktop.md)。macOS 可用 `sh scripts/build-macos-app.sh --debug` 建立本機 app。
+
 ## 規格入口
 
 | 文件 | 內容 |
@@ -38,10 +42,13 @@ cargo test --workspace --locked
 | [契約](docs/contracts.md) | 任務、權限、傳輸、恢復、費用與資料保留 |
 | [驗收](docs/acceptance.md) | 需求對照、測試矩陣、證據與目前缺口 |
 | [v0.2 核心](docs/v0.2-core.md) | 可執行的 library、替身示例與當前測試界線 |
+| [v0.3 桌面](docs/v0.3-desktop.md) | 桌面、helper、裝置配對與連線恢復 |
 
 研究工作：[架構 #1](https://github.com/faberline/pulse/issues/1)、[契約 #2](https://github.com/faberline/pulse/issues/2)、[驗收與 API #3](https://github.com/faberline/pulse/issues/3)。
 
 本次實作工作：[#4](https://github.com/faberline/pulse/issues/4)–[#7](https://github.com/faberline/pulse/issues/7)。使用者於 2026-10-30 明確要求開始實作；這不代表 v0.1 的 API 缺口已通過，也不關閉原有 gate。
+
+v0.3 工作：[#9](https://github.com/faberline/pulse/issues/9)–[#12](https://github.com/faberline/pulse/issues/12)。候選堆疊在 v0.2 分支上。兩階段都須通過各自的獨立接受，才可合併。
 
 ## 交付順序
 
