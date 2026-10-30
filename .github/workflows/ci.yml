@@ -1,0 +1,43 @@
+name: Rust core
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  core:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Install pinned toolchain
+        run: rustup toolchain install 1.96.1 --profile minimal --component clippy,rustfmt,llvm-tools-preview
+      - name: Record compiler
+        run: rustc --version --verbose
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - name: Fixture demonstration
+        run: |
+          cargo run --locked --example durable_demo -- "${RUNNER_TEMP}/pulse-demo.db"
+          cargo run --locked --example durable_demo -- "${RUNNER_TEMP}/pulse-demo.db"
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - run: rustup toolchain install 1.96.1 --profile minimal --component llvm-tools-preview
+      - run: cargo install cargo-llvm-cov --version 0.8.5 --locked
+      - name: Coverage report (core source only; no acceptance threshold)
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov --workspace --locked --ignore-filename-regex '/(tests|examples)/' --lcov --output-path coverage/lcov.info
+      - name: Coverage summary
+        run: cargo llvm-cov report --ignore-filename-regex '/(tests|examples)/' --summary-only
+      - name: Save coverage evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rust-core-coverage
+          path: coverage/lcov.info
+          retention-days: 7

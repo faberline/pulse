@@ -2,7 +2,7 @@
 
 日期：2026-10-30，Asia/Taipei。研究 issue：[#3](https://github.com/faberline/pulse/issues/3)，依賴 [#1](https://github.com/faberline/pulse/issues/1)、[#2](https://github.com/faberline/pulse/issues/2)。
 
-來源是 [v0.1 milestone](https://github.com/faberline/pulse/milestone/1) 在本次工作開始前的需求。以下 ID 固定對應原文順序，不以後續新增文字重編。`Kxx` 指 [契約文件](contracts.md) 的章節。所有產品測試目前均為 **unrun**。
+來源是 [v0.1 milestone](https://github.com/faberline/pulse/milestone/1) 在規格工作開始前的需求。以下 ID 固定對應原文順序，不以後續新增文字重編。`Kxx` 指 [契約文件](contracts.md) 的章節。本文保留 v0.1 的證據快照；後續核心實作與測試子集見 [v0.2 核心](v0.2-core.md)，不能將子集通過提升成整張矩陣通過。
 
 ## 1. v0.1 的接受邊界
 
@@ -83,7 +83,7 @@ N01–N07 對應原「第一版必要行為」。它們不是額外增加的產�
 
 ## 5. 後續產品測試矩陣
 
-所有測試都有固定 seed 或明確故障位置。替身使用可控制時鐘、provider、transport 及可計數的模擬效果。實機測試另列平台、服務版本與真實認證路線。以下各列目前均 **unrun**。
+所有測試都有固定 seed 或明確故障位置。替身使用可控制時鐘、provider、transport 及可計數的模擬效果。實機測試另列平台、服務版本與真實認證路線。以下各列在 v0.1 建立時均 **unrun**；v0.2 僅驗證其 core 子集，完整情境仍需相應階段接受。
 
 | ID | 輸入/注入 | 成功判準 |
 |---|---|---|
@@ -139,7 +139,7 @@ Codex 負責規劃與獨立接受。開發依 issue 走 AGY 生命週期；Claud
 
 ## 7. 證據格式與目前執行紀錄
 
-每份實作證據須包含：candidate commit/branch、dirty state、相關 issues、測試 ID、命令與 exit、環境/依賴版本、樣本/seed、開始結束時間、實際結果、去敏 artifact、限制與未跑項目。多階段實作成果不得混用不相同 SHA 的 passing 結果來宣稱整體接受。
+每份實作證據須包含：candidate commit/branch、dirty state、相關 issues、測試 ID、命令與 exit、環境/依賴版本、樣本/seed、開始結束時間、實際結果、去敏 artifact、限制與未跑項目。多階段實作成果不得混用不相同 SHA 的 passing 結果來宣稱整體接受。下表是 v0.1 規格提交時的歷史快照，不是 v0.2 的當前執行結果。
 
 | 本次檢查 | 結果與限制 |
 |---|---|
