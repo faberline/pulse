@@ -1,0 +1,140 @@
+# v0.1 架構與 Rust 技術決策
+
+日期：2026-10-30，Asia/Taipei。研究 issue：[#1](https://github.com/faberline/pulse/issues/1)。
+
+本文定義後續實作。本文沒有宣稱程式、部署或完整產品已通過驗收。行為細節見 [契約](contracts.md)，證據與缺口見 [驗收](acceptance.md)。
+
+## 1. 已確認的產品決策
+
+| ID | 決策 | 來源 |
+|---|---|---|
+| U01 | 單人使用，同一對話可討論多個任務，各任務有獨立 context | 原 v0.1 與本次使用者確認 |
+| U02 | v0.1 先完成架構規格，產品實作從 v0.2 開始 | 使用者選擇「先完成架構規格」 |
+| U03 | 雲端服務、agent runtime、桌面 UI 與地端執行器採 Rust | 使用者要求「用 rust 打造」 |
+| U04 | 模型採雲端 Anthropic API | 使用者選擇雲端 API 與 Anthropic |
+| U05 | 首個只讀分析範圍是 Pulse 本身 | 使用者選擇「Pulse 本身」 |
+| U06 | Pulse 必要文件與程式可按需上雲，排除憑證及私密設定 | 使用者選擇「按需傳送文件與程式」 |
+| U07 | 模型 API 每日 US$1，每任務 US$0.25 | 使用者選擇的預算 |
+| U08 | 完成任務保留 90 天、除錯紀錄 7 天、備份 30 天，可提早刪除 | 使用者選擇「限期保存」 |
+
+一台 macOS Apple Silicon 裝置、一個地端 worker、雲端最多兩個執行中任務，是本版實作預設。這些數值可經新決策修改，但不能由模型自行調高。
+
+## 2. 首個端到端情境
+
+1. 人類在桌面要求分析 Pulse 的架構或程式。雲端保存來源事件，再確認收件。
+2. 任務 A 只讀取必要的 Pulse 內容，形成分析與草稿。
+3. 人類交付需要本機內容的任務 B。裝置離線時，B 進入等待裝置狀態。
+4. 人類回到 A，補充或取代決策。A 使用有效決策，B 不受誤改。
+5. 查詢進度不建立新任務。取消指涉不清時先澄清。
+6. 雲端可用既有且仍有效的雲端資料繼續 A。若 A 也需要未取得的本機資料，A 同樣等待。
+7. 重連先處理未確認結果與未知操作，再恢復可安全繼續的工作。
+
+離線桌面只能顯示快取與最後同步時間。雲端仍可接收經認證的 HTTP 請求，但本版不另建手機或瀏覽器入口。測試客戶端可驗證此能力，不能把它當作另一套已交付 UI。
+
+## 3. 邏輯與程序邊界
+
+```mermaid
+flowchart TB
+  subgraph Cloud[單台 Linux 雲端主機]
+    TLS[TLS 入口] --> Server[Rust server]
+    Server --> DB[(權威 SQLite)]
+    Server --> Planner[有界 planner / policy]
+    Server --> Queue[持久 queue / scheduler / outbox]
+    Planner --> API[Anthropic Messages API]
+  end
+  subgraph Local[macOS 桌面交付]
+    UI[iced UI] <-->|私有 stdio 訊息| Device[Rust device helper]
+    Device --> Journal[(SQLite journal / outbox / cache)]
+    Device --> Tools[受限只讀 repo 工具]
+    Device --> AW[AW 公開 CLI / MCP]
+  end
+  Device <-->|主動建立 WSS| TLS
+```
+
+| 模組 | 責任 | 不可跨越的邊界 |
+|---|---|---|
+| ingress / coordinator | 認證、持久收件、對話投影與任務關聯 | 收件不等於執行成功 |
+| domain / store | 任務、決策、批准、版本與交易 | 模型記憶不取代 DB |
+| scheduler / outbox | queue、計時、優先序、重試、可靠通知 | 不需要 LLM |
+| planner / provider | 組裝 context、模型呼叫、工具提議 | 不直接執行未核對操作 |
+| policy | 核對來源、scope、revision、批准與預算 | 模型與工具內容不可修改 policy |
+| device helper | outbound 連線、journal、結果補送、工具執行 | 不接受任意遠端 shell |
+| desktop | 同一對話、rich content、狀態、批准與取消 | 顯示內容不能形成授權 |
+
+雲端先採單一服務。這些模組不是七個微服務，也不要求一個任務配一個常駐 process。等待時保存進度並釋放工作名額。
+
+桌面 app 一起打包 UI 與 helper。UI 不直接開啟 repo、讀取模型金鑰或呼叫 AW。helper 接受明確型別的私有程序訊息。標準輸出只送協定資料，去敏診斷走標準錯誤。此程序切分提供失敗隔離，並不等於 OS sandbox。
+
+## 4. 技術選型與替代方案
+
+下列版本是 2026-10-30 官方文件所示的研究基準，不是已編譯的相容性證明。v0.2 須固定 Rust toolchain 與 Cargo.lock，並記錄實際 resolved versions。
+
+| 決策 | 選擇與理由 | 已比較的替代方案 |
+|---|---|---|
+| A01 非同步服務 | Tokio + Axum 0.8 系列。HTTP、WSS 與取消可放在同一 Rust 執行環境 | Actix 同樣可用；先選 Axum 以統一 Tokio 生態 |
+| A02 雲端 DB | SQLx 0.9 系列 + SQLite。單機、交易、migration 與簡單 queue 足以處理個人工作量 | PostgreSQL 增加服務與維護需求；多主機需求出現後再評估 |
+| A03 桌面 UI | iced 0.14 系列。UI 亦用 Rust；用 Markdown、highlighting、表格與圖片元件組合 rich content | Tauri 需 web rendering 邊界；egui 偏即時重繪。首版採 iced，不另建 JS 前端 |
+| A04 傳輸 | HTTP 收件/查詢 + WSS 雙向裝置流。HTTP 與 socket 都套用相同持久收件契約 | SSE/long polling 可行，但裝置仍需要反向送結果；本版只實作 WSS |
+| A05 程序連線 | UI 與 helper 使用繼承的 stdio pipes，傳送有界 JSON Lines | 不開 localhost TCP port，不新增本機服務認證面 |
+| A06 模型 | reqwest + Serde 直接連 Anthropic Messages API，使用 `claude-sonnet-5-5` | 地端 CLI 依賴裝置在線；本版不採雙 provider 或自動 fallback |
+| A07 協作 | 透過 AW 公開 CLI/MCP 重用 admission、mailbox、handoff、skills | 不複製 AW DB、排程或知識庫，不建立 A2A 網路 |
+| A08 部署 | 單台 Linux VM、systemd 管理服務、Caddy 提供 TLS、本機持久磁碟 | 不採 serverless 臨時檔案系統或 Kubernetes；v0.1 不租用 VM |
+| A09 觀測 | tracing 結構化事件、健康查詢與任務證據關聯鍵 | 不先架獨立 trace 平台；必要時再出口至 OTel |
+
+部署契約不綁雲端廠商。實際主機、網域與帳單需在部署 issue 有明確設定後才建立。選型不授權採購或公開服務。
+
+研究環境為 Darwin arm64、rustc/cargo 1.96.1。這只證明工具存在，未證明 iced、SQLx、Axum 或 TLS 整合可用。
+
+## 5. 資料、排隊與恢復
+
+雲端 SQLite 保存所有權威任務資料。來源事件、任務投影、執行/checkpoint、操作收據、預算與 outbox 使用明確表及交易，並不要求多個 DB。文字成果先存 DB；本機大檔僅保留授權的參照，不自動上傳整個 repo。
+
+雲端與地端 SQLite 均採 WAL、`synchronous=FULL`、foreign keys 與有界 busy timeout。雲端 DB 寫入透過單一 writer 排隊，交易內不等待模型、網路或工具。讀取不可開啟無限長交易。磁碟滿或 commit 失敗時不回覆 durable ACK。
+
+SQLite 必須使用已修正 WAL-reset 問題的版本。基準為 3.51.3 或更新版本；實作 gate 核對 bundled/runtime 版本與官方修正資訊。不得只依賴 SQLx 版本推論 SQLite 安全版本。
+
+備份採 SQLite Online Backup API 或經驗證的一致性快照。不可只複製開啟中的 `.db` 檔而忽略 WAL。migration 前備份，還原到獨立目錄並驗完整性後才切換；相容性不明則停止，不能自動降版開庫。
+
+地端 DB 只保存 dedupe journal、必要快取、operation receipts 與未確認 outbox。重啟後先核對雲端狀態，不自行產生新的批准、任務真相或排程分支。
+
+## 6. 認證與最小權限
+
+單一 owner 由操作者在部署時建立。不增加公開註冊或多使用者登入。操作者從受保護的管理程序建立單次配對碼，十分鐘到期。配對碼不寫入普通 logs。
+
+配對後建立單一 device、scope 與可撤銷的 opaque token。token 至少含 32 bytes 的密碼安全隨機資料。地端 token 留在 macOS Keychain，伺服器保存驗證用雜湊。所有遠端連線走 HTTPS/WSS。輪替是明確的管理操作；舊 token 撤銷後不可建立新連線、派送或續租。身份只代表裝置，不代表已批准操作。
+
+`ANTHROPIC_API_KEY` 由雲端受保護的 secret 檔或服務環境注入。不得進入 repo、桌面訊息、task payload、模型 context 或 trace。不要複製本機 CLI 的登入資料來代替 API 認證。
+
+第一版 repo 工具只有列檔、讀文字、Git status 與 diff。所有路徑限制在 Pulse，不能讀 `.git` 原始檔、私密設定或跟隨 symlink 越界。Git 只經固定子命令讀取，禁止 hooks、外部 diff/textconv 與額外網路存取。
+
+任意命令、repo 寫入、電腦控制、對外發送、merge 與部署均不在首批工具清單。v0.5 先用模擬副作用驗證寫入契約；真實 adapter 須另有明確授權。
+
+## 7. 五項優先設計決策
+
+| ID | 決定 | 契約位置 |
+|---|---|---|
+| D1 對話關聯 | 明確 task ID/回覆優先；查詢不開新工作；會影響執行的歧義先澄清 | K02、K03 |
+| D2 context 同步 | 每次動作核對 revision；只使用有效決策與必要證據；不足則等待 | K04、K09 |
+| D3 互動隔離 | UI/helper 分程序；控制與資料流分開排隊；限制執行量 | K06、K12 |
+| D4 離線呈現 | 快取附同步時間，未 commit 輸入維持 pending；重連先補送與核對 | K06、K07 |
+| D5 首個閉環 | Pulse 只讀分析 A，加上等待裝置 B；不用真實寫入證明可靠性 | K05、K08、K09 |
+
+## 8. 官方依據與未證實項
+
+下列來源於 2026-10-30 查閱。它們支持介面或產品限制，不代表本案已通過實測。
+
+| 來源 | 本案用途 |
+|---|---|
+| [Axum WebSocket](https://docs.rs/axum/latest/axum/extract/ws/) | HTTP 升級與雙向流介面 |
+| [SQLx SQLite options](https://docs.rs/sqlx/latest/sqlx/sqlite/struct.SqliteConnectOptions.html) | 明確設定 WAL、同步及連線選項 |
+| [SQLite WAL](https://www.sqlite.org/wal.html) | 同機限制、單 writer 與 WAL-reset 修正 |
+| [SQLite backup](https://www.sqlite.org/backup.html) | 一致性線上備份 |
+| [iced Markdown](https://docs.rs/iced/latest/iced/widget/markdown/) | 格式文字、highlighting 與表格元件 |
+| [Tauri architecture](https://v2.tauri.app/concept/architecture/) | 比較 Rust core 與 WebView 路線 |
+| [Anthropic Messages](https://platform.claude.com/docs/en/api/messages/create) | 模型、工具提議及 usage 介面 |
+| [Anthropic streaming](https://platform.claude.com/docs/en/build-with-claude/streaming) | 增量訊息與中斷處理 |
+| [Sonnet 5.5](https://platform.claude.com/docs/en/models/sonnet-5-5/overview) | 首個模型 ID 及公開費率 |
+| [Model versioning](https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions) | model ID 與快照語意；服務行為仍需回歸測試 |
+| [Token counting](https://platform.claude.com/docs/en/build-with-claude/token-counting) | 計數是估算，不能冒充最終帳單 |
+
+尚未證實：依賴整合編譯、中文輸入與 rich UI、實機斷線恢復、模型帳號可用性、真實 API usage、完整 AW/provider 閉環、部署及效能。這些項目的 gate 見驗收文件。
