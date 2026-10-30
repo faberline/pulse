@@ -19,7 +19,8 @@ fi
 app="target/$profile/Pulse.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "target/$profile/pulse-desktop" "$app/Contents/MacOS/pulse-desktop"
-cp "target/$profile/pulse-device" "$app/Contents/MacOS/pulse-device"
+cp "target/$profile/pulse-executor" "$app/Contents/MacOS/pulse-executor"
+rm -f "$app/Contents/MacOS/pulse-device"
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -35,7 +36,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 </dict></plist>
 PLIST
-/usr/bin/codesign --force --sign - "$app/Contents/MacOS/pulse-device"
+/usr/bin/codesign --force --sign - "$app/Contents/MacOS/pulse-executor"
 /usr/bin/codesign --force --sign - "$app"
 /usr/bin/codesign --verify --deep --strict "$app"
 printf '%s\n' "$app"

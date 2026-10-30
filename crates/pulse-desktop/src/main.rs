@@ -1,20 +1,15 @@
 mod app;
 mod composer;
+mod connection;
 #[cfg(test)]
 use app::ConnectionForm;
 use app::{App, Message};
+use connection::ChatConnection;
 
 use iced::{
     Element, Subscription, Theme,
     widget::{self, column, container, markdown, row, scrollable, text},
 };
-use pulse_link::protocol::{NativeCommand, NativeState};
-use std::{
-    io::{BufRead, Write},
-    process::{Child, Command, Stdio},
-    sync::mpsc,
-};
-
 fn main() -> iced::Result {
     iced::application(
         || (App::new(), widget::operation::focus("pulse-chat")),
@@ -31,88 +26,6 @@ fn main() -> iced::Result {
         ])
     })
     .run()
-}
-struct Helper {
-    child: Child,
-    commands: mpsc::SyncSender<NativeCommand>,
-    states: mpsc::Receiver<NativeState>,
-}
-impl Drop for Helper {
-    fn drop(&mut self) {
-        let _ = self.commands.try_send(NativeCommand::Shutdown);
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-impl Helper {
-    fn start(args: &[String]) -> std::io::Result<Self> {
-        let path = std::env::current_exe()?.with_file_name("pulse-device");
-        let mut child = Command::new(path)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
-        let mut input = child
-            .stdin
-            .take()
-            .ok_or_else(|| std::io::Error::other("missing helper input"))?;
-        let output = child
-            .stdout
-            .take()
-            .ok_or_else(|| std::io::Error::other("missing helper output"))?;
-        let (commands, rx) = mpsc::sync_channel(32);
-        let (tx, states) = mpsc::sync_channel(8);
-        std::thread::spawn(move || {
-            while let Ok(command) = rx.recv() {
-                let Ok(mut bytes) = serde_json::to_vec(&command) else {
-                    break;
-                };
-                bytes.push(b'\n');
-                if input.write_all(&bytes).and_then(|_| input.flush()).is_err() {
-                    break;
-                }
-            }
-        });
-        std::thread::spawn(move || {
-            let mut reader = std::io::BufReader::new(output);
-            loop {
-                let mut bytes = Vec::new();
-                loop {
-                    let Ok(chunk) = reader.fill_buf() else {
-                        return;
-                    };
-                    if chunk.is_empty() {
-                        return;
-                    }
-                    let end = chunk
-                        .iter()
-                        .position(|b| *b == b'\n')
-                        .map(|n| n + 1)
-                        .unwrap_or(chunk.len());
-                    if bytes.len() + end > pulse_link::protocol::MAX_IPC {
-                        return;
-                    }
-                    bytes.extend_from_slice(&chunk[..end]);
-                    reader.consume(end);
-                    if bytes.ends_with(b"\n") {
-                        break;
-                    }
-                }
-                let Ok(state) = serde_json::from_slice::<NativeState>(&bytes) else {
-                    return;
-                };
-                if tx.send(state).is_err() {
-                    return;
-                }
-            }
-        });
-        Ok(Self {
-            child,
-            commands,
-            states,
-        })
-    }
 }
 enum RichBlock {
     Markdown(Vec<markdown::Item>),

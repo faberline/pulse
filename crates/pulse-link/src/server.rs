@@ -18,17 +18,27 @@ use std::sync::Arc;
 pub struct Hub {
     pub core: Store,
     db: SqlitePool,
+    changes: tokio::sync::watch::Sender<u64>,
 }
 impl Hub {
     pub fn new(core: Store) -> Self {
         let db = core.application_pool();
-        Self { core, db }
+        Self {
+            core,
+            db,
+            changes: tokio::sync::watch::channel(0).0,
+        }
     }
-    pub async fn pairing(&self, time: i64) -> Result<String> {
+    fn changed(&self) {
+        self.changes
+            .send_modify(|version| *version = version.wrapping_add(1));
+    }
+    pub async fn pairing(&self, role: ClientRole, time: i64) -> Result<String> {
         let code = secret()?;
-        sqlx::query("INSERT INTO link_pairings(digest,expires) VALUES(?,?)")
+        sqlx::query("INSERT INTO link_pairings(digest,expires,role) VALUES(?,?,?)")
             .bind(hash_bytes(code.as_bytes()))
             .bind(time + 600_000)
+            .bind(role.as_str())
             .execute(&self.db)
             .await?;
         Ok(code)
@@ -40,27 +50,44 @@ impl Hub {
         )?;
         let token = secret()?;
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
-        let active: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM link_device WHERE revoked=0")
-            .fetch_one(&mut *tx)
-            .await?;
+        let active: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM link_device WHERE revoked=0 AND role=?")
+                .bind(request.role.as_str())
+                .fetch_one(&mut *tx)
+                .await?;
         ensure(
             active == 0,
             "an active device already exists; operator revocation is required",
         )?;
-        let changed =
-            sqlx::query("UPDATE link_pairings SET used=1 WHERE digest=? AND used=0 AND expires>?")
-                .bind(hash_bytes(request.code.as_bytes()))
-                .bind(time)
-                .execute(&mut *tx)
-                .await?
-                .rows_affected();
+        let changed = sqlx::query(
+            "UPDATE link_pairings SET used=1 WHERE digest=? AND used=0 AND expires>? AND role=?",
+        )
+        .bind(hash_bytes(request.code.as_bytes()))
+        .bind(time)
+        .bind(request.role.as_str())
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
         ensure(changed == 1, "pairing expired, invalid or already used")?;
-        sqlx::query("INSERT INTO link_device(id,token_digest) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET token_digest=excluded.token_digest,revoked=0,epoch=epoch+1,lease_until=0")
-            .bind(&request.device).bind(hash_bytes(token.as_bytes())).execute(&mut *tx).await?;
+        // A stable client ID never changes roles, including after revocation.
+        let old_role: Option<String> =
+            sqlx::query_scalar("SELECT role FROM link_device WHERE id=?")
+                .bind(&request.device)
+                .fetch_optional(&mut *tx)
+                .await?;
+        ensure(
+            old_role
+                .as_deref()
+                .is_none_or(|role| role == request.role.as_str()),
+            "client role is immutable",
+        )?;
+        sqlx::query("INSERT INTO link_device(id,token_digest,role) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET token_digest=excluded.token_digest,revoked=0,epoch=epoch+1,lease_until=0")
+            .bind(&request.device).bind(hash_bytes(token.as_bytes())).bind(request.role.as_str()).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(Credential {
             device: request.device,
             token,
+            role: request.role,
         })
     }
     pub async fn authenticate(&self, token: &str) -> Result<String> {
@@ -76,7 +103,9 @@ impl Hub {
             .bind(device)
             .execute(&self.db)
             .await?;
-        self.unknown_reads(device, None).await
+        self.unknown_reads(device, None).await?;
+        self.changed();
+        Ok(())
     }
     async fn unknown_reads(&self, device: &str, epoch: Option<u64>) -> Result<()> {
         let rows=sqlx::query("SELECT id,task_id,task_revision FROM link_reads WHERE device=? AND state IN ('sent','accepted') AND (? IS NULL OR epoch=?)")
@@ -109,6 +138,7 @@ impl Hub {
         for device in devices {
             self.unknown_reads(&device, None).await?;
         }
+        self.changed();
         Ok(())
     }
     pub async fn end(&self, device: &str, epoch: u64) -> Result<()> {
@@ -120,6 +150,7 @@ impl Hub {
             .rows_affected();
         if changed == 1 {
             self.unknown_reads(device, Some(epoch)).await?;
+            self.changed();
         }
         Ok(())
     }
@@ -139,6 +170,7 @@ impl Hub {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        self.changed();
         Ok(epoch as u64)
     }
     pub async fn live(&self, device: &str, epoch: u64, time: i64) -> Result<bool> {
@@ -191,6 +223,16 @@ impl Hub {
         Ok(())
     }
     pub async fn snapshot(&self, device: &str, epoch: u64, time: i64) -> Result<()> {
+        let local = sqlx::query(
+            "SELECT lease_until,stopped FROM link_device WHERE role='local_executor' AND revoked=0",
+        )
+        .fetch_optional(&self.db)
+        .await?
+        .map(|row| LocalStatus {
+            connected: row.get::<i64, _>("lease_until") > time,
+            stopped: row.get::<i64, _>("stopped") != 0,
+        })
+        .unwrap_or_default();
         let mut tasks = self.core.list_tasks(20).await?;
         for task in &mut tasks {
             task.goal = short(&task.goal, 2048);
@@ -220,6 +262,7 @@ impl Hub {
             tasks,
             messages,
             synced_at: time,
+            local,
         };
         while serde_json::to_vec(&payload)?.len() > MAX_FRAME - 2048 {
             if let ServerPayload::Snapshot {
@@ -257,6 +300,11 @@ impl Hub {
             let task = self.core.task(task_id).await?;
             return Ok(number(&envelope.epoch)? == epoch
                 && self.live(&envelope.device, epoch, time).await?
+                && sqlx::query_scalar::<_, i64>("SELECT stopped FROM link_device WHERE id=?")
+                    .bind(&envelope.device)
+                    .fetch_one(&self.db)
+                    .await?
+                    == 0
                 && task.revision.to_string() == *revision
                 && !task.cancel_requested
                 && !task.state.terminal()
@@ -284,6 +332,19 @@ impl Hub {
     ) -> Result<()> {
         let (sequence, _) = envelope.validate()?;
         ensure(envelope.device == device, "wrong device")?;
+        let role: String =
+            sqlx::query_scalar("SELECT role FROM link_device WHERE id=? AND revoked=0")
+                .bind(device)
+                .fetch_one(&self.db)
+                .await?;
+        ensure(
+            matches!(
+                (&envelope.payload, role.as_str()),
+                (DevicePayload::Human { .. }, "chat")
+                    | (DevicePayload::Result { .. }, "local_executor")
+            ),
+            "client role cannot send this payload",
+        )?;
         {
             let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
             let row = sqlx::query("SELECT in_cursor FROM link_device WHERE id=? AND revoked=0")
@@ -373,6 +434,7 @@ impl Hub {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        self.changed();
         Ok(())
     }
     async fn apply(
@@ -410,7 +472,7 @@ impl Hub {
                     HumanAction::Read { task_id, .. } => vec![Command::Query {
                         ids: vec![task_id.clone()],
                     }],
-                    HumanAction::Status => vec![],
+                    HumanAction::Status | HumanAction::StopLocal { .. } => vec![],
                 };
                 let event = self
                     .core
@@ -461,15 +523,17 @@ impl Hub {
                                 && task.deadline > time,
                             "read authorization invalid",
                         )?;
-                        let epoch:i64=sqlx::query_scalar("SELECT epoch FROM link_device WHERE id=? AND revoked=0 AND lease_until>?").bind(device).bind(time).fetch_one(&self.db).await?;
                         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+                        let worker = sqlx::query("SELECT id,epoch FROM link_device WHERE role='local_executor' AND revoked=0 AND stopped=0 AND lease_until>?").bind(time).fetch_optional(&mut *tx).await?.ok_or_else(||crate::Error::Rejected("local executor unavailable".into()))?;
+                        let worker_id: String = worker.get("id");
+                        let epoch: i64 = worker.get("epoch");
                         let existing: i64 =
                             sqlx::query_scalar("SELECT COUNT(*) FROM link_reads WHERE id=?")
                                 .bind(&id)
                                 .fetch_one(&mut *tx)
                                 .await?;
                         if existing == 0 {
-                            let pending:i64=sqlx::query_scalar("SELECT COUNT(*) FROM link_reads WHERE device=? AND state IN ('sent','accepted','unknown')").bind(device).fetch_one(&mut *tx).await?;
+                            let pending:i64=sqlx::query_scalar("SELECT COUNT(*) FROM link_reads WHERE device=? AND state IN ('sent','accepted','unknown')").bind(&worker_id).fetch_one(&mut *tx).await?;
                             ensure(pending == 0, "device worker already has unresolved work")?;
                             Store::authorize_device_read(
                                 &mut tx,
@@ -481,7 +545,7 @@ impl Hub {
                             .await?;
                             sqlx::query("INSERT INTO link_reads VALUES(?,?,?,?,?,?, 'sent',NULL)")
                                 .bind(&id)
-                                .bind(device)
+                                .bind(&worker_id)
                                 .bind(epoch)
                                 .bind(task_id)
                                 .bind(revision)
@@ -490,7 +554,7 @@ impl Hub {
                                 .await?;
                             Self::enqueue(
                                 &mut tx,
-                                device,
+                                &worker_id,
                                 epoch as u64,
                                 ServerPayload::Read {
                                     operation_id: id,
@@ -506,6 +570,18 @@ impl Hub {
                     HumanAction::Cancel { .. } => {
                         self.chat(source_id, "取消要求已保存；結果未知的工作仍需核對。", time)
                             .await?
+                    }
+                    HumanAction::StopLocal { stopped } => {
+                        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+                        let worker = sqlx::query("UPDATE link_device SET stopped=? WHERE role='local_executor' AND revoked=0 RETURNING id,epoch").bind(*stopped).fetch_optional(&mut *tx).await?.ok_or_else(||crate::Error::Rejected("local executor is not paired".into()))?;
+                        Self::enqueue(
+                            &mut tx,
+                            &worker.get::<String, _>("id"),
+                            worker.get::<i64, _>("epoch") as u64,
+                            ServerPayload::SetStopped { stopped: *stopped },
+                        )
+                        .await?;
+                        tx.commit().await?;
                     }
                     HumanAction::Status => {}
                 }
@@ -651,6 +727,7 @@ async fn upgrade(
 }
 async fn session(hub: Arc<Hub>, device: String, mut socket: WebSocket) {
     let mut session_epoch = None;
+    let mut changes = hub.changes.subscribe();
     let result=async {
         let first=tokio::time::timeout(std::time::Duration::from_secs(10),socket.recv()).await.map_err(|_|crate::Error::Rejected("hello timeout".into()))?.ok_or_else(||crate::Error::Rejected("no hello".into()))?.map_err(|_|crate::Error::Rejected("invalid socket".into()))?;
         let Message::Text(text)=first else{return Err(crate::Error::Rejected("hello required".into()));};
@@ -660,6 +737,11 @@ async fn session(hub: Arc<Hub>, device: String, mut socket: WebSocket) {
         hub.snapshot(&device,epoch,now()).await?;
         let mut ticker=tokio::time::interval(std::time::Duration::from_millis(150));
         loop {tokio::select! {
+            result=changes.changed()=>{
+                result.map_err(|_|crate::Error::Rejected("server stopped".into()))?;
+                let role:String=sqlx::query_scalar("SELECT role FROM link_device WHERE id=?").bind(&device).fetch_one(&hub.db).await?;
+                if role == "chat" {hub.snapshot(&device,epoch,now()).await?;}
+            }
             _=ticker.tick()=>{
                 ensure(hub.live(&device,epoch,now()).await?,"revoked, expired or superseded connection")?;
                 for envelope in hub.outgoing(&device).await? {let permitted=hub.permitted(&envelope,epoch,now()).await?;send(&mut socket,&ServerWire::Data{envelope:Box::new(envelope),permitted}).await?;}

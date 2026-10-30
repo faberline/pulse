@@ -2,6 +2,7 @@ use pulse_link::{
     Result,
     journal::private_write,
     now,
+    protocol::ClientRole,
     server::{Hub, router},
 };
 use std::path::PathBuf;
@@ -20,7 +21,7 @@ async fn run() -> Result<()> {
     let mode = args.next().unwrap_or_default();
     let database = PathBuf::from(args.next().ok_or_else(|| {
         pulse_link::Error::Rejected(
-            "use pulse-server serve|pair|revoke PRIVATE_DB [PORT|PRIVATE_CODE_FILE|DEVICE_ID]"
+            "use pulse-server serve|pair-chat|pair-local|revoke PRIVATE_DB [PORT|PRIVATE_CODE_FILE|DEVICE_ID]"
                 .into(),
         )
     })?);
@@ -65,11 +66,16 @@ async fn run() -> Result<()> {
                 })
                 .await?;
         }
-        "pair" => {
+        "pair-chat" | "pair-local" => {
             let file = value.ok_or_else(|| {
                 pulse_link::Error::Rejected("private output file is required".into())
             })?;
-            let code = hub.pairing(now()).await?;
+            let role = if mode == "pair-chat" {
+                ClientRole::Chat
+            } else {
+                ClientRole::LocalExecutor
+            };
+            let code = hub.pairing(role, now()).await?;
             private_write(std::path::Path::new(&file), code.as_bytes())?;
             eprintln!(
                 "One-use pairing code saved to the requested private file. It expires in ten minutes."

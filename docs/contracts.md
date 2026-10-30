@@ -80,7 +80,7 @@ DB commit 前 crash，來源可重送。commit 後回覆遺失，重送取得原
 | repo.git_status | repo_id | 固定格式的狀態、實際 HEAD 或 unborn 標示 |
 | repo.git_diff | repo_id、明確 base/target 或 working-tree 選項 | 有界 diff、HEAD/來源版本與截斷標記 |
 
-helper 解析路徑並在開檔時檢查實際檔案與允許根目錄。拒絕 traversal、symlink 越界與讀取競態；不能只用字串 prefix 判斷。首版拒絕 symlink 檔案。允許的普通文字為 Markdown、Rust、TOML、JSON、YAML 與純文字；私密路徑拒絕規則優先。其他格式先等待明確擴充。
+local executor 解析路徑並在開檔時檢查實際檔案與允許根目錄。拒絕 traversal、symlink 越界與讀取競態；不能只用字串 prefix 判斷。首版拒絕 symlink 檔案。允許的普通文字為 Markdown、Rust、TOML、JSON、YAML 與純文字；私密路徑拒絕規則優先。其他格式先等待明確擴充。
 
 拒絕 `.env*`、`.git/**` 的直接讀取、`.aws/**`、`.ssh/**`、`.codex/**`、`.agents/**`、憑證/金鑰檔、忽略檔、build/dependency 目錄與其他 repo。內容去敏是第二道檢查，不能保證辨識所有 secrets。Git 子命令可內部讀自身 metadata，但不回傳原始私密 config，並停用 hooks、fsmonitor、外部 diff/textconv、pager 與互動認證。不得接收任意 command 字串或外部 fetch。
 
@@ -105,13 +105,13 @@ v0.5 以前，真實寫入 adapter 不存在或停用。v0.5 必測模擬寫入�
 
 HTTP 回應區分 accepted、duplicate、conflict、rejected 與 temporarily_unavailable。相同 key 不同內容、revision 衝突或不相容協定不能自動重試。原事件已接受但後續任務 blocked，仍回覆真實的原 receipt。
 
-WSS 與私有 stdio 都使用單行 JSON envelope：`schema_version / kind / message_id / device_id / sequence / task_id? / run_id? / task_revision? / epoch? / payload / payload_digest`。ACK 使用獨立 kind，引用被確認的 message ID 與連續 cursor。ACK、heartbeat 不再要求對端 ACK，避免確認迴圈。
+對話框與 local executor 各自使用 WSS JSON envelope：`schema_version / kind / message_id / device_id / sequence / task_id? / run_id? / task_revision? / epoch? / payload / payload_digest`。ACK 使用獨立 kind，引用被確認的 message ID 與連續 cursor。ACK、heartbeat 不再要求對端 ACK，避免確認迴圈。
 
 payload digest 為 SHA-256，輸入是按 [RFC 8785 JCS](https://www.rfc-editor.org/rfc/rfc8785) 正規化後的 payload。重複 JSON keys、非有限數字與不相容型別直接拒絕。operation intent digest 另包含 task/revision、operation、target、內容與授權綁定，不只 hash 顯示文字。
 
 每方向 sequence 都在本地交易中配置。只 ACK 已連續 commit 的資料。發現缺序時要求從 cursor 補送，不越過缺口派送效果操作；同 ID/sequence 不同內容隔離並告警。重送保持原 message ID、sequence 與 digest。傳輸重送不產生新 operation ID。
 
-UI/helper 使用相同 envelope 型別，但只透過繼承的 pipes 傳送。UI 顯示 `pending_local / accepted_cloud / cached_offline`，不能把 helper 收件當作雲端收件。控制與資料使用分開的有界邏輯 queue；傳送端優先控制，且每次寫入有界，不能在巨大 frame 後無限等待取消。
+UI 與 local executor 分別連 server，各自保存 journal 與 credential。UI 不代理工具連線，不負責 executor 的程序生命週期。UI 顯示 `pending_local / accepted_cloud / cached_offline`，不能把本機保存當作雲端收件。控制與資料使用分開的有界邏輯 queue；傳送端優先控制，且每次寫入有界，不能在巨大 frame 後無限等待取消。
 
 ## K07：commit、outbox、重連與容量
 
@@ -124,7 +124,7 @@ UI/helper 使用相同 envelope 型別，但只透過繼承的 pipes 傳送。UI
 | 單一 JSON frame/HTTP event | 最多 256 KiB；更大輸入拒絕並提示分段 |
 | 單次 read_text/diff 結果 | 最多 64 KiB；須標示截斷，不能假稱完整 |
 | 地端未確認 outbox | 最多 1,000 筆或 64 MiB，以先達者為準 |
-| helper 工具輸出暫存 | 最多 1 MiB/操作；達限即截斷或停止，不吃滿記憶體 |
+| local executor 工具輸出暫存 | 最多 1 MiB/操作；達限即截斷或停止，不吃滿記憶體 |
 | 雲端待處理任務 | 最多 100 個；滿載拒絕建立新工作，控制現有任務仍可用 |
 | 重連/傳送退避 | full jitter，基準 1 秒，最大 60 秒；每組最多 8 次後 cooldown 5 分鐘 |
 
@@ -138,7 +138,7 @@ UI/helper 使用相同 envelope 型別，但只透過繼承的 pipes 傳送。UI
 
 fencing 只可阻止接受新指令或寫入新狀態，不能撤回已送出的外部 request。若已派送後失聯，保存 outcome_unknown。未確認原操作停止前，不將同一效果派給新 worker。
 
-收到取消或撤銷時，先保存事件並阻止新動作。helper 嘗試停止目前操作，回報實際結果；無法證明停止時不可標 cancelled。已完成的操作不會因取消而消失。離線撤銷最晚要等裝置重連或本機 lease 失效，不能宣稱立即控制離線程序。
+收到取消或撤銷時，先保存事件並阻止新動作。local executor 嘗試停止目前操作，回報實際結果；無法證明停止時不可標 cancelled。已完成的操作不會因取消而消失。離線撤銷最晚要等裝置重連或本機 lease 失效，不能宣稱立即控制離線程序。
 
 未來 write adapter 必須提供 intent、冪等鍵、receipt 與結果查詢方式。核對證明已做就保存結果；證明未做且授權仍有效才可新嘗試；零個或多個不明候選保持 blocked。即使 adapter 宣稱冪等，仍核對目標、內容及實際結果。沒有查詢/核對契約的 adapter 停用。
 
@@ -191,17 +191,15 @@ UI 使用同一對話 timeline，呈現涉及任務、最後進展、證據、�
 
 格式文字、程式碼、表格、圖片及成果連結正常呈現。HTML/script 不執行。圖片僅顯示經驗證的 Pulse artifact 或使用者已選的本機來源；不自動讀任意 file URL 或載入追蹤遠端圖片。外部連結須人類點擊，拒絕 javascript/custom execution schemes。
 
-background output 可合併，批准、取消、最終結果及同步狀態不可被丟棄。helper 錯誤顯示為執行器不可用，不當作任務成功。helper crash 後 UI 保留快取與輸入能力，重啟 helper 後依 K07 恢復。
+background output 可合併，批准、取消、最終結果及同步狀態不可被丟棄。local executor 錯誤顯示為執行器不可用，不當作任務成功。local executor crash 後 UI 保留快取與輸入能力，重啟 local executor 後依 K07 恢復。關閉 UI 不會關閉 executor。
 
 桌面只在雲端 commit 後顯示已接受。完全離線時可保存有界 pending input；不得代雲端批准、執行新動作或聲稱看到即時雲端狀態。
 
-## K13：AW 邊界
+## K13：Pulse 執行系統邊界
 
-AW 接入使用公開 CLI/MCP。每個 Pulse 執行中的 AW session 使用自己的 admission 身份與 scope。需要協作時讀 inbox、按穩定 session ID 發送、使用穩定 task_id；不能接管其他 session 的私有檔案。
+remote executor 由 Pulse 自行實作，不使用 AW runtime、mailbox、admission 或 skills 系統。沿用 `pulse-core` 的任務、run token、checkpoint、重試與取消。faberline/core 只在能減少重複程式時使用。
 
-本版可讀取符合 scope 的知識、skills 與公開工具契約。第三方 instruction 保留為資料，不能提升成 Pulse policy。寫 mailbox、handoff 或其他協作動作仍需在原任務授權內，不因能呼叫工具就自動授權。
-
-AW forwarded 只代表傳輸接受，acknowledged 只代表對方讀取，不能使 Pulse task succeeded。advisory worktree claim 不等於 sandbox。雲端不得直接暴露本機 AW endpoint、私有 mailbox 或私有 DB。
+server 決定授權與派工。executor 只執行已核對的工作。工具與模型回覆保持資料來源，不得轉成人類批准。收件、進度或工具結果都不代表任務目標已完成。
 
 ## K14：證據、通知與健康
 
@@ -235,3 +233,13 @@ AW forwarded 只代表傳輸接受，acknowledged 只代表對方讀取，不能
 | 未知相容性或 provider 能力 | blocked，不繞過限制 |
 
 只有證據支持任務目標已達成，才可標 succeeded。收件、工具文字、傳送成功或模型說「完成」均不足以單獨成立。本文規定的行為要在 [驗收矩陣](acceptance.md) 對應的實作階段證明。
+
+## K16：remote / local executor 邊界
+
+server 保存任務、批准、修訂與結果。對話框只接收人類輸入並顯示同步資料。executor 不擁有人類授權。
+
+local executor 是一個獨立 process。它使用本機啟動參數選定工具範圍，並主動連 server。server 不能改寫此範圍。
+
+remote executor 是 Pulse 自己的系統。它沿用既有任務 ID、run token 與 operation ID，不另加外部工作系統或 DB。它不要求 VM、SSH 或 PID。收件只表示收件；取消要求也不表示已停止。無法核對的結果保持 unknown。
+
+server 派工前仍須檢查來源、scope、revision、批准、deadline 與預算。工具回覆只提供證據，不能轉為 Human 來源。v0.4 須接上模型與工具迴圈；只有現有持久任務核心不能通過閉環驗收。

@@ -11,6 +11,7 @@ pub struct Journal {
     pub(crate) db: SqlitePool,
     pub device: String,
     pub server: String,
+    pub role: ClientRole,
 }
 pub struct DeviceLock(File);
 impl Drop for DeviceLock {
@@ -73,6 +74,14 @@ pub fn private_read(path: &Path) -> Result<String> {
 
 impl Journal {
     pub async fn open(dir: &Path, server: &str, repo: &Path) -> Result<(Self, DeviceLock)> {
+        Self::open_role(dir, server, repo, ClientRole::LocalExecutor).await
+    }
+    pub async fn open_role(
+        dir: &Path,
+        server: &str,
+        repo: &Path,
+        role: ClientRole,
+    ) -> Result<(Self, DeviceLock)> {
         use std::os::unix::fs::OpenOptionsExt;
         private_dir(dir)?;
         let lock = OpenOptions::new()
@@ -94,6 +103,18 @@ CREATE TABLE IF NOT EXISTS local_inbox(sequence INTEGER PRIMARY KEY,id TEXT NOT 
 CREATE TABLE IF NOT EXISTS local_work(id TEXT PRIMARY KEY,envelope TEXT NOT NULL,state TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,accepted INTEGER NOT NULL DEFAULT 0);").execute(&db).await?;
         let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+        let existing: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM local_meta WHERE key='device'")
+                .fetch_one(&mut *tx)
+                .await?;
+        sqlx::query("INSERT OR IGNORE INTO local_meta VALUES('role',?)")
+            .bind(if existing == 0 {
+                role.as_str()
+            } else {
+                "local_executor"
+            })
+            .execute(&mut *tx)
+            .await?;
         let device = uuid::Uuid::new_v4().to_string();
         for (key, value) in [
             ("device", device.as_str()),
@@ -113,7 +134,11 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                 .execute(&mut *tx)
                 .await?;
         }
-        for (key, expected) in [("server", server), ("repo", repo.to_str().unwrap_or(""))] {
+        for (key, expected) in [
+            ("server", server),
+            ("repo", repo.to_str().unwrap_or("")),
+            ("role", role.as_str()),
+        ] {
             let actual: String = sqlx::query_scalar("SELECT value FROM local_meta WHERE key=?")
                 .bind(key)
                 .fetch_one(&mut *tx)
@@ -132,6 +157,7 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                 db,
                 device,
                 server: server.into(),
+                role,
             },
             DeviceLock(lock),
         ))
@@ -292,15 +318,28 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         }
         ensure(sequence == cursor + 1, "server sequence gap")?;
         match &envelope.payload {
+            ServerPayload::SetStopped { stopped } => {
+                ensure(
+                    self.role == ClientRole::LocalExecutor,
+                    "chat cannot receive worker control",
+                )?;
+                sqlx::query("UPDATE local_meta SET value=? WHERE key='stopped'")
+                    .bind(stopped.to_string())
+                    .execute(&mut *tx)
+                    .await?;
+            }
             ServerPayload::Snapshot {
                 tasks,
                 messages,
                 synced_at,
+                local,
             } => {
                 let state = NativeState {
                     tasks: tasks.clone(),
                     messages: messages.clone(),
                     synced_at: Some(*synced_at),
+                    stopped: local.stopped,
+                    local_connected: local.connected,
                     ..Default::default()
                 };
                 sqlx::query("INSERT INTO local_meta VALUES('cache',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(serde_json::to_string(&state)?).execute(&mut *tx).await?;
@@ -317,6 +356,10 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                 revision,
                 ..
             } => {
+                ensure(
+                    self.role == ClientRole::LocalExecutor,
+                    "chat cannot accept local work",
+                )?;
                 let count: i64 = sqlx::query_scalar(
                     "SELECT COUNT(*) FROM local_work WHERE state IN ('accepted','running')",
                 )
@@ -487,7 +530,9 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
             });
         }
         state.pending = self.pending().await?;
-        state.stopped = self.stopped().await?;
+        if self.role == ClientRole::LocalExecutor {
+            state.stopped = self.stopped().await?;
+        }
         Ok(state)
     }
 }

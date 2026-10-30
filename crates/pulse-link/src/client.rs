@@ -23,10 +23,16 @@ pub struct Config {
 }
 impl Config {
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self> {
+        Self::parse_for(args, ClientRole::LocalExecutor)
+    }
+    pub fn parse_chat(args: impl IntoIterator<Item = String>) -> Result<Self> {
+        Self::parse_for(args, ClientRole::Chat)
+    }
+    fn parse_for(args: impl IntoIterator<Item = String>, role: ClientRole) -> Result<Self> {
         let mut args = args.into_iter();
         let mut server = None;
         let mut repo = None;
-        let mut data_dir = default_data_dir();
+        let mut data_dir = default_data_dir().join(role.as_str());
         let mut dev = false;
         while let Some(arg) = args.next() {
             match arg.as_str(){
@@ -38,11 +44,17 @@ impl Config {
             &server.ok_or_else(|| crate::Error::Rejected("server origin is required".into()))?,
             dev,
         )?;
-        let repo = Executor::new(
-            &repo.ok_or_else(|| crate::Error::Rejected("repository root is required".into()))?,
-        )?
-        .root()
-        .to_path_buf();
+        let repo = if role == ClientRole::Chat {
+            ensure(repo.is_none(), "chat has no repository or local executor")?;
+            PathBuf::new()
+        } else {
+            Executor::new(
+                &repo
+                    .ok_or_else(|| crate::Error::Rejected("repository root is required".into()))?,
+            )?
+            .root()
+            .to_path_buf()
+        };
         Ok(Self {
             server,
             repo,
@@ -133,16 +145,31 @@ pub struct Device {
     config: Config,
     journal: Journal,
     _lock: DeviceLock,
-    executor: Executor,
+    executor: Option<Executor>,
     vault: Arc<dyn Vault>,
     account: String,
 }
 impl Device {
     pub async fn open(config: Config, vault: Arc<dyn Vault>) -> Result<Self> {
-        let executor = Executor::new(&config.repo)?;
+        Self::open_role(config, vault, ClientRole::LocalExecutor).await
+    }
+    pub async fn open_chat(config: Config, vault: Arc<dyn Vault>) -> Result<Self> {
+        ensure(
+            config.repo.as_os_str().is_empty(),
+            "chat cannot select a repository",
+        )?;
+        Self::open_role(config, vault, ClientRole::Chat).await
+    }
+    async fn open_role(config: Config, vault: Arc<dyn Vault>, role: ClientRole) -> Result<Self> {
+        let executor = if role == ClientRole::LocalExecutor {
+            Some(Executor::new(&config.repo)?)
+        } else {
+            None
+        };
         let (journal, lock) =
-            Journal::open(&config.data_dir, config.server.as_str(), executor.root()).await?;
-        let account = hash(&(config.server.as_str(), &journal.device))?;
+            Journal::open_role(&config.data_dir, config.server.as_str(), &config.repo, role)
+                .await?;
+        let account = hash(&(config.server.as_str(), &journal.device, role))?;
         journal.recover().await?;
         Ok(Self {
             config,
@@ -165,7 +192,9 @@ impl Device {
             .map_err(|_| crate::Error::Rejected("Keychain worker failed".into()))??;
         if let Some(value) = &credential {
             ensure(
-                value.device == self.journal.device && value.token.len() == 64,
+                value.device == self.journal.device
+                    && value.token.len() == 64
+                    && value.role == self.journal.role,
                 "Keychain identity mismatch",
             )?;
         }
@@ -180,7 +209,15 @@ impl Device {
                 link_tx.clone(),
             ))
         });
-        let mut worker = tokio::spawn(work(self.journal.clone(), self.executor.clone(), lease_rx));
+        let journal = self.journal.clone();
+        let executor = self.executor.clone();
+        let mut worker = tokio::spawn(async move {
+            if let Some(executor) = executor {
+                work(journal, executor, lease_rx).await
+            } else {
+                std::future::pending::<Result<()>>().await
+            }
+        });
         let mut ticker = tokio::time::interval(Duration::from_millis(250));
         let mut message = "配對後可連線。模型尚未接入。".to_string();
         let mut pairing: Option<tokio::task::JoinHandle<Result<Credential>>> = None;
@@ -205,17 +242,26 @@ impl Device {
             command=commands.recv()=>{
                 match command {
                     None|Some(NativeCommand::Shutdown)=>break,
-                    Some(NativeCommand::KillSwitch{stopped})=>{self.journal.stop(stopped).await?;message=if stopped{"本機工具已停止。"}else{"本機只讀工具已啟用。"}.into();}
+                    Some(NativeCommand::KillSwitch{stopped})=>{
+                        if self.journal.role == ClientRole::Chat {
+                            self.journal.action(&uuid::Uuid::new_v4().to_string(), HumanAction::StopLocal{stopped}).await?;
+                            message="本機工具控制已排隊。等待 server 確認。".into();
+                        } else {
+                            self.journal.stop(stopped).await?;
+                            message=if stopped{"本機工具已停止。"}else{"本機只讀工具已啟用。"}.into();
+                        }
+                    }
                     Some(NativeCommand::Action{source_id,action})=>{
+                        if self.journal.role != ClientRole::Chat {message="executor 不接受人類輸入。請使用對話框。".into();continue;}
                         match self.journal.action(&source_id,action).await {Ok(())=>message="已存入本機待送佇列。".into(),Err(crate::Error::Rejected(_)|crate::Error::Capacity)=>message="要求未保存：內容或佇列已超過限制。".into(),Err(e)=>return Err(e)}
                     }
                     Some(NativeCommand::Pair{code})=>{
                         if pairing.is_some(){message="配對仍在進行。".into();continue;}
-                        let request=PairRequest{device:self.journal.device.clone(),code};
+                        let request=PairRequest{device:self.journal.device.clone(),code,role:self.journal.role};
                         let config=self.config.clone();let vault=self.vault.clone();let account=self.account.clone();
                         pairing=Some(tokio::spawn(async move {
                             let value=redeem(&config,&request).await?;
-                            ensure(value.device==request.device&&value.token.len()==64,"pair response identity")?;
+                            ensure(value.device==request.device&&value.token.len()==64&&value.role==request.role,"pair response identity")?;
                             let copy=value.clone();tokio::task::spawn_blocking(move||vault.save(&account,&copy)).await.map_err(|_|crate::Error::Rejected("Keychain worker failed".into()))??;
                             Ok(value)
                         }));message="正在配對。本機停止工具仍可用。".into();

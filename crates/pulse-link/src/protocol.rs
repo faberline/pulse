@@ -8,6 +8,29 @@ pub const MAX_IPC: usize = 1024 * 1024;
 pub const MAX_RESULT: usize = 32 * 1024;
 pub const LEASE_MS: i64 = 60_000;
 
+/// The server binds this role when it creates a one-use pairing code.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientRole {
+    Chat,
+    LocalExecutor,
+}
+impl ClientRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::LocalExecutor => "local_executor",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalStatus {
+    pub connected: bool,
+    pub stopped: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReadOp {
@@ -34,6 +57,9 @@ pub enum HumanAction {
         operation: ReadOp,
     },
     Status,
+    StopLocal {
+        stopped: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -153,6 +179,10 @@ pub enum ServerPayload {
         tasks: Vec<pulse_core::Task>,
         messages: Vec<ChatMessage>,
         synced_at: i64,
+        local: LocalStatus,
+    },
+    SetStopped {
+        stopped: bool,
     },
     Read {
         operation_id: String,
@@ -216,12 +246,14 @@ pub enum ServerWire {
 pub struct PairRequest {
     pub code: String,
     pub device: String,
+    pub role: ClientRole,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Credential {
     pub device: String,
     pub token: String,
+    pub role: ClientRole,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -245,6 +277,8 @@ pub struct NativeState {
     pub server: String,
     pub connected: bool,
     pub stopped: bool,
+    #[serde(default)]
+    pub local_connected: bool,
     pub paired: bool,
     pub message: String,
     pub pending: usize,

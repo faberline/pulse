@@ -26,6 +26,18 @@ fn picture_shortcut_does_not_insert_a_letter_into_the_draft() {
     ));
 }
 #[test]
+fn quit_shortcut_exits_instead_of_inserting_into_the_draft() {
+    let press = key_press(
+        iced::keyboard::Key::Character("q".into()),
+        iced::keyboard::key::Code::KeyQ,
+        iced::keyboard::Modifiers::COMMAND,
+    );
+    assert!(matches!(
+        editor_key_binding(press),
+        Some(text_editor::Binding::Custom(Message::Quit))
+    ));
+}
+#[test]
 fn enter_keeps_newlines_and_command_enter_sends_only_when_focused() {
     use iced::keyboard::{
         Key, Modifiers,

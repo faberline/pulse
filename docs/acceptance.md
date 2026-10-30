@@ -52,7 +52,7 @@ R01–R16 對應原 milestone「支援以上情境的可靠性與邊界檢查」
 | R10 | 人類控制不受背景阻塞，取消未知不誤報停止，量測延遲 | K03、K06、K08、K12 | v0.3、v0.5、v0.6 | T07、T10 |
 | R11 | 拒絕、到期、digest/scope、錯裝置、撤銷、注入及離線限制 | K05、K08、K12、K13 | v0.3、v0.4、v0.5 | T08 |
 | R12 | 有界 loop、費用/時間耗盡留進度、provider down/429 有限重試 | K09、K10 | v0.2、v0.4、v0.5 | T09、T13 |
-| R13 | 真實 provider/AW/桌面 smoke，fixture 與實機、forward/ack 與成果分開 | K09、K13、K16 | v0.4 | T14 |
+| R13 | 真實 provider/Pulse remote/桌面 smoke，fixture 與實機、收件與成果分開 | K09、K13、K16 | v0.4 | T14 |
 | R14 | 雲地重啟、網路、lease、provider、取消/撤銷、批准及備份故障矩陣/soak | K07–K11、K15 | v0.2–v0.6 | T03、T05–T08、T13、T15、T16、T18 |
 | R15 | 終態證據、可恢復通知、不洩密與無模型健康查詢 | K14–K16 | v0.2、v0.5、v0.6 | T17、T19 |
 | R16 | 當前候選的 deterministic CI/tests/coverage；依角色工作，不以別人自報代驗收 | K11、K16 | v0.2–v0.6 | T20 |
@@ -96,11 +96,11 @@ N01–N07 對應原「第一版必要行為」。它們不是額外增加的產�
 | T07 未知/取消 | 效果前後 crash；lease 到期；新 epoch；取消/完成競態 | 模擬效果計數不增加；先核對未知；取消不冒充已停止；晚到不倒退 |
 | T08 權限 | 錯 device/task/digest、scope 改變、拒絕/到期、注入、越界、撤銷、惡意 rich content | 無未授權效果；本機 kill switch 有效；離線撤銷限制如實呈現 |
 | T09 loop/預算 | idle/等待；模型/工具/時間上限；兩任務同時預留；跨日/重啟/未知費用 | idle 模型請求為零；上限不因重啟重置；預留原子化；未知額度不釋放 |
-| T10 UI/control | 長輸出、10 筆突發事件、重播、helper crash；輸入/捲動/status/取消 | 控制不淹沒；UI 可用；不假報停止；延遲符合本節測量目標 |
+| T10 UI/control | 長輸出、10 筆突發事件、重播、local executor crash；輸入/捲動/status/取消 | 控制不淹沒；UI 可用；不假報停止；延遲符合本節測量目標 |
 | T11 rich content | 中文輸入、文字、code、table、image、artifact link、惡意 URL/HTML | 正常呈現；不能執行 script/命令；圖片不越權或自動外送 |
 | T12 容量/排程 | outbox 接近/超限、磁碟滿、queue 滿、重複 timer、輸出風暴 | 預留結果空間；停領新工作；不丟 receipts；授權排程不重複開工 |
 | T13 provider | 429/retry-after、5xx、延遲、斷流、拒絕、未知 stop reason、partial tool JSON | 有限請求；費用計入；未完整提議不執行；必要時 blocked |
-| T14 真實閉環 | 真實桌面、Anthropic、AW 公開 seam，完成 A/B 情境 | 有 repo/HEAD/artifact/限制；forward/ack 不作成功；不靠 fixture 冒充 |
+| T14 真實閉環 | 真實桌面、Anthropic、Pulse 自有 remote executor，完成 A/B 情境 | 有 repo/HEAD/artifact/限制；收件不作成功；不靠 fixture 冒充 |
 | T15 升級/rollback | 相容/不相容 schema、prompt/tool manifest 缺失、舊 run、舊 DB | 不靜默換版本；不重做效果；不相容明確停止或走驗證過的遷移 |
 | T16 備份/刪除 | 在線備份、還原、缺 WAL、不完整 snapshot、已刪資料/撤銷身份 | 可驗一致性；拒絕壞快照；套用刪除/撤銷；不能復活授權或已刪正文 |
 | T17 證據 | 成功/失敗/取消/unknown；trace 跨雲地/工具；刻意缺檢查 | 每終態原因可查；成功有適用證據；unrun 不變 passed；不洩 secrets |
@@ -149,7 +149,7 @@ Codex 負責規劃與獨立接受。開發依 issue 走 AGY 生命週期；Claud
 | 本次文件靜態檢查 | Python 標準庫一次性檢查通過：4 份文件的 UTF-8/換行、尾端空白、fences、全部相對連結；C01–C09、R01–R16、N01–N07、Q1–Q5、T01–T20、K01–K16、U01–U08、A01–A09、D1–D5 的唯一性/完整性及 gate blocker；不是產品測試 |
 | Anthropic 環境 | 2026-10-30 檢查 ANTHROPIC_API_KEY presence=false；G04 unrun；無付費模型請求 |
 | Cargo tests / coverage | unrun / not applicable，尚無 Cargo workspace 或產品程式 |
-| UI/transport/provider/AW 產品閉環 | unrun；本次 AW 協作登記不是 Pulse 的 T14 證據 |
+| UI/transport/provider/remote 產品閉環 | unrun；本次 AW 協作登記不是 Pulse 的 T14 證據 |
 | 故障矩陣、效能、8 小時 soak、部署 | unrun，須後續產品實作與當前候選環境 |
 
 G04 未完成時，issue #3 與 milestone v0.1 保持開啟。#1/#2 文件工作可報提交完成，但 `agy:done` 仍不代表獨立接受。不要勾選 G05 或宣稱已完成首版。
@@ -159,8 +159,8 @@ G04 未完成時，issue #3 與 milestone v0.1 保持開啟。#1/#2 文件工作
 | 階段 | 下一批有界實作責任 | 前置條件 |
 |---|---|---|
 | v0.2 | source ingest/dedupe；task/revision/context 投影；queue/checkpoint；version/budget/outbox 與替身故障 | v0.1 契約接受；各 issue 指定 Kxx、Txx |
-| v0.3 | iced UI/helper IPC；device 配對/WSS；ACK/outbox/lease；只讀工具與實機恢復 | v0.2 相應契約/核心證據；不可等 v0.5 才加 policy |
-| v0.4 | Anthropic adapter/context；AW 公開 seam；Pulse A/B 真實只讀閉環 | G04、v0.2 核心與 v0.3 桌面路徑 |
+| v0.3 | iced 對話框與獨立 local process；角色配對/WSS；ACK/outbox/lease；只讀工具與實機恢復 | v0.2 相應契約/核心證據；不可等 v0.5 才加 policy |
+| v0.4 | Anthropic adapter/context；Pulse 自有 remote executor；A/B 真實只讀閉環 | G04、v0.2 核心與 v0.3 桌面路徑 |
 | v0.5 | 完整批准/取消/撤銷；模擬效果核對；授權 schedule；預算/通知 | v0.4 已通；真實效果仍須明確另授權 |
 | v0.6 | current-head 全矩陣、版本/備份/刪除、效能/soak 與可交付證據 | 前階段適用實作與證據，無未解必要 blocker |
 

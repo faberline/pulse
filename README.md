@@ -1,14 +1,16 @@
 # Pulse
 
-Pulse 是單人使用的事件驅動助理。雲端保存任務狀態。Rust 桌面 app 提供同一對話、地端連線與受限工具。
+Pulse 是單人使用的事件驅動助理。它有三個元件：server、對話框、executor。executor 分成 remote 系統與 local process。
 
 ## 目前狀態
 
-目前提供 v0.2 任務核心，以及 v0.3 Rust 桌面與地端連線候選。桌面使用 iced。helper 提供配對、可靠重送與受限只讀工具。Axum 服務保存任務與裝置資料。
+目前提供 v0.2 任務核心，以及 v0.3 Rust 桌面與地端連線候選。server 保存任務與對話。iced 對話框直接連 server。`pulse-executor` 是獨立的 local process，也直接連 server。關閉對話框不會關閉 executor。
+
+remote executor 由 Pulse 自己實作。它沿用現有 `pulse-core` 的持久任務、派工、checkpoint 與恢復機制。它不需要對應一台 VM，也不依賴 AW。實際模型與工具執行迴圈接續 v0.4。
 
 主畫面只有一個可換行的對話輸入框。連線與配對在「設定」；任務與工具操作在可收起的「進度」。圖片以系統選取視窗開啟，不必輸入路徑。
 
-本機 WebSocket、恢復測試與真實 Keychain 配對／重啟讀回已驗證。正式遠端 WSS、完整畫面互動與效能驗收仍待驗證。真實模型與雲端部署尚未接入。
+本機 WebSocket 與恢復測試已驗證。三元件版本的實機證據見 v0.3 文件。正式遠端 WSS、完整畫面互動與效能驗收仍待驗證。真實模型與雲端部署尚未接入。
 
 Anthropic API 實測尚未執行。v0.1 的 API 研究缺口與相關 issue 保持開啟。
 
@@ -44,7 +46,7 @@ cargo test --workspace --locked
 | [契約](docs/contracts.md) | 任務、權限、傳輸、恢復、費用與資料保留 |
 | [驗收](docs/acceptance.md) | 需求對照、測試矩陣、證據與目前缺口 |
 | [v0.2 核心](docs/v0.2-core.md) | 可執行的 library、替身示例與當前測試界線 |
-| [v0.3 桌面](docs/v0.3-desktop.md) | 桌面、helper、裝置配對與連線恢復 |
+| [v0.3 桌面](docs/v0.3-desktop.md) | 三元件、分開配對與連線恢復 |
 
 研究工作：[架構 #1](https://github.com/faberline/pulse/issues/1)、[契約 #2](https://github.com/faberline/pulse/issues/2)、[驗收與 API #3](https://github.com/faberline/pulse/issues/3)。
 
@@ -59,7 +61,7 @@ v0.3 工作：[#9](https://github.com/faberline/pulse/issues/9)–[#12](https://
 | [v0.1](https://github.com/faberline/pulse/milestone/1) | 需求、架構、行為契約與驗收計畫 |
 | [v0.2](https://github.com/faberline/pulse/milestone/2) | 可恢復任務核心與替身測試 |
 | [v0.3](https://github.com/faberline/pulse/milestone/3) | 桌面、可靠連線與受限地端執行器 |
-| [v0.4](https://github.com/faberline/pulse/milestone/4) | Anthropic、AW 與雙任務只讀閉環 |
+| [v0.4](https://github.com/faberline/pulse/milestone/4) | Anthropic、自有 remote executor 與雙任務只讀閉環 |
 | [v0.5](https://github.com/faberline/pulse/milestone/5) | 授權操作、結果核對與主動排程 |
 | [v0.6](https://github.com/faberline/pulse/milestone/6) | 首版整合、故障驗收與運維交付 |
 

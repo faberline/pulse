@@ -1,4 +1,4 @@
-use crate::{Helper, RichBlock, composer::Composer, rich_content, selected_image};
+use crate::{ChatConnection, RichBlock, composer::Composer, rich_content, selected_image};
 use iced::{
     Element, Length, Task,
     widget::{
@@ -18,7 +18,6 @@ pub(crate) enum Screen {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Picker {
     Image,
-    Repo,
     Data,
 }
 #[derive(Clone, Debug)]
@@ -28,6 +27,7 @@ pub(crate) struct Preview {
 }
 #[derive(Clone, Debug)]
 pub(crate) enum Message {
+    Quit,
     Poll,
     Edit(text_editor::Action),
     Submit,
@@ -60,7 +60,6 @@ pub(crate) enum Message {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ConnectionForm {
     server: String,
-    repo: String,
     data_dir: String,
     dev_loopback: bool,
 }
@@ -68,8 +67,8 @@ impl Default for ConnectionForm {
     fn default() -> Self {
         Self {
             server: String::new(),
-            repo: String::new(),
             data_dir: pulse_link::journal::default_data_dir()
+                .join("chat")
                 .to_string_lossy()
                 .into(),
             dev_loopback: false,
@@ -81,8 +80,6 @@ impl ConnectionForm {
         let mut args = vec![
             "--server".into(),
             self.server.clone(),
-            "--repo".into(),
-            self.repo.clone(),
             "--data-dir".into(),
             self.data_dir.clone(),
         ];
@@ -94,10 +91,9 @@ impl ConnectionForm {
     fn load() -> Self {
         let args: Vec<_> = std::env::args().skip(1).collect();
         if !args.is_empty() {
-            if let Ok(config) = pulse_link::client::Config::parse(args.clone()) {
+            if let Ok(config) = pulse_link::client::Config::parse_chat(args.clone()) {
                 return Self {
                     server: config.server.to_string(),
-                    repo: config.repo.to_string_lossy().into(),
                     data_dir: config.data_dir.to_string_lossy().into(),
                     dev_loopback: args.iter().any(|a| a == "--dev-loopback"),
                 };
@@ -188,7 +184,7 @@ impl PendingSubmit {
     }
 }
 pub(crate) struct App {
-    helper: Option<Helper>,
+    connection: Option<ChatConnection>,
     state: NativeState,
     composer: Composer,
     pair_code: String,
@@ -214,7 +210,7 @@ impl App {
     }
     fn empty(form: ConnectionForm) -> Self {
         Self {
-            helper: None,
+            connection: None,
             state: NativeState::default(),
             composer: Composer::default(),
             pair_code: String::new(),
@@ -234,7 +230,7 @@ impl App {
         }
     }
     fn restart(&mut self) {
-        self.helper = None;
+        let previous = self.connection.take();
         self.state.connected = false;
         let binding = self.binding();
         let switched = self
@@ -252,13 +248,13 @@ impl App {
             }
         }
         self.active_binding = Some(binding);
-        if self.form.server.is_empty() || self.form.repo.is_empty() {
+        if self.form.server.is_empty() {
             self.notice = "請先到設定完成連線。你可以先寫好訊息。".into();
             return;
         }
-        match Helper::start(&self.form.args()) {
-            Ok(helper) => {
-                self.helper = Some(helper);
+        match ChatConnection::start(&self.form.args(), previous) {
+            Ok(connection) => {
+                self.connection = Some(connection);
                 self.notice = "正在連線…".into();
                 if let Some(command) = self
                     .pending
@@ -279,15 +275,15 @@ impl App {
             url::Url::parse(&self.form.server)
                 .map(|url| url.to_string())
                 .unwrap_or_else(|_| self.form.server.clone()),
-            self.form.repo.clone(),
+            "chat".into(),
             self.form.data_dir.clone(),
         ]
     }
     fn send(&mut self, command: NativeCommand) -> bool {
         if self
-            .helper
+            .connection
             .as_ref()
-            .is_some_and(|helper| helper.commands.try_send(command).is_ok())
+            .is_some_and(|connection| connection.commands.try_send(command).is_ok())
         {
             true
         } else {
@@ -324,6 +320,7 @@ impl App {
             }
             if modifiers.command() {
                 return match key.to_latin(*physical_key) {
+                    Some('q') => self.update(Message::Quit),
                     Some('n') => self.update(Message::Screen(Screen::Chat)),
                     Some('l') => self.update(Message::Screen(Screen::Settings)),
                     Some('i') if self.screen == Screen::Chat => {
@@ -334,6 +331,7 @@ impl App {
             }
         }
         match message {
+            Message::Quit => return iced::exit(),
             Message::Key(_) => {}
             Message::Screen(screen) => {
                 self.screen = screen;
@@ -372,20 +370,23 @@ impl App {
                 }
             }
             Message::Poll => {
-                if let Some(helper) = &mut self.helper {
-                    while let Ok(state) = helper.states.try_recv() {
+                if let Some(connection) = &mut self.connection {
+                    while let Ok(state) = connection.states.try_recv() {
                         if !state.paired && !state.connected && self.notice == "正在連線…" {
-                            self.notice = "請到設定完成裝置配對。".into();
+                            self.notice = "請到設定完成對話框配對。".into();
                         }
                         self.state = state;
                     }
-                    if helper.child.try_wait().ok().flatten().is_some() {
+                    if connection.is_finished() {
                         self.state.connected = false;
                         self.notice = "本機連線已停止。草稿與已保存的訊息仍保留。".into();
                     }
                 }
                 if self.state.connected
-                    && matches!(self.notice.as_str(), "正在連線…" | "請到設定完成裝置配對。")
+                    && matches!(
+                        self.notice.as_str(),
+                        "正在連線…" | "請到設定完成對話框配對。"
+                    )
                 {
                     self.notice.clear();
                 }
@@ -419,8 +420,8 @@ impl App {
             Message::DataDir(value) => self.form.data_dir = value,
             Message::Development(value) => self.form.dev_loopback = value,
             Message::Connect => {
-                if pulse_link::client::Config::parse(self.form.args()).is_err() {
-                    self.notice = "連線設定無效。請核對伺服器與工作資料夾。".into();
+                if pulse_link::client::Config::parse_chat(self.form.args()).is_err() {
+                    self.notice = "連線設定無效。請核對伺服器位址。".into();
                     return Task::none();
                 }
                 let saved = self.form.save().is_ok();
@@ -450,7 +451,6 @@ impl App {
                 self.picking = false;
                 if let Some(path) = path {
                     match picker {
-                        Picker::Repo => self.form.repo = path.to_string_lossy().into(),
                         Picker::Data => self.form.data_dir = path.to_string_lossy().into(),
                         Picker::Image => {
                             self.picking = true;
@@ -779,20 +779,8 @@ impl App {
                 .id("pulse-server")
                 .on_input(Message::Server)
                 .on_submit(Message::Connect),
-            row![
-                text(if self.form.repo.is_empty() {
-                    "尚未選擇工作資料夾"
-                } else {
-                    &self.form.repo
-                })
-                .size(13)
-                .width(Length::Fill),
-                button("選擇資料夾")
-                    .on_press_maybe((!self.picking).then_some(Message::Pick(Picker::Repo)))
-            ]
-            .spacing(12),
             button("儲存並連線").on_press(Message::Connect),
-            text("裝置配對").size(20),
+            text("對話框配對").size(20),
             text(if self.state.paired {
                 "本機已有配對資料。重新配對前，須先在伺服器撤銷舊身分。"
             } else {
@@ -839,8 +827,15 @@ impl App {
                 .push(button("重新連線").on_press(Message::Restart))
                 .push(
                     text(format!(
-                        "待送：{}\n快取來源：{}\n{}",
-                        self.state.pending, self.state.server, self.state.message
+                        "待送：{}\n快取來源：{}\n本機 executor：{}\n{}",
+                        self.state.pending,
+                        self.state.server,
+                        if self.state.local_connected {
+                            "已連線"
+                        } else {
+                            "離線"
+                        },
+                        self.state.message
                     ))
                     .size(12),
                 );
@@ -874,6 +869,7 @@ fn editor_key_binding(press: text_editor::KeyPress) -> Option<text_editor::Bindi
                 Some('i') => Some(Message::Pick(Picker::Image)),
                 Some('l') => Some(Message::Screen(Screen::Settings)),
                 Some('n') => Some(Message::Screen(Screen::Chat)),
+                Some('q') => Some(Message::Quit),
                 _ => None,
             }
         };
@@ -910,7 +906,6 @@ fn pick(picker: Picker) -> Task<Message> {
                             .pick_file()
                             .await
                     }
-                    Picker::Repo => dialog.set_title("選擇工作資料夾").pick_folder().await,
                     Picker::Data => dialog.set_title("選擇私有資料夾").pick_folder().await,
                 };
                 selected.map(|file| file.path().to_path_buf())
