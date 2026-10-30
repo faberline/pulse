@@ -646,14 +646,7 @@ impl App {
             .placeholder("傳訊息給 Pulse…")
             .height(104)
             .on_action(Message::Edit)
-            .key_binding(|press| {
-                use iced::keyboard::{Key, key::Named};
-                if press.modifiers.command() && press.key.as_ref() == Key::Named(Named::Enter) {
-                    Some(text_editor::Binding::Custom(Message::Submit))
-                } else {
-                    text_editor::Binding::from_key_press(press)
-                }
-            });
+            .key_binding(editor_key_binding);
         conversation = conversation.push(
             container(
                 column![
@@ -867,6 +860,29 @@ impl App {
     }
 }
 
+fn editor_key_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
+    use iced::keyboard::{Key, key::Named};
+    if press.modifiers.command() && matches!(press.status, text_editor::Status::Focused { .. }) {
+        let command = if press.key.as_ref() == Key::Named(Named::Enter) {
+            Some(Message::Submit)
+        } else {
+            match press
+                .key
+                .to_latin(press.physical_key)
+                .map(|c| c.to_ascii_lowercase())
+            {
+                Some('i') => Some(Message::Pick(Picker::Image)),
+                Some('l') => Some(Message::Screen(Screen::Settings)),
+                Some('n') => Some(Message::Screen(Screen::Chat)),
+                _ => None,
+            }
+        };
+        if let Some(command) = command {
+            return Some(text_editor::Binding::Custom(command));
+        }
+    }
+    text_editor::Binding::from_key_press(press)
+}
 fn task_status(state: pulse_core::State) -> &'static str {
     use pulse_core::State::*;
     match state {

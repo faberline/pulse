@@ -1,4 +1,49 @@
 use super::*;
+fn key_press(
+    key: iced::keyboard::Key,
+    code: iced::keyboard::key::Code,
+    modifiers: iced::keyboard::Modifiers,
+) -> text_editor::KeyPress {
+    text_editor::KeyPress {
+        modified_key: key.clone(),
+        key,
+        physical_key: iced::keyboard::key::Physical::Code(code),
+        modifiers,
+        text: Some("i".into()),
+        status: text_editor::Status::Focused { is_hovered: false },
+    }
+}
+#[test]
+fn picture_shortcut_does_not_insert_a_letter_into_the_draft() {
+    let press = key_press(
+        iced::keyboard::Key::Character("i".into()),
+        iced::keyboard::key::Code::KeyI,
+        iced::keyboard::Modifiers::COMMAND,
+    );
+    assert!(matches!(
+        editor_key_binding(press),
+        Some(text_editor::Binding::Custom(Message::Pick(Picker::Image)))
+    ));
+}
+#[test]
+fn enter_keeps_newlines_and_command_enter_sends_only_when_focused() {
+    use iced::keyboard::{
+        Key, Modifiers,
+        key::{Code, Named},
+    };
+    let mut press = key_press(Key::Named(Named::Enter), Code::Enter, Modifiers::NONE);
+    assert!(matches!(
+        editor_key_binding(press.clone()),
+        Some(text_editor::Binding::Enter)
+    ));
+    press.modifiers = Modifiers::COMMAND;
+    assert!(matches!(
+        editor_key_binding(press.clone()),
+        Some(text_editor::Binding::Custom(Message::Submit))
+    ));
+    press.status = text_editor::Status::Active;
+    assert!(editor_key_binding(press).is_none());
+}
 #[test]
 fn retry_keeps_message_identity_and_cannot_cross_connections() {
     let binding = [
