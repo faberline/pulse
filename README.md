@@ -1,12 +1,18 @@
 # Pulse
 
-Pulse 是單人使用的事件驅動助理。雲端保存任務狀態。預定以 Rust 桌面 app 提供同一對話、地端連線與受限工具。
+Pulse 是單人使用的事件驅動助理。它有三個元件：server、對話框、executor。executor 分成 remote 系統與 local process。
 
 ## 目前狀態
 
-目前提供 v0.2 Rust 任務核心候選、SQLite 保存、替身示例與故障測試。完整桌面、HTTP/WSS、真實模型與部署仍未實作。此 library 只供可信的同程序程式呼叫，尚無網路認證入口。
+目前提供 v0.2 任務核心，以及 v0.3 原生桌面與地端連線候選。server 保存任務與對話。SwiftUI 對話框透過自己的 Rust chat 傳輸程序連 server。`pulse-executor` 是獨立的 local process，也直接連 server。關閉對話框不會關閉 executor。
 
-Anthropic API 實測尚未執行。研究環境沒有設定 `ANTHROPIC_API_KEY`。v0.1 與相關研究 issue 保持開啟。
+remote executor 由 Pulse 自己實作。它沿用現有 `pulse-core` 的持久任務、派工、checkpoint 與恢復機制。它不需要對應一台 VM，也不依賴 AW。實際模型與工具執行迴圈接續 v0.4。
+
+主畫面只有一個可換行的對話輸入框。連線與配對在「設定」；任務與工具操作在可收起的「進度」。圖片以系統選取視窗開啟，不必輸入路徑。
+
+本機 WebSocket 與恢復測試已驗證。三元件版本的實機證據見 v0.3 文件。正式遠端 WSS、完整畫面互動與效能驗收仍待驗證。真實模型與雲端部署尚未接入。
+
+Anthropic API 實測尚未執行。v0.1 的 API 研究缺口與相關 issue 保持開啟。
 
 ## 執行本機示例
 
@@ -30,6 +36,8 @@ cargo test --workspace --locked
 
 [核心使用方式與驗證邊界](docs/v0.2-core.md) 列出對應契約、測試、coverage 命令與未實作項目。
 
+桌面試用方式、配對與撤銷命令見 [v0.3 桌面與連線](docs/v0.3-desktop.md)。macOS 可用 `sh scripts/build-macos-app.sh --debug` 建立本機 app。SwiftUI 移植、建置與目前證據見 [Swift 桌面](docs/swift-desktop.md)。
+
 ## 規格入口
 
 | 文件 | 內容 |
@@ -38,10 +46,14 @@ cargo test --workspace --locked
 | [契約](docs/contracts.md) | 任務、權限、傳輸、恢復、費用與資料保留 |
 | [驗收](docs/acceptance.md) | 需求對照、測試矩陣、證據與目前缺口 |
 | [v0.2 核心](docs/v0.2-core.md) | 可執行的 library、替身示例與當前測試界線 |
+| [Swift 桌面](docs/swift-desktop.md) | SwiftUI、Rust chat 傳輸與原生實測 |
+| [v0.3 桌面](docs/v0.3-desktop.md) | 三元件、分開配對與連線恢復 |
 
 研究工作：[架構 #1](https://github.com/faberline/pulse/issues/1)、[契約 #2](https://github.com/faberline/pulse/issues/2)、[驗收與 API #3](https://github.com/faberline/pulse/issues/3)。
 
 本次實作工作：[#4](https://github.com/faberline/pulse/issues/4)–[#7](https://github.com/faberline/pulse/issues/7)。使用者於 2026-10-30 明確要求開始實作；這不代表 v0.1 的 API 缺口已通過，也不關閉原有 gate。
+
+v0.3 工作：[#9](https://github.com/faberline/pulse/issues/9)–[#12](https://github.com/faberline/pulse/issues/12)。候選堆疊在 v0.2 分支上。兩階段都須通過各自的獨立接受，才可合併。
 
 ## 交付順序
 
@@ -50,7 +62,7 @@ cargo test --workspace --locked
 | [v0.1](https://github.com/faberline/pulse/milestone/1) | 需求、架構、行為契約與驗收計畫 |
 | [v0.2](https://github.com/faberline/pulse/milestone/2) | 可恢復任務核心與替身測試 |
 | [v0.3](https://github.com/faberline/pulse/milestone/3) | 桌面、可靠連線與受限地端執行器 |
-| [v0.4](https://github.com/faberline/pulse/milestone/4) | Anthropic、AW 與雙任務只讀閉環 |
+| [v0.4](https://github.com/faberline/pulse/milestone/4) | Anthropic、自有 remote executor 與雙任務只讀閉環 |
 | [v0.5](https://github.com/faberline/pulse/milestone/5) | 授權操作、結果核對與主動排程 |
 | [v0.6](https://github.com/faberline/pulse/milestone/6) | 首版整合、故障驗收與運維交付 |
 

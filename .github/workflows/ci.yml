@@ -1,4 +1,4 @@
-name: Rust core
+name: Pulse Rust and Swift
 on:
   push:
   pull_request:
@@ -19,6 +19,19 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - name: Swift desktop tests
+        if: runner.os == 'macOS'
+        run: swift test --package-path apps/pulse-desktop --scratch-path target/swift-desktop --enable-code-coverage
+      - name: Save Swift coverage separately
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: swift-desktop-coverage
+          path: target/swift-desktop/**/codecov/*.json
+          retention-days: 7
+      - name: Build macOS desktop bundle (ad hoc signature)
+        if: runner.os == 'macOS'
+        run: sh scripts/build-macos-app.sh --debug
       - name: Fixture demonstration
         run: |
           cargo run --locked --example durable_demo -- "${RUNNER_TEMP}/pulse-demo.db"
@@ -29,15 +42,15 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - run: rustup toolchain install 1.96.1 --profile minimal --component llvm-tools-preview
       - run: cargo install cargo-llvm-cov --version 0.8.5 --locked
-      - name: Coverage report (core source only; no acceptance threshold)
+      - name: Coverage report (all workspace source; no acceptance threshold)
         run: |
           mkdir -p coverage
           cargo llvm-cov --workspace --locked --ignore-filename-regex '/(tests|examples)/' --lcov --output-path coverage/lcov.info
       - name: Coverage summary
-        run: cargo llvm-cov report --ignore-filename-regex '/(tests|examples)/' --summary-only
+        run: python3 scripts/coverage-summary.py coverage/lcov.info
       - name: Save coverage evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: rust-core-coverage
+          name: rust-workspace-coverage
           path: coverage/lcov.info
           retention-days: 7
