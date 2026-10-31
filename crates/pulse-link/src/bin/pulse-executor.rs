@@ -2,8 +2,7 @@
 use pulse_link::{
     Result,
     client::{Config, Device, NativeVault},
-    journal::private_read,
-    protocol::{NativeCommand, NativeState},
+    protocol::{ClientRole, NativeCommand, NativeState},
 };
 use tokio::sync::{mpsc, watch};
 
@@ -15,24 +14,9 @@ async fn main() {
     }
 }
 async fn run() -> Result<()> {
-    let mut args = std::env::args().skip(1);
-    let mut connection = Vec::new();
-    let mut pairing = None;
-    while let Some(arg) = args.next() {
-        if arg == "--pair-code-file" {
-            if pairing.is_some() {
-                return Err(pulse_link::Error::Rejected("duplicate pair file".into()));
-            }
-            pairing = Some(private_read(std::path::Path::new(
-                &args
-                    .next()
-                    .ok_or_else(|| pulse_link::Error::Rejected("pair file required".into()))?,
-            ))?);
-        } else {
-            connection.push(arg);
-        }
-    }
-    let device = Device::open(Config::parse(connection)?, std::sync::Arc::new(NativeVault)).await?;
+    let (config, pairing) =
+        Config::parse_with_pairing(std::env::args().skip(1), ClientRole::LocalExecutor)?;
+    let device = Device::open(config, std::sync::Arc::new(NativeVault)).await?;
     let (commands, receiver) = mpsc::channel(32);
     let (states, mut state) = watch::channel(NativeState::default());
     if let Some(code) = pairing {

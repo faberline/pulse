@@ -159,9 +159,11 @@ G04 未完成時，issue #3 與 milestone v0.1 保持開啟。#1/#2 文件工作
 | 階段 | 下一批有界實作責任 | 前置條件 |
 |---|---|---|
 | v0.2 | source ingest/dedupe；task/revision/context 投影；queue/checkpoint；version/budget/outbox 與替身故障 | v0.1 契約接受；各 issue 指定 Kxx、Txx |
-| v0.3 | iced 對話框與獨立 local process；角色配對/WSS；ACK/outbox/lease；只讀工具與實機恢復 | v0.2 相應契約/核心證據；不可等 v0.5 才加 policy |
+| v0.3 | SwiftUI 對話框／Rust chat 傳輸與獨立 local process；角色配對/WSS；ACK/outbox/lease；只讀工具與實機恢復 | v0.2 相應契約/核心證據；不可等 v0.5 才加 policy |
 | v0.4 | Anthropic adapter/context；Pulse 自有 remote executor；A/B 真實只讀閉環 | G04、v0.2 核心與 v0.3 桌面路徑 |
 | v0.5 | 完整批准/取消/撤銷；模擬效果核對；授權 schedule；預算/通知 | v0.4 已通；真實效果仍須明確另授權 |
 | v0.6 | current-head 全矩陣、版本/備份/刪除、效能/soak 與可交付證據 | 前階段適用實作與證據，無未解必要 blocker |
 
 本次只建立 #1–#3 研究 issues。不自動開工 v0.2、不建立雲端資源、不安裝付費服務，也不對其他 repo 開工。
+
+2026-10-31：使用者將桌面介面改選 SwiftUI。原生移植的測試、實測與未接受項目另見 [Swift 桌面](swift-desktop.md)。舊 iced coverage 只屬於歷史候選。

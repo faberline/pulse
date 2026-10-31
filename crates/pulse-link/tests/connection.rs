@@ -114,6 +114,30 @@ fn strict_wire_and_origin_policy() {
     assert!(client::validate_server("https://pulse.example", false).is_ok());
 }
 
+#[test]
+fn pairing_file_stays_private_and_preserves_client_role() {
+    let dir = tempfile::tempdir().unwrap();
+    let code = dir.path().join("code");
+    private_write(
+        &code,
+        b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    )
+    .unwrap();
+    let args = vec![
+        "--server".into(),
+        "https://pulse.example".into(),
+        "--pair-code-file".into(),
+        code.to_str().unwrap().into(),
+    ];
+    let (config, pair) = Config::parse_with_pairing(args.clone(), ClientRole::Chat).unwrap();
+    assert!(config.repo.as_os_str().is_empty());
+    assert_eq!(pair.unwrap().len(), 64);
+    assert!(Config::parse_with_pairing(args.clone(), ClientRole::LocalExecutor).is_err());
+    let mut duplicate = args;
+    duplicate.extend(["--pair-code-file".into(), code.to_str().unwrap().into()]);
+    assert!(Config::parse_with_pairing(duplicate, ClientRole::Chat).is_err());
+}
+
 #[tokio::test]
 async fn pairing_is_one_use_and_revocation_fences_sessions() {
     let dir = tempfile::tempdir().unwrap();

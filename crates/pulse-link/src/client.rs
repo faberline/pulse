@@ -22,6 +22,32 @@ pub struct Config {
     pub data_dir: PathBuf,
 }
 impl Config {
+    /// Operator convenience: the one-use code stays in a private file, not argv.
+    pub fn parse_with_pairing(
+        args: impl IntoIterator<Item = String>,
+        role: ClientRole,
+    ) -> Result<(Self, Option<String>)> {
+        let mut args = args.into_iter();
+        let mut connection = Vec::new();
+        let mut pairing = None;
+        while let Some(arg) = args.next() {
+            if arg == "--pair-code-file" {
+                ensure(pairing.is_none(), "duplicate pair file")?;
+                let path = args
+                    .next()
+                    .ok_or_else(|| crate::Error::Rejected("pair file required".into()))?;
+                let code = crate::journal::private_read(std::path::Path::new(&path))?;
+                ensure(
+                    code.len() == 64 && code.bytes().all(|b| b.is_ascii_hexdigit()),
+                    "invalid pairing code",
+                )?;
+                pairing = Some(code);
+            } else {
+                connection.push(arg);
+            }
+        }
+        Ok((Self::parse_for(connection, role)?, pairing))
+    }
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self> {
         Self::parse_for(args, ClientRole::LocalExecutor)
     }

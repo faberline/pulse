@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/pulse-link", "crates/pulse-desktop"]
+members = [".", "crates/pulse-link"]
 resolver = "3"
 
 [package]

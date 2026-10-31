@@ -10,7 +10,7 @@
 |---|---|---|
 | U01 | 單人使用，同一對話可討論多個任務，各任務有獨立 context | 原 v0.1 與本次使用者確認 |
 | U02 | v0.1 先完成架構規格，產品實作從 v0.2 開始 | 使用者選擇「先完成架構規格」 |
-| U03 | 雲端服務、agent runtime、桌面 UI 與地端執行器採 Rust | 使用者要求「用 rust 打造」 |
+| U03 | server、agent runtime 與地端執行器採 Rust；桌面 UI 依 U12 採 Swift | 使用者要求 Rust，後續確認 Swift 介面 |
 | U04 | 模型採雲端 Anthropic API | 使用者選擇雲端 API 與 Anthropic |
 | U05 | 首個只讀分析範圍是 Pulse 本身 | 使用者選擇「Pulse 本身」 |
 | U06 | Pulse 必要文件與程式可按需上雲，排除憑證及私密設定 | 使用者選擇「按需傳送文件與程式」 |
@@ -19,6 +19,7 @@
 | U09 | 三個元件為 server、對話框、executor | 使用者於 2026-10-31 修正 |
 | U10 | executor 分為 remote 系統與 local process；remote 不綁定 VM | 使用者於 2026-10-31 修正 |
 | U11 | remote 由 Pulse 自行實作；只在能減少程式時重用 core，不接 AW | 使用者於 2026-10-31 修正；取代先前 AW 整合方向 |
+| U12 | 桌面 UI 改用 SwiftUI；server 與 executor 保留 Rust | 使用者於 2026-10-31 確認 |
 
 一台 macOS Apple Silicon 裝置、一個地端 worker、雲端最多兩個執行中任務，是本版實作預設。這些數值可經新決策修改，但不能由模型自行調高。
 
@@ -56,11 +57,11 @@ flowchart TB
 | policy | 核對來源、scope、revision、批准與預算 | 模型與工具內容不可修改 policy |
 | local executor | 獨立 process、outbound 連線、journal、結果補送、本機工具 | 不承載人類對話，不接受任意遠端 shell |
 | remote executor | Pulse 自己的派工、執行、checkpoint 與恢復 | 不綁定 VM 或 PID，不接 AW；工具結果不能授權新操作 |
-| desktop | 同一對話、rich content、狀態、批准與取消 | 顯示內容不能形成授權 |
+| desktop / SwiftUI | 同一對話、rich content、狀態、批准與取消 | 顯示內容不能形成授權 |
 
 雲端先採單一服務。這些模組不是七個微服務，也不要求一個任務配一個常駐 process。等待時保存進度並釋放工作名額。
 
-對話框與 local executor 分別連 server。兩者有各自的身分與私有 journal。對話框不啟動、代理或終止 executor。關閉對話框後，executor 仍可回傳結果。server 保存結果，對話框重開後再同步。
+SwiftUI 透過自己的 Rust chat 傳輸程序連 server。兩者使用私有、有界 JSON Lines。local executor 獨立連 server。兩者有各自的身分與私有 journal。對話框不啟動、代理或終止 executor。關閉對話框後，executor 仍可回傳結果。server 保存結果，對話框重開後再同步。
 
 remote executor 是 Pulse 自己的執行系統。沿用 `pulse-core::Store` 的持久任務、run token、checkpoint、重試與取消。先不增加另一套工作 DB、外部系統介面或服務。faberline/core 只在可減少重複程式時使用。模型與工具執行迴圈仍是 v0.4 工作，不能把現有狀態核心當作已完成的模型閉環。
 
@@ -72,7 +73,7 @@ remote executor 是 Pulse 自己的執行系統。沿用 `pulse-core::Store` 的
 |---|---|---|
 | A01 非同步服務 | Tokio + Axum 0.8 系列。HTTP、WSS 與取消可放在同一 Rust 執行環境 | Actix 同樣可用；先選 Axum 以統一 Tokio 生態 |
 | A02 雲端 DB | SQLx 0.9 系列 + SQLite。單機、交易、migration 與簡單 queue 足以處理個人工作量 | PostgreSQL 增加服務與維護需求；多主機需求出現後再評估 |
-| A03 桌面 UI | iced 0.14 系列。UI 亦用 Rust；用 Markdown、highlighting、表格與圖片元件組合 rich content | Tauri 需 web rendering 邊界；egui 偏即時重繪。首版採 iced，不另建 JS 前端 |
+| A03 桌面 UI | SwiftUI + AppKit 原生文字與檔案選取元件；Rust 保留可靠 chat 傳輸 | 取代 iced，不維護兩套介面，不新增 JS 前端 |
 | A04 傳輸 | HTTP 收件/查詢 + WSS 雙向裝置流。HTTP 與 socket 都套用相同持久收件契約 | SSE/long polling 可行，但裝置仍需要反向送結果；本版只實作 WSS |
 | A05 元件連線 | 對話框與 local process 各自使用 HTTPS/WSS 連 server | 取代原 UI/helper 私有 stdio 設計；不增加本機 TCP 入口 |
 | A06 模型 | reqwest + Serde 直接連 Anthropic Messages API，使用 `claude-sonnet-5-5` | 地端 CLI 依賴裝置在線；本版不採雙 provider 或自動 fallback |
@@ -82,7 +83,7 @@ remote executor 是 Pulse 自己的執行系統。沿用 `pulse-core::Store` 的
 
 部署契約不綁雲端廠商。實際主機、網域與帳單需在部署 issue 有明確設定後才建立。選型不授權採購或公開服務。
 
-研究環境為 Darwin arm64、rustc/cargo 1.96.1。這只證明工具存在，未證明 iced、SQLx、Axum 或 TLS 整合可用。
+原 v0.1 研究環境為 Darwin arm64、rustc/cargo 1.96.1。當時的未驗證狀態是歷史紀錄；本次 SwiftUI 與 Rust 實作證據見 [Swift 桌面](swift-desktop.md)。
 
 ## 5. 資料、排隊與恢復
 
@@ -128,7 +129,7 @@ SQLite 必須使用已修正 WAL-reset 問題的版本。基準為 3.51.3 或更
 | [SQLx SQLite options](https://docs.rs/sqlx/latest/sqlx/sqlite/struct.SqliteConnectOptions.html) | 明確設定 WAL、同步及連線選項 |
 | [SQLite WAL](https://www.sqlite.org/wal.html) | 同機限制、單 writer 與 WAL-reset 修正 |
 | [SQLite backup](https://www.sqlite.org/backup.html) | 一致性線上備份 |
-| [iced Markdown](https://docs.rs/iced/latest/iced/widget/markdown/) | 格式文字、highlighting 與表格元件 |
+| [SwiftUI / AppKit bridge](https://developer.apple.com/documentation/SwiftUI/NSViewRepresentable) | Swift 原生介面與文字編輯；U12 取代原 iced 選型 |
 | [Tauri architecture](https://v2.tauri.app/concept/architecture/) | 比較 Rust core 與 WebView 路線 |
 | [Anthropic Messages](https://platform.claude.com/docs/en/api/messages/create) | 模型、工具提議及 usage 介面 |
 | [Anthropic streaming](https://platform.claude.com/docs/en/build-with-claude/streaming) | 增量訊息與中斷處理 |

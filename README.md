@@ -4,7 +4,7 @@ Pulse 是單人使用的事件驅動助理。它有三個元件：server、對�
 
 ## 目前狀態
 
-目前提供 v0.2 任務核心，以及 v0.3 Rust 桌面與地端連線候選。server 保存任務與對話。iced 對話框直接連 server。`pulse-executor` 是獨立的 local process，也直接連 server。關閉對話框不會關閉 executor。
+目前提供 v0.2 任務核心，以及 v0.3 原生桌面與地端連線候選。server 保存任務與對話。SwiftUI 對話框透過自己的 Rust chat 傳輸程序連 server。`pulse-executor` 是獨立的 local process，也直接連 server。關閉對話框不會關閉 executor。
 
 remote executor 由 Pulse 自己實作。它沿用現有 `pulse-core` 的持久任務、派工、checkpoint 與恢復機制。它不需要對應一台 VM，也不依賴 AW。實際模型與工具執行迴圈接續 v0.4。
 
@@ -36,7 +36,7 @@ cargo test --workspace --locked
 
 [核心使用方式與驗證邊界](docs/v0.2-core.md) 列出對應契約、測試、coverage 命令與未實作項目。
 
-桌面試用方式、配對與撤銷命令見 [v0.3 桌面與連線](docs/v0.3-desktop.md)。macOS 可用 `sh scripts/build-macos-app.sh --debug` 建立本機 app。
+桌面試用方式、配對與撤銷命令見 [v0.3 桌面與連線](docs/v0.3-desktop.md)。macOS 可用 `sh scripts/build-macos-app.sh --debug` 建立本機 app。SwiftUI 移植、建置與目前證據見 [Swift 桌面](docs/swift-desktop.md)。
 
 ## 規格入口
 
@@ -46,6 +46,7 @@ cargo test --workspace --locked
 | [契約](docs/contracts.md) | 任務、權限、傳輸、恢復、費用與資料保留 |
 | [驗收](docs/acceptance.md) | 需求對照、測試矩陣、證據與目前缺口 |
 | [v0.2 核心](docs/v0.2-core.md) | 可執行的 library、替身示例與當前測試界線 |
+| [Swift 桌面](docs/swift-desktop.md) | SwiftUI、Rust chat 傳輸與原生實測 |
 | [v0.3 桌面](docs/v0.3-desktop.md) | 三元件、分開配對與連線恢復 |
 
 研究工作：[架構 #1](https://github.com/faberline/pulse/issues/1)、[契約 #2](https://github.com/faberline/pulse/issues/2)、[驗收與 API #3](https://github.com/faberline/pulse/issues/3)。
