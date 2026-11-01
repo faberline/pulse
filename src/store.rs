@@ -814,6 +814,13 @@ impl Store {
             .collect()
     }
 
+    pub async fn notification_capacity_available(&self) -> Result<bool> {
+        let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM outbox WHERE acknowledged=0")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(pending < OUTBOX_LIMIT)
+    }
+
     pub async fn acknowledge(&self, sequence: u64, key: &str) -> Result<()> {
         require(sequence <= i64::MAX as u64, "invalid sequence")?;
         let changed =
@@ -1318,7 +1325,9 @@ async fn notify(db: &mut SqliteConnection, key: &str, payload: &Value) -> Result
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM outbox WHERE acknowledged=0")
         .fetch_one(&mut *db)
         .await?;
-    require(count < OUTBOX_LIMIT, "notification outbox full")?;
+    if count >= OUTBOX_LIMIT {
+        return Err(Error::Capacity);
+    }
     sqlx::query("INSERT OR IGNORE INTO outbox(dedupe_key,payload) VALUES(?,?)")
         .bind(key)
         .bind(serde_json::to_string(payload)?)

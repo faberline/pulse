@@ -10,6 +10,8 @@ pub use store::Store;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("notification queue capacity unavailable")]
+    Capacity,
     #[error("file access: {0}")]
     Io(#[from] std::io::Error),
     #[error("database: {0}")]
