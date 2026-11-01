@@ -28,6 +28,8 @@ The core now has typed browser observations, element/form data and click/text in
 
 ## Browser action integration, candidate in progress
 
+The local operator must set `PULSE_BROWSER_INTERACTION=1` as well as the existing `PULSE_BROWSER_DRIVER` path when starting `pulse-executor`. This setting belongs to the local process environment. It is not a server setting or a model argument. Without it, the local process advertises browser reads only. See [browser setup](browser-chat.md#use) for the driver and private-profile boundary.
+
 The Human can request `操作網頁 <URL> ...` in the single composer. This creates an explicit `browser-interact:` scope. A read request cannot gain this scope from a model reply or page content. The local process must announce interaction support on its current authenticated connection.
 
 `browser_inspect` opens a private, guarded Chrome session. The local process keeps at most two sessions for separate tasks. Each session has a 120-second lifetime. The observation includes a new nonce, the page URL, the PNG hash and at most 16 supported controls. The model receives typed control data and page text. It does not receive PNG bytes, driver commands, scripts or an approval grant.
