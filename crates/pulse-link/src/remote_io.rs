@@ -98,11 +98,16 @@ impl Hub {
             task.state == State::Planning && task.scope == "pulse:read" && task.tool_calls < 16,
             "model proposal policy",
         )?;
-        let repeated:i64=sqlx::query_scalar("SELECT COUNT(*) FROM link_reads WHERE task_id=? AND task_revision=? AND request=? AND state='completed'").bind(&task.id).bind(task.revision.to_string()).bind(serde_json::to_string(&call.operation)?).fetch_one(&mut *tx).await?;
-        ensure(
-            repeated == 0,
-            "completed read evidence already exists; review or revise the request",
-        )?;
+        let canonical = call.operation.canonical()?;
+        ensure(canonical == call.operation, "canonical read path required")?;
+        let completed:Vec<String>=sqlx::query_scalar("SELECT request FROM link_reads WHERE task_id=? AND task_revision=? AND state='completed'").bind(&task.id).bind(task.revision.to_string()).fetch_all(&mut *tx).await?;
+        for request in completed {
+            let previous: ReadOp = serde_json::from_str(&request)?;
+            ensure(
+                previous.canonical()? != canonical,
+                "completed read evidence already exists; review or revise the request",
+            )?;
+        }
         let round = run.checkpoint["round"].as_u64().unwrap_or(0);
         let mut calls: Vec<ProposedRead> =
             serde_json::from_value(run.checkpoint.get("calls").cloned().unwrap_or(json!([])))?;

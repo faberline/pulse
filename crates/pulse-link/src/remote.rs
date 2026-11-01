@@ -9,10 +9,10 @@ pub fn versions() -> Versions {
 }
 fn manifest(provider: Option<&Provider>) -> Versions {
     Versions {
-        workflow: "pulse-remote-5".into(),
+        workflow: "pulse-remote-6".into(),
         schema: "1".into(),
         prompt: "effective-read-2".into(),
-        tools: "pulse-read-1".into(),
+        tools: "pulse-read-2".into(),
         model: provider.map(|p| p.model).unwrap_or("unconfigured").into(),
         provider_api: "function-call-1".into(),
         policy: "read-only-2".into(),
@@ -27,7 +27,14 @@ pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Res
         Ok(false) | Err(crate::Error::Capacity) => {}
         Err(error) => return Err(error),
     }
-    let Some(run) = hub.core.claim_next(&manifest(provider), time).await? else {
+    let (run, changed) = hub
+        .core
+        .claim_next_with_changes(&manifest(provider), time)
+        .await?;
+    if changed {
+        hub.notify_change();
+    }
+    let Some(run) = run else {
         return Ok(false);
     };
     let mut reason = "provider_not_configured";
@@ -41,46 +48,57 @@ pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Res
                 Err(crate::Error::Rejected(_)) => return Ok(true),
                 Err(error) => return Err(error),
             };
-            let round = run.checkpoint["round"].as_u64().unwrap_or(0);
-            let call = format!("model:{}:{}:{round}", run.token.run_id, run.token.revision);
-            match hub
-                .core
-                .reserve(
-                    &run.token,
-                    &call,
-                    20_000,
-                    "luna-haiku-short-ceiling-2026-11-01",
-                    now(),
-                )
-                .await
-            {
-                Ok(true) => match provider.generate_with(&prompt, &history).await {
-                    Ok(reply) => {
-                        hub.core
-                            .settle(&call, reply.cost, &serde_json::to_string(&reply.usage)?)
-                            .await?;
-                        let saved = if reply.tool.is_some() {
-                            hub.model_proposal(&run.token, &reply, now()).await
-                        } else {
-                            hub.model_reply(&run.token, &reply, provider.model, now())
-                                .await
-                        };
-                        match saved {
-                            Ok(()) => return Ok(true),
-                            Err(crate::Error::Rejected(_)) => reason = "model_result_not_applied",
-                            Err(error) => return Err(error),
+            match provider.prepare(&prompt, &history) {
+                Err(_) => reason = "provider_request_invalid",
+                Ok(request) => {
+                    let round = run.checkpoint["round"].as_u64().unwrap_or(0);
+                    let call = format!("model:{}:{}:{round}", run.token.run_id, run.token.revision);
+                    match hub
+                        .core
+                        .reserve(
+                            &run.token,
+                            &call,
+                            20_000,
+                            "luna-haiku-short-ceiling-2026-11-01",
+                            now(),
+                        )
+                        .await
+                    {
+                        Ok(true) => match request.send().await {
+                            Ok(reply) => {
+                                hub.core
+                                    .settle(
+                                        &call,
+                                        reply.cost,
+                                        &serde_json::to_string(&reply.usage)?,
+                                    )
+                                    .await?;
+                                let saved = if reply.tool.is_some() {
+                                    hub.model_proposal(&run.token, &reply, now()).await
+                                } else {
+                                    hub.model_reply(&run.token, &reply, provider.model, now())
+                                        .await
+                                };
+                                match saved {
+                                    Ok(()) => return Ok(true),
+                                    Err(crate::Error::Rejected(_)) => {
+                                        reason = "model_result_not_applied"
+                                    }
+                                    Err(error) => return Err(error),
+                                }
+                            }
+                            Err(_) => {
+                                hub.core.cost_unknown(&call).await?;
+                                reason = "provider_call_failed_cost_reserved";
+                            }
+                        },
+                        Ok(false) => reason = "previous_call_not_retried",
+                        Err(pulse_core::Error::Rejected(_)) => {
+                            reason = "model_reservation_rejected";
                         }
+                        Err(error) => return Err(error.into()),
                     }
-                    Err(_) => {
-                        hub.core.cost_unknown(&call).await?;
-                        reason = "provider_call_failed_cost_reserved";
-                    }
-                },
-                Ok(false) => reason = "previous_call_not_retried",
-                Err(pulse_core::Error::Rejected(_)) => {
-                    reason = "model_reservation_rejected";
                 }
-                Err(error) => return Err(error.into()),
             }
         }
     }

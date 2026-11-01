@@ -25,6 +25,12 @@ pub struct Exchange {
     pub call: ToolCall,
     pub outcome: ReadOutcome,
 }
+/// Fully validated local request. Creating it performs no HTTP request.
+pub struct PreparedRequest<'a> {
+    provider: &'a Provider,
+    client: reqwest::Client,
+    request: reqwest::Request,
+}
 
 fn function(operation: &ReadOp) -> (&'static str, Value) {
     match operation {
@@ -106,6 +112,9 @@ impl Provider {
         self.generate_with(prompt, &[]).await
     }
     pub async fn generate_with(&self, prompt: &str, history: &[Exchange]) -> Result<Reply> {
+        self.prepare(prompt, history)?.send().await
+    }
+    pub fn prepare(&self, prompt: &str, history: &[Exchange]) -> Result<PreparedRequest<'_>> {
         let openai = self.model == "gpt-6-luna";
         let mut messages = vec![json!({"role":"user","content":prompt})];
         for exchange in history {
@@ -137,26 +146,14 @@ impl Provider {
             client.post("https://api.anthropic.com/v1/messages").header("x-api-key",&self.key).header("anthropic-version","2023-06-01")
                 .json(&json!({"model":self.model,"service_tier":"standard_only","system":system,"messages":messages,"tools":tools(false),"tool_choice":{"type":"auto","disable_parallel_tool_use":true},"max_tokens":1024,"thinking":{"type":"disabled"}}))
         };
-        let mut response = request.send().await.map_err(|_| {
-            crate::Error::Rejected("provider connection failed; cost unknown".into())
-        })?;
-        ensure(
-            response.status().is_success(),
-            "provider rejected request; no automatic retry",
-        )?;
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| crate::Error::Rejected("provider response interrupted".into()))?
-        {
-            ensure(
-                bytes.len() + chunk.len() <= 256 * 1024,
-                "provider response too large",
-            )?;
-            bytes.extend_from_slice(&chunk);
-        }
-        self.parse(&serde_json::from_slice(&bytes)?)
+        let request = request
+            .build()
+            .map_err(|_| crate::Error::Rejected("provider request invalid".into()))?;
+        Ok(PreparedRequest {
+            provider: self,
+            client,
+            request,
+        })
     }
     pub fn parse(&self, value: &Value) -> Result<Reply> {
         let openai = self.model == "gpt-6-luna";
@@ -264,9 +261,78 @@ impl Provider {
     }
 }
 
+impl PreparedRequest<'_> {
+    /// Called only after durable reservation. From this point a failure may be billed.
+    pub async fn send(self) -> Result<Reply> {
+        let mut response = self.client.execute(self.request).await.map_err(|_| {
+            crate::Error::Rejected("provider connection failed; cost unknown".into())
+        })?;
+        ensure(
+            response.status().is_success(),
+            "provider rejected request; no automatic retry",
+        )?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| crate::Error::Rejected("provider response interrupted".into()))?
+        {
+            ensure(
+                bytes.len() + chunk.len() <= 256 * 1024,
+                "provider response too large",
+            )?;
+            bytes.extend_from_slice(&chunk);
+        }
+        self.provider.parse(&serde_json::from_slice(&bytes)?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn local_request_failures_do_not_reserve_budget_or_count_model_calls() {
+        for model in ["gpt-6-luna", "claude-haiku-5-5"] {
+            for (key, goal) in [
+                ("not-used", "\"".repeat(4096)),
+                ("invalid\nheader", "Reply OK".into()),
+            ] {
+                let provider = Provider {
+                    key: key.into(),
+                    model,
+                };
+                let dir = tempfile::tempdir().unwrap();
+                let hub = crate::server::Hub::new(
+                    pulse_core::Store::open(dir.path().join("db"), "owner")
+                        .await
+                        .unwrap(),
+                );
+                let event=hub.core.ingest(pulse_core::Origin::Human,"fixture","input",json!({"commands":[{"kind":"create","id":"task","goal":goal,"scope":"pulse:read","priority":0,"requires_device":false}]}),crate::now()).await.unwrap();
+                hub.core.route(&event.event_id).await.unwrap();
+                crate::remote::step_with(&hub, Some(&provider), crate::now())
+                    .await
+                    .unwrap();
+                let task = hub.core.task("task").await.unwrap();
+                assert_eq!(
+                    task.model_calls, 0,
+                    "{model}: local failure consumed a call"
+                );
+                assert_eq!(task.state, pulse_core::State::Blocked);
+                assert_eq!(task.reason.as_deref(), Some("provider_request_invalid"));
+                assert!(crate::conversation::status(&task).contains("尚未呼叫模型"));
+                let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM budget")
+                    .fetch_one(&hub.core.application_pool())
+                    .await
+                    .unwrap();
+                assert_eq!(count, 0, "local failure left a budget reservation");
+                assert!(
+                    !crate::remote::step_with(&hub, Some(&provider), crate::now())
+                        .await
+                        .unwrap()
+                );
+            }
+        }
+    }
     fn response(openai: bool, blocks: Value) -> Value {
         if openai {
             json!({"status":"completed","output":blocks,"usage":{"input_tokens":100,"output_tokens":10}})

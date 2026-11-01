@@ -39,6 +39,33 @@ pub enum ReadOp {
     GitStatus,
     GitDiff { path: String },
 }
+impl ReadOp {
+    /// Stable lexical identity only. Executor scope, secret and symlink checks remain separate.
+    pub(crate) fn canonical(&self) -> Result<Self> {
+        let path = match self {
+            Self::List { path } if path.is_empty() => return Ok(self.clone()),
+            Self::List { path } | Self::Text { path } | Self::GitDiff { path } => path,
+            Self::GitStatus => return Ok(self.clone()),
+        };
+        let parts = std::path::Path::new(path)
+            .components()
+            .map(|part| match part {
+                std::path::Component::Normal(part) => part
+                    .to_str()
+                    .ok_or_else(|| crate::Error::Rejected("invalid read path".into())),
+                _ => Err(crate::Error::Rejected("relative read path required".into())),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        ensure(!parts.is_empty(), "read path required")?;
+        let path = parts.join("/");
+        Ok(match self {
+            Self::List { .. } => Self::List { path },
+            Self::Text { .. } => Self::Text { path },
+            Self::GitDiff { .. } => Self::GitDiff { path },
+            Self::GitStatus => unreachable!(),
+        })
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

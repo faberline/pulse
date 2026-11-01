@@ -19,6 +19,9 @@ pub(crate) fn status(task: &Task) -> String {
         Blocked if task.reason.as_deref() == Some("budget_exhausted") => "已達費用上限",
         Blocked if task.reason.as_deref() == Some("model_calls_exhausted") => "已達模型呼叫上限",
         Blocked if task.reason.as_deref() == Some("deadline_exhausted") => "已達任務時間上限",
+        Blocked if task.reason.as_deref() == Some("provider_request_invalid") => {
+            "請求超過限制或設定無效，尚未呼叫模型"
+        }
         Blocked
             if matches!(
                 task.reason.as_deref(),

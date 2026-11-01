@@ -316,27 +316,42 @@ impl Store {
     }
 
     pub async fn claim_next(&self, versions: &Versions, now: i64) -> Result<Option<Run>> {
+        Ok(self.claim_next_with_changes(versions, now).await?.0)
+    }
+
+    /// Returns committed task changes even when no work can be claimed.
+    pub async fn claim_next_with_changes(
+        &self,
+        versions: &Versions,
+        now: i64,
+    ) -> Result<(Option<Run>, bool)> {
         require(versions.valid(), "invalid version manifest")?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut tasks = tasks(&mut tx).await?;
+        let mut changed = false;
         for task in &mut tasks {
             if !task.state.terminal() && task.deadline <= now {
-                task.state = if unresolved(&mut tx, &task.id).await? {
+                let state = if unresolved(&mut tx, &task.id).await? {
                     State::OutcomeUnknown
                 } else {
                     State::Blocked
                 };
-                task.reason = Some("deadline_exhausted".into());
-                put(&mut tx, "tasks", &task.id, task).await?;
+                if task.state != state || task.reason.as_deref() != Some("deadline_exhausted") {
+                    task.state = state;
+                    task.reason = Some("deadline_exhausted".into());
+                    put(&mut tx, "tasks", &task.id, task).await?;
+                    changed = true;
+                }
             } else if task.state == State::RetryWait && task.wake_at.is_some_and(|t| t <= now) {
                 task.state = State::Queued;
                 task.wake_at = None;
                 put(&mut tx, "tasks", &task.id, task).await?;
+                changed = true;
             }
         }
         if tasks.iter().filter(|t| t.state.active()).count() >= 2 {
             tx.commit().await?;
-            return Ok(None);
+            return Ok((None, changed));
         }
         tasks.sort_by_key(|t| (std::cmp::Reverse(t.priority), t.created_at, t.id.clone()));
         for mut task in tasks {
@@ -358,6 +373,7 @@ impl Store {
             if task.requires_device {
                 task.state = State::WaitingDevice;
                 put(&mut tx, "tasks", &task.id, &task).await?;
+                changed = true;
                 continue;
             }
             let mut run = if let Some(run_id) = &task.active_run {
@@ -366,6 +382,7 @@ impl Store {
                     task.state = State::Blocked;
                     task.reason = Some("version_incompatible".into());
                     put(&mut tx, "tasks", &task.id, &task).await?;
+                    changed = true;
                     continue;
                 }
                 run
@@ -388,10 +405,10 @@ impl Store {
             put(&mut tx, "runs", &run.token.run_id, &run).await?;
             put(&mut tx, "tasks", &task.id, &task).await?;
             tx.commit().await?;
-            return Ok(Some(run));
+            return Ok((Some(run), true));
         }
         tx.commit().await?;
-        Ok(None)
+        Ok((None, changed))
     }
 
     pub async fn advance(
