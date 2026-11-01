@@ -3,6 +3,7 @@
 mod browser_operation;
 mod computer_observation;
 mod computer_operation;
+mod memory;
 mod model;
 mod read;
 mod scope;
@@ -11,6 +12,7 @@ mod store;
 pub use browser_operation::*;
 pub use computer_observation::*;
 pub use computer_operation::*;
+pub use memory::*;
 pub use model::*;
 pub use read::*;
 pub use scope::*;

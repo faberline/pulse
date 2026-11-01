@@ -16,21 +16,25 @@ const TASK_BUDGET: i64 = 250_000;
 const DEADLINE_MS: i64 = 15 * 60 * 1_000;
 
 mod approvals;
+mod memory;
 
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
+    memory_guard: std::sync::Arc<memory::MemoryGuard>,
 }
 
 impl Store {
     pub async fn open(path: impl AsRef<Path>, owner: &str) -> Result<Self> {
         require(!owner.is_empty(), "owner must not be empty")?;
         private_database(path.as_ref())?;
+        let memory_guard = memory::MemoryGuard::new(path.as_ref())?;
         let options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Full)
+            .pragma("secure_delete", "ON")
             .foreign_keys(true)
             .busy_timeout(Duration::from_secs(5));
         let pool = SqlitePoolOptions::new()
@@ -49,7 +53,7 @@ impl Store {
             .fetch_one(&pool)
             .await?;
         require(
-            schema <= 5,
+            schema <= 6,
             "database schema is newer than this application",
         )?;
         sqlx::migrate!().run(&pool).await?;
@@ -63,7 +67,12 @@ impl Store {
             .await?;
         require(existing == owner, "database belongs to another owner")?;
         tx.commit().await?;
-        Ok(Self { pool })
+        let store = Self {
+            pool,
+            memory_guard: std::sync::Arc::new(memory_guard),
+        };
+        store.initialize_memory().await?;
+        Ok(store)
     }
 
     pub async fn close(self) {

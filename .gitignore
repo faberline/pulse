@@ -2,6 +2,9 @@
 *.db
 *.db-shm
 *.db-wal
+*.memory-restrictions.json
+*.memory-restrictions.*.tmp
+*.memory-lock
 /coverage/
 /apps/pulse-desktop/.build/
 /apps/pulse-desktop/.swiftpm/
