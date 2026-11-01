@@ -10,7 +10,7 @@ let package = Package(
     .executable(name: "pulse-computer-fixture", targets: ["PulseComputerFixture"]),
   ],
   targets: [
-    .executableTarget(name: "PulseDesktop"),
+    .executableTarget(name: "PulseDesktop", dependencies: ["PulseComputerCore"]),
     .testTarget(name: "PulseDesktopTests", dependencies: ["PulseDesktop"]),
     .target(name: "PulseComputerCore"),
     .executableTarget(name: "PulseComputerHelper", dependencies: ["PulseComputerCore"]),

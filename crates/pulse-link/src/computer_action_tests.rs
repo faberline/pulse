@@ -270,3 +270,21 @@ async fn fixed_native_text_carries_only_approved_plain_text_and_retains_the_new_
         ReadOutcome::Rejected { .. }
     ));
 }
+
+#[tokio::test]
+async fn capability_probe_gate_is_released_before_the_single_native_command_starts() {
+    let (_root, runtime, binding, grant) = prepared("action-good").await;
+    let busy = runtime.gate.clone().acquire_owned().await.unwrap();
+    let worker = runtime.clone();
+    let task = tokio::spawn(async move { worker.act(&binding, &grant).await });
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(!runtime.helper.with_extension("effects").exists());
+    drop(busy);
+    let result = task.await.unwrap();
+    assert!(matches!(result.outcome, ReadOutcome::Completed { .. }));
+    assert_eq!(
+        std::fs::read_to_string(runtime.helper.with_extension("effects")).unwrap(),
+        "1"
+    );
+    assert_reaped(&runtime).await;
+}

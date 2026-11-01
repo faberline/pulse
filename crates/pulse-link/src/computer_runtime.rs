@@ -538,6 +538,15 @@ impl ComputerRuntime {
             .clone()
             .try_acquire_owned()
             .map_err(|_| crate::Error::Capacity)?;
+        self.call_with_permit(args, input, timeout, _permit).await
+    }
+    async fn call_with_permit(
+        &self,
+        args: &[String],
+        input: Option<Vec<u8>>,
+        timeout: Duration,
+        _permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Result<NativeResponse> {
         tokio::time::timeout(timeout, async {
             let mut command = Command::new(&self.helper);
             command

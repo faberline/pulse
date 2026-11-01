@@ -3,7 +3,7 @@ use super::*;
 use crate::{artifact::ExecutedRead, browser_session::WorkBinding, protocol::*};
 use pulse_core::{ApprovalState, ComputerIntent, Operation, OperationRequest, OperationState};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ComputerGrant {
     pub operation: Operation,
@@ -81,6 +81,15 @@ impl ComputerRuntime {
             },
             image: None,
         };
+        // A background capability probe may own the helper briefly. Reserve its
+        // gate before consuming the view, then recheck the grant and local selection.
+        let permit =
+            match tokio::time::timeout(Duration::from_secs(3), self.gate.clone().acquire_owned())
+                .await
+            {
+                Ok(Ok(permit)) => permit,
+                _ => return result(false, "computer helper busy; no command sent"),
+            };
         let admission = (|| -> Result<_> {
             let intent = grant.intent(binding)?;
             let selection = intent.observation.selection();
@@ -141,7 +150,7 @@ impl ComputerRuntime {
         let started = crate::now();
         let mut activity = self.activity.subscribe();
         let mut check = tokio::time::interval(Duration::from_millis(20));
-        let call = self.call(&args, Some(request), self.timeout);
+        let call = self.call_with_permit(&args, Some(request), self.timeout, permit);
         tokio::pin!(call);
         let response = loop {
             tokio::select! {

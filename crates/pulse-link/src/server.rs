@@ -329,8 +329,9 @@ impl Hub {
                 .collect();
         }
         let mut rows = sqlx::query(
-            "SELECT id,body FROM link_chat ORDER BY created_at DESC,rowid DESC LIMIT 10",
+            "SELECT c.id,c.body FROM link_chat c ORDER BY EXISTS(SELECT 1 FROM operation_requests r WHERE r.id=c.id AND json_extract(r.data,'$.state') IN ('pending','approved') AND json_extract(r.data,'$.proposal.expires_at')>?) DESC,c.created_at DESC,c.rowid DESC LIMIT 10",
         )
+        .bind(time)
         .fetch_all(&mut *tx)
         .await?;
         rows.reverse();
@@ -352,6 +353,13 @@ impl Hub {
                 let intent: pulse_core::BrowserIntent =
                     serde_json::from_value(request.proposal.intent.clone())?;
                 intent.source_operation_id
+            } else if let Some(request) = approval
+                .as_ref()
+                .filter(|r| r.proposal.target.starts_with("computer:"))
+            {
+                let intent: pulse_core::ComputerIntent =
+                    serde_json::from_value(request.proposal.intent.clone())?;
+                intent.observation.binding.operation_id
             } else {
                 id.clone()
             };
@@ -809,6 +817,7 @@ impl Hub {
                                 && (task.scope == "pulse:read"
                                     || pulse_core::ComputerSelection::from_scope(&task.scope)
                                         .is_some())
+                                && !operation.is_effect()
                                 && operation.permitted_by(&task.scope)
                                 && task.deadline > time,
                             "read authorization invalid",
@@ -908,7 +917,7 @@ impl Hub {
                 )?;
                 let encoded = serde_json::to_string(outcome)?;
                 let operation: ReadOp = serde_json::from_str(&row.get::<String, _>("request"))?;
-                let artifact = if matches!(&operation, ReadOp::ComputerInspect { .. })
+                let artifact = if operation.computer_selection().is_some()
                     && matches!(outcome, ReadOutcome::Completed { .. })
                 {
                     let row = sqlx::query("SELECT metadata,png FROM link_artifacts WHERE operation_id=? AND png IS NOT NULL")
@@ -959,14 +968,9 @@ impl Hub {
                 .await?
                 .rows_affected();
                 if changed == 1 {
-                    let continue_run = Self::browser_action_receipt(
-                        &mut tx,
-                        operation_id,
-                        &operation,
-                        &before,
-                        outcome,
-                    )
-                    .await?;
+                    let continue_run =
+                        Self::action_receipt(&mut tx, operation_id, &operation, &before, outcome)
+                            .await?;
                     Store::device_observation_in(
                         &mut tx,
                         task_id,
@@ -979,9 +983,7 @@ impl Hub {
                         Self::continue_model_read(&mut tx, &before, operation_id, outcome, time)
                             .await?;
                     }
-                    if matches!(operation, ReadOp::BrowserAction { .. })
-                        && matches!(outcome, ReadOutcome::Rejected { .. })
-                    {
+                    if operation.is_effect() && matches!(outcome, ReadOutcome::Rejected { .. }) {
                         let data: String = sqlx::query_scalar("SELECT data FROM tasks WHERE id=?")
                             .bind(task_id)
                             .fetch_one(&mut *tx)
@@ -991,7 +993,14 @@ impl Hub {
                             && !task.cancel_requested
                             && !task.state.terminal()
                         {
-                            task.reason = Some("browser_action_not_executed".into());
+                            task.reason = Some(
+                                if matches!(operation, ReadOp::ComputerAction { .. }) {
+                                    "computer_action_not_executed"
+                                } else {
+                                    "browser_action_not_executed"
+                                }
+                                .into(),
+                            );
                             sqlx::query("UPDATE tasks SET data=? WHERE id=?")
                                 .bind(serde_json::to_string(&task)?)
                                 .bind(task_id)
@@ -1008,7 +1017,7 @@ impl Hub {
                     ensure(stored == encoded, "result conflict")?;
                 }
                 tx.commit().await?;
-                let evidence_label = if matches!(operation, ReadOp::BrowserAction { .. }) {
+                let evidence_label = if operation.is_effect() {
                     "操作工具結果"
                 } else {
                     "只讀工具結果"
@@ -1024,6 +1033,7 @@ impl Hub {
                         selection.target.bundle_id, selection.target.window_id
                     ),
                     ReadOp::BrowserAction { .. } => "已批准的瀏覽器操作".into(),
+                    ReadOp::ComputerAction { .. } => "已批准的程式視窗操作".into(),
                 };
                 let body = match outcome {
                     ReadOutcome::Completed {
@@ -1170,7 +1180,7 @@ async fn session(hub: Arc<Hub>, device: String, mut socket: WebSocket) {
                         ClientWire::Ack{sequence,id}=>hub.ack(&device,number(&sequence)?,&id).await?,
                         ClientWire::Heartbeat{epoch:claimed}=>{ensure(number(&claimed)?==epoch,"heartbeat epoch")?;hub.renew(&device,epoch,now()).await?;send(&mut socket,&ServerWire::Renewed{epoch:epoch.to_string(),lease_ms:LEASE_MS as u32}).await?;}
                         ClientWire::Hello{..}=>return Err(crate::Error::Rejected("duplicate hello".into())),
-                        ClientWire::ComputerReady{permits}=>hub.computer_ready(&device,epoch,permits,now()).await?,
+                        ClientWire::ComputerReady{permits,interactions}=>hub.set_computer_capability(&device,epoch,permits,interactions,now()).await?,
                         ClientWire::BrowserReady{fixture_origin}=>hub.browser_ready(&device,epoch,fixture_origin.as_deref(),now()).await?,
                         ClientWire::BrowserInteractionReady{fixture_origin}=>hub.browser_interactive_ready(&device,epoch,fixture_origin.as_deref(),now()).await?,
                     }}

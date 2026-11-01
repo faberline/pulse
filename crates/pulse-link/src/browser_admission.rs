@@ -66,7 +66,7 @@ impl Hub {
         operation: &ReadOp,
     ) -> Result<bool> {
         let (url, interactive) = match operation {
-            ReadOp::ComputerInspect { .. } => return Ok(false),
+            ReadOp::ComputerInspect { .. } | ReadOp::ComputerAction { .. } => return Ok(false),
             ReadOp::Browser { url } => (url.clone(), false),
             ReadOp::BrowserInspect { url } => (url.clone(), true),
             ReadOp::BrowserAction {

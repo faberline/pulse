@@ -15,8 +15,12 @@ final class BrowserArtifactTests: XCTestCase {
       PulseTask(id: "same-task", goal: "read", revision: "3", state: state, scope: "computer:com.app:42:7:1", reason: nil, cancelRequested: cancel)
     }
     XCTAssertTrue(task("waiting_device").canReselectWindow)
+    XCTAssertTrue(task("waiting_approval").canReselectWindow)
+    XCTAssertTrue(task("ready").canReselectWindow)
     XCTAssertFalse(task("outcome_unknown").canReselectWindow)
     XCTAssertFalse(task("dispatched").canReselectWindow)
+    XCTAssertFalse(task("blocked").canReselectWindow)
+    XCTAssertTrue(PulseTask(id: "same-task", goal: "read", revision: "3", state: "blocked", scope: "computer:com.app:42:7:1", reason: "computer_action_not_executed", cancelRequested: false).canReselectWindow)
     XCTAssertFalse(task("waiting_device", cancel: true).canReselectWindow)
   }
   func testComputerSubmitRetainsOneSelectionAndTimestampUntilCloudReceipt() throws {

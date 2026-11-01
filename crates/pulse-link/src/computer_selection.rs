@@ -42,10 +42,18 @@ pub(crate) fn rebind_revision(
             && selection.valid()
             && !task.cancel_requested
             && task.deadline > now
-            && matches!(task.state, State::Queued | State::WaitingDevice),
+            && (matches!(
+                task.state,
+                State::Queued | State::WaitingDevice | State::WaitingApproval | State::Ready
+            ) || (task.state == State::Blocked
+                && task.reason.as_deref() == Some("computer_action_not_executed"))),
         "task cannot reselect a window",
     )?;
-    if selection.scope().as_deref() == Some(&task.scope) {
+    let requires_fresh_run = matches!(
+        task.state,
+        State::WaitingApproval | State::Ready | State::Blocked
+    ) || task.reason.as_deref() == Some("model_reply_ready");
+    if !requires_fresh_run && selection.scope().as_deref() == Some(&task.scope) {
         Ok(task.revision)
     } else {
         task.revision
@@ -70,20 +78,22 @@ fn eligibility(entry: &PendingSelection, tasks: &[Task], now: i64) -> Option<boo
         || task.state.terminal()
         || task.deadline <= now
         || matches!(task.state, State::OutcomeUnknown | State::Reconciling)
-        || task.reason.as_deref() == Some("model_reply_ready")
     {
         return Some(false);
-    }
-    if task.revision.to_string() == entry.permit.revision
-        && entry.permit.selection.scope().as_deref() == Some(&task.scope)
-    {
-        return Some(true);
     }
     if let HumanAction::RebindComputer { revision, .. } = &entry.action
         && task.revision.to_string() == *revision
         && task.revision.to_string() != entry.permit.revision
     {
         return None;
+    }
+    if task.reason.as_deref() == Some("model_reply_ready") {
+        return Some(false);
+    }
+    if task.revision.to_string() == entry.permit.revision
+        && entry.permit.selection.scope().as_deref() == Some(&task.scope)
+    {
+        return Some(true);
     }
     Some(false)
 }

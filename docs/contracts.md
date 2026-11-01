@@ -246,6 +246,8 @@ local executor 是一個獨立 process。它使用本機啟動參數選定工具
 
 電腦視窗可另由本機人類在對話框選擇。只在本機開放的選擇通道把特定 task、revision、程式啟動實例與視窗交給 local executor。這不是 server 可呼叫的介面。原有操作員限制仍有效。範圍有限期，local 重啟後須重新選擇；持久任務與結果仍只由既有 server／journal 保存。
 
+原生按鈕與文字操作另需一次性的人類批准。模型只能提出指定視窗的操作。server 須核對原圖、原觀察與目前任務，並在同一交易消耗批准與派工。local 須支援互動，且仍保存同一份原始觀察；執行前再次核對實際視窗。重啟、停止、取消、過期與來源變更不能產生新批准。操作結果未知時，不得重做。結果原圖與 receipt 使用既有 journal／outbox 保存，不增加另一套任務資料庫。
+
 remote executor 是 Pulse 自己的系統。它沿用既有任務 ID、run token 與 operation ID，不另加外部工作系統或 DB。它不要求 VM、SSH 或 PID。收件只表示收件；取消要求也不表示已停止。無法核對的結果保持 unknown。
 
 server 派工前仍須檢查來源、scope、revision、批准、deadline 與預算。工具回覆只提供證據，不能轉為 Human 來源。v0.4 須接上模型與工具迴圈；只有現有持久任務核心不能通過閉環驗收。

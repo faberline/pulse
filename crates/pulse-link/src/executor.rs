@@ -72,10 +72,11 @@ impl Executor {
         revision: &str,
     ) -> bool {
         match operation {
-            ReadOp::ComputerInspect { selection } => self
-                .computer
-                .as_ref()
-                .is_some_and(|runtime| runtime.permitted(task, revision, selection)),
+            ReadOp::ComputerInspect { selection } | ReadOp::ComputerAction { selection, .. } => {
+                self.computer
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.permitted(task, revision, selection))
+            }
             _ => true,
         }
     }
@@ -126,6 +127,29 @@ impl Executor {
             image: None,
         };
         match operation {
+            ReadOp::ComputerAction {
+                selection,
+                nonce,
+                element_id,
+                effect,
+                grant,
+            } => {
+                let (Some(runtime), Some(grant)) = (&self.computer, grant) else {
+                    return rejected("computer action lacks executor or approved grant");
+                };
+                let intent = serde_json::from_value::<pulse_core::ComputerIntent>(
+                    grant.operation.intent.clone(),
+                );
+                if !intent.is_ok_and(|intent| {
+                    intent.observation.selection() == selection
+                        && intent.observation.nonce == nonce
+                        && intent.element_id == element_id
+                        && intent.effect == effect
+                }) {
+                    return rejected("computer action and approval mismatch");
+                }
+                runtime.act(binding, &grant).await
+            }
             ReadOp::ComputerInspect { selection } => {
                 let binding = pulse_core::ComputerBinding {
                     operation_id: binding.operation_id.clone(),
@@ -406,7 +430,8 @@ impl Executor {
         let result = match operation {
             ReadOp::BrowserInspect { .. }
             | ReadOp::BrowserAction { .. }
-            | ReadOp::ComputerInspect { .. } => {
+            | ReadOp::ComputerInspect { .. }
+            | ReadOp::ComputerAction { .. } => {
                 Err(crate::Error::Rejected("bound work required".into()))
             }
             ReadOp::Browser { .. } => unreachable!(),

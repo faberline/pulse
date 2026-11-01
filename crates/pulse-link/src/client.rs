@@ -534,7 +534,7 @@ async fn connected(
             result=computer_checks.join_next(), if !computer_checks.is_empty()=>{
                 if epoch.is_some() && lease.borrow().live() && !journal.stopped().await? {
                     let permits=match result {Some(Ok(permits))=>permits,_=>vec![]};
-                    if !permits.is_empty() || computer_snapshot.as_ref() != Some(&permits) { wire(&mut socket,&ClientWire::ComputerReady{permits:permits.clone()}).await?; }
+                    if !permits.is_empty() || computer_snapshot.as_ref() != Some(&permits) { wire(&mut socket,&ClientWire::ComputerReady{permits:permits.clone(),interactions:true}).await?; }
                     computer_snapshot=Some(permits);
                 }
             }

@@ -1,4 +1,5 @@
 import SwiftUI
+import PulseComputerCore
 
 struct BrowserApproval: Decodable, Sendable {
   struct Token: Decodable, Sendable { let task_id: String; let revision: String }
@@ -12,22 +13,60 @@ struct BrowserApproval: Decodable, Sendable {
   struct Effect: Decodable, Sendable { let kind: String; let text: String? }
   struct Intent: Decodable, Sendable {
     let source_operation_id: String; let observation: Observation; let element_id: String; let effect: Effect
+    let computer: ComputerActionIntent?
+    enum CodingKeys: String, CodingKey { case source_operation_id, observation, element_id, effect }
+    enum SourceKeys: String, CodingKey { case binding }
+    init(from decoder: Decoder) throws {
+      let values = try decoder.container(keyedBy: CodingKeys.self)
+      let source = try values.nestedContainer(keyedBy: SourceKeys.self, forKey: .observation)
+      element_id = try values.decode(String.self, forKey: .element_id)
+      effect = try values.decode(Effect.self, forKey: .effect)
+      if source.contains(.binding) {
+        let intent = try ComputerActionIntent(from: decoder); computer = intent
+        let view = intent.observation
+        source_operation_id = view.binding.operation_id
+        observation = Observation(url: "", title: view.title, png_digest: view.image.digest,
+          elements: view.elements.map { Control(id: $0.id, label: $0.label,
+            kind: ControlKind(kind: $0.can_press ? "button" : "text", value: $0.value, form: nil)) },
+          observed_at: view.observed_at, expires_at: view.expires_at)
+      } else {
+        computer = nil
+        source_operation_id = try values.decode(String.self, forKey: .source_operation_id)
+        observation = try values.decode(Observation.self, forKey: .observation)
+      }
+    }
   }
-  struct Proposal: Decodable, Sendable { let id: String; let token: Token; let intent: Intent; let expires_at: Int64 }
+  struct Proposal: Decodable, Sendable { let id: String; let token: Token; let intent: Intent; let expires_at: Int64; let target: String? }
   let proposal: Proposal
   let intent_digest: String
   let state: String
   let reason: String?
   func canApprove(task: PulseTask?, connected: Bool, artifact: BrowserArtifact?, verifiedDigest: String?, hasImage: Bool, pending: Bool, now: Int64) -> Bool {
     guard let task else { return false }
-    return connected && !pending && hasImage && state == "pending"
+    guard connected && !pending && hasImage && state == "pending"
       && task.id == proposal.token.task_id && task.revision == proposal.token.revision
       && !task.cancelRequested && !task.terminal && task.state == "waiting_approval"
       && now < proposal.expires_at && now < proposal.intent.observation.expires_at
       && artifact?.task_id == task.id && artifact?.revision == task.revision
-      && artifact?.computer == nil && artifact?.url == proposal.intent.observation.url
       && artifact?.digest == proposal.intent.observation.png_digest
       && verifiedDigest == proposal.intent.observation.png_digest
+    else { return false }
+    if let native = proposal.intent.computer {
+      guard let artifact, artifact.validSource, let source = artifact.computer,
+        (try? native.validate(now: now)) != nil else { return false }
+      let view = native.observation
+      let target = view.target
+      let scope = "computer:\(target.bundle_id):\(target.pid):\(target.window_id):\(view.process_launched_at)"
+      return task.scope == scope && proposal.target == scope && artifact.url.isEmpty
+        && source.binding.operation_id == view.binding.operation_id && source.binding.task_id == view.binding.task_id
+        && source.binding.revision == view.binding.revision && source.binding.device == view.binding.device && source.binding.epoch == view.binding.epoch
+        && view.binding.task_id == task.id && view.binding.revision == task.revision
+        && source.selection.target.bundle_id == target.bundle_id && source.selection.target.pid == target.pid
+        && source.selection.target.window_id == target.window_id && source.selection.process_launched_at == view.process_launched_at
+        && artifact.title == view.title && artifact.observed_at == view.observed_at
+        && artifact.length == view.image.length && artifact.width == view.image.width && artifact.height == view.image.height
+    }
+    return artifact?.computer == nil && artifact?.url == proposal.intent.observation.url
   }
   var control: Control? { proposal.intent.observation.elements.first { $0.id == proposal.intent.element_id } }
   var status: String {
@@ -62,7 +101,7 @@ struct BrowserApprovalCard: View {
     VStack(alignment: .leading, spacing: 12) {
       Text(request.status).font(.headline)
       if let control = request.control {
-        if request.proposal.intent.effect.kind == "click" {
+        if ["click", "press"].contains(request.proposal.intent.effect.kind) {
           Text("點擊「\(control.label.isEmpty ? "未命名按鈕" : control.label)」")
           if let form = control.kind.form {
             Text("這會送出表單。目標：\(form.url)")
@@ -74,7 +113,8 @@ struct BrowserApprovalCard: View {
         } else {
           Text("把「\(control.label.isEmpty ? "文字欄位" : control.label)」的內容改為：")
           Text(request.proposal.intent.effect.text ?? "").textSelection(.enabled)
-          Text("只改這個欄位，不送出表單。").font(.caption).foregroundStyle(.secondary)
+          Text(request.proposal.intent.computer == nil ? "只改這個欄位，不送出表單。" : "只設定這個欄位的文字，不按 Enter。")
+            .font(.caption).foregroundStyle(.secondary)
         }
       }
       if let artifact = message.artifact { BrowserScreenshot(model: model, message: message, artifact: artifact) }

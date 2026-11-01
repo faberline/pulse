@@ -9,11 +9,26 @@ impl Store {
         reason: &str,
         now: i64,
     ) -> Result<()> {
+        let request = request(db, request_id).await?;
+        require(
+            request.proposal.target.starts_with("browser:"),
+            "browser request invalidation binding",
+        )?;
+        Self::invalidate_action_request_in(db, token, request_id, reason, now).await
+    }
+    pub async fn invalidate_action_request_in(
+        db: &mut SqliteConnection,
+        token: &Token,
+        request_id: &str,
+        reason: &str,
+        now: i64,
+    ) -> Result<()> {
         let (mut task, _) = current(db, token, now).await?;
         let mut request = request(db, request_id).await?;
         require(
             request.proposal.token == *token
-                && request.proposal.target.starts_with("browser:")
+                && (request.proposal.target.starts_with("browser:")
+                    || request.proposal.target.starts_with("computer:"))
                 && !reason.is_empty()
                 && reason.len() <= 256,
             "browser request invalidation binding",

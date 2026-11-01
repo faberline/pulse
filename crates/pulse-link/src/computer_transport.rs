@@ -28,7 +28,7 @@ pub(crate) fn validate_result(
         return ensure(artifact.is_none(), "unfinished work cannot supply an image");
     };
     match operation {
-        ReadOp::ComputerInspect { selection } => {
+        ReadOp::ComputerInspect { selection } | ReadOp::ComputerAction { selection, .. } => {
             let computer = computer
                 .as_ref()
                 .ok_or_else(|| crate::Error::Rejected("computer observation missing".into()))?;
@@ -62,7 +62,10 @@ pub(crate) fn valid_chunk_source(
     epoch: u64,
 ) -> bool {
     match (operation, &artifact.computer) {
-        (ReadOp::ComputerInspect { selection }, Some(source)) => {
+        (
+            ReadOp::ComputerInspect { selection } | ReadOp::ComputerAction { selection, .. },
+            Some(source),
+        ) => {
             source.selection == *selection
                 && source.binding.operation_id == operation_id
                 && source.binding.device == device

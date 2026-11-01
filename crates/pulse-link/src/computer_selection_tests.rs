@@ -300,6 +300,51 @@ async fn replacement_waits_for_the_new_scope_and_invalidates_cancelled_or_unknow
             .await
             .is_err()
     );
+    // A deliberate new Human selection must wait for its new revision, rather
+    // than being discarded because the previous cached reply is already ready.
+    let mut ready = store.task("task").await.unwrap();
+    ready.reason = Some("model_reply_ready".into());
+    snapshot(&journal, vec![ready.clone()], 5).await;
+    journal
+        .queue_computer_selection(
+            "reply-ready",
+            HumanAction::RebindComputer {
+                task_id: "task".into(),
+                revision: "1".into(),
+                selection: selection(),
+            },
+            selected_at + 1,
+        )
+        .await
+        .unwrap();
+    assert!(
+        journal
+            .take_computer_selection(selected_at + 1)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        journal
+            .computer_selection_statuses()
+            .await
+            .unwrap()
+            .iter()
+            .find(|s| s.source_id == "reply-ready")
+            .unwrap()
+            .state,
+        SelectionPhase::Pending
+    );
+    ready.revision = 2;
+    ready.reason = None;
+    snapshot(&journal, vec![ready], 6).await;
+    let selected = journal
+        .take_computer_selection(selected_at + 2)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.source_id, "reply-ready");
+    assert_eq!(selected.permit.revision, "2");
 }
 async fn pair(hub: &Hub, role: ClientRole) -> (String, u64) {
     let time = crate::now();

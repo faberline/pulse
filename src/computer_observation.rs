@@ -149,14 +149,7 @@ pub struct ComputerElement {
 }
 impl ComputerElement {
     fn valid(&self) -> bool {
-        let mut path = self.id.split('.');
-        let indices: Vec<_> = path.by_ref().skip(1).collect();
-        self.id.split('.').next() == Some("window")
-            && indices.len() <= 8
-            && indices.iter().all(|s| {
-                s.parse::<u8>()
-                    .is_ok_and(|n| n < 128 && n.to_string() == *s)
-            })
+        computer_element_path(&self.id)
             && self.role.len() <= 64
             && self.role != "AXSecureTextField"
             && self.label.len() <= 256
@@ -166,6 +159,15 @@ impl ComputerElement {
                 || (matches!(self.role.as_str(), "AXTextField" | "AXTextArea")
                     && self.value.is_some()))
     }
+}
+pub fn computer_element_path(value: &str) -> bool {
+    let parts: Vec<_> = value.split('.').collect();
+    parts.first() == Some(&"window")
+        && parts.len() <= 9
+        && parts[1..].iter().all(|part| {
+            part.parse::<u8>()
+                .is_ok_and(|n| n < 128 && n.to_string() == *part)
+        })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

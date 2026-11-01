@@ -8,6 +8,8 @@ use sqlx::{Row, SqliteConnection};
 struct Capability {
     epoch: i64,
     checked_at: i64,
+    #[serde(default)]
+    interactions: bool,
     permits: Vec<ComputerPermit>,
 }
 
@@ -17,6 +19,27 @@ impl Hub {
         device: &str,
         epoch: u64,
         permits: Vec<ComputerPermit>,
+        time: i64,
+    ) -> Result<()> {
+        self.set_computer_capability(device, epoch, permits, false, time)
+            .await
+    }
+    pub async fn computer_interactive_ready(
+        &self,
+        device: &str,
+        epoch: u64,
+        permits: Vec<ComputerPermit>,
+        time: i64,
+    ) -> Result<()> {
+        self.set_computer_capability(device, epoch, permits, true, time)
+            .await
+    }
+    pub(crate) async fn set_computer_capability(
+        &self,
+        device: &str,
+        epoch: u64,
+        permits: Vec<ComputerPermit>,
+        interactions: bool,
         time: i64,
     ) -> Result<()> {
         ensure(
@@ -32,7 +55,7 @@ impl Hub {
             .bind(device).bind(epoch as i64).bind(time).fetch_one(&mut *tx).await?;
         ensure(live == 1, "computer capability requires live local role")?;
         sqlx::query("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-            .bind(format!("computer:{device}")).bind(serde_json::to_string(&Capability { epoch:epoch as i64, checked_at:time, permits })?).execute(&mut *tx).await?;
+            .bind(format!("computer:{device}")).bind(serde_json::to_string(&Capability { epoch:epoch as i64, checked_at:time, interactions, permits })?).execute(&mut *tx).await?;
         tx.commit().await?;
         self.notify_change();
         Ok(())
@@ -73,8 +96,17 @@ impl Hub {
         operation: &ReadOp,
         time: i64,
     ) -> Result<bool> {
-        if let ReadOp::ComputerInspect { selection } = operation {
-            Self::computer_capable(db, device, epoch, task, revision, selection, time).await
+        if let Some(selection) = operation.computer_selection() {
+            let capable =
+                Self::computer_capable(db, device, epoch, task, revision, selection, time).await?;
+            if !capable || !operation.is_effect() {
+                return Ok(capable);
+            }
+            let data: String = sqlx::query_scalar("SELECT value FROM settings WHERE key=?")
+                .bind(format!("computer:{device}"))
+                .fetch_one(db)
+                .await?;
+            Ok(serde_json::from_str::<Capability>(&data)?.interactions)
         } else {
             Self::browser_capable(db, device, epoch, operation).await
         }

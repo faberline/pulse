@@ -380,6 +380,7 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                         | ReadOp::BrowserInspect { .. }
                         | ReadOp::BrowserAction { .. }
                         | ReadOp::ComputerInspect { .. }
+                        | ReadOp::ComputerAction { .. }
                 );
                 ensure(
                     used < if browser { 934 } else { 998 }
@@ -496,7 +497,8 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                                 | ReadOp::BrowserAction { .. },
                             ..
                         } | ServerPayload::Read {
-                            operation: ReadOp::ComputerInspect { .. },
+                            operation: ReadOp::ComputerInspect { .. }
+                                | ReadOp::ComputerAction { .. },
                             ..
                         }
                     ) && matches!(outcome, ReadOutcome::Completed { .. }),

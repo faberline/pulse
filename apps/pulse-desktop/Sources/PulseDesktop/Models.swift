@@ -34,7 +34,11 @@ struct PulseTask: Decodable, Identifiable, Sendable {
   let reason: String?
   let cancelRequested: Bool
   var terminal: Bool { ["succeeded", "failed", "cancelled"].contains(state) }
-  var canReselectWindow: Bool { scope?.hasPrefix("computer:") == true && !cancelRequested && ["queued", "waiting_device"].contains(state) }
+  var canReselectWindow: Bool {
+    let recoverable = ["queued", "waiting_device", "waiting_approval", "ready"].contains(state)
+      || (state == "blocked" && reason == "computer_action_not_executed")
+    return scope?.hasPrefix("computer:") == true && !cancelRequested && recoverable
+  }
   var status: String {
     if reason == "browser_capability_wait" { return "等待本機瀏覽器；請核對安裝與網址範圍" }
     if reason == "computer_capability_wait" || reason == "computer_selection_wait" { return "等待選定視窗或電腦存取權限" }

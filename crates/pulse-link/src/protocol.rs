@@ -53,6 +53,14 @@ pub enum ReadOp {
     ComputerInspect {
         selection: pulse_core::ComputerSelection,
     },
+    ComputerAction {
+        selection: pulse_core::ComputerSelection,
+        nonce: String,
+        element_id: String,
+        effect: pulse_core::ComputerEffect,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grant: Option<Box<crate::computer_runtime::ComputerGrant>>,
+    },
     BrowserAction {
         session_id: String,
         nonce: String,
@@ -63,8 +71,50 @@ pub enum ReadOp {
     },
 }
 impl ReadOp {
+    pub fn is_effect(&self) -> bool {
+        matches!(
+            self,
+            Self::BrowserAction { .. } | Self::ComputerAction { .. }
+        )
+    }
+    pub(crate) fn computer_selection(&self) -> Option<&pulse_core::ComputerSelection> {
+        match self {
+            Self::ComputerInspect { selection } | Self::ComputerAction { selection, .. } => {
+                Some(selection)
+            }
+            _ => None,
+        }
+    }
     /// Stable lexical identity only. Executor scope, secret and symlink checks remain separate.
     pub(crate) fn canonical(&self) -> Result<Self> {
+        if let Self::ComputerAction {
+            selection,
+            nonce,
+            element_id,
+            effect,
+            ..
+        } = self
+        {
+            ensure(
+                selection.valid()
+                    && uuid::Uuid::parse_str(nonce).is_ok()
+                    && pulse_core::computer_element_path(element_id)
+                    && match effect {
+                        pulse_core::ComputerEffect::SetText { text } => {
+                            pulse_core::browser_input_text(text)
+                        }
+                        _ => true,
+                    },
+                "invalid computer action",
+            )?;
+            return Ok(Self::ComputerAction {
+                selection: selection.clone(),
+                nonce: nonce.clone(),
+                element_id: element_id.clone(),
+                effect: effect.clone(),
+                grant: None,
+            });
+        }
         if let Self::ComputerInspect { selection } = self {
             ensure(selection.valid(), "invalid computer selection")?;
             return Ok(self.clone());
@@ -113,7 +163,8 @@ impl ReadOp {
             Self::Browser { .. }
             | Self::BrowserInspect { .. }
             | Self::BrowserAction { .. }
-            | Self::ComputerInspect { .. } => {
+            | Self::ComputerInspect { .. }
+            | Self::ComputerAction { .. } => {
                 unreachable!()
             }
         };
@@ -136,14 +187,17 @@ impl ReadOp {
             Self::Browser { .. }
             | Self::BrowserInspect { .. }
             | Self::BrowserAction { .. }
-            | Self::ComputerInspect { .. } => {
+            | Self::ComputerInspect { .. }
+            | Self::ComputerAction { .. } => {
                 unreachable!()
             }
         })
     }
     pub fn permitted_by(&self, scope: &str) -> bool {
         match self {
-            Self::ComputerInspect { selection } => selection.scope().as_deref() == Some(scope),
+            Self::ComputerInspect { selection } | Self::ComputerAction { selection, .. } => {
+                selection.scope().as_deref() == Some(scope)
+            }
             Self::Browser { url } => {
                 pulse_core::browser_url(scope).is_some_and(|allowed| allowed.as_str() == url)
             }
@@ -310,6 +364,8 @@ pub struct ChatMessage {
 pub enum ClientWire {
     ComputerReady {
         permits: Vec<pulse_core::ComputerPermit>,
+        #[serde(default)]
+        interactions: bool,
     },
     BrowserInteractionReady {
         fixture_origin: Option<String>,

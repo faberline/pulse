@@ -730,6 +730,14 @@ impl Store {
         operation_id: &str,
         evidence: &str,
     ) -> Result<()> {
+        Self::action_not_executed_in(db, token, operation_id, evidence).await
+    }
+    pub async fn action_not_executed_in(
+        db: &mut SqliteConnection,
+        token: &Token,
+        operation_id: &str,
+        evidence: &str,
+    ) -> Result<()> {
         let mut operation: Operation = load(db, "operations", operation_id).await?;
         require(
             operation.token == *token
@@ -747,7 +755,14 @@ impl Store {
             && task.active_run.as_deref() == Some(&token.run_id)
         {
             task.state = State::Blocked;
-            task.reason = Some("browser_action_not_executed".into());
+            task.reason = Some(
+                if operation.target.starts_with("computer:") {
+                    "computer_action_not_executed"
+                } else {
+                    "browser_action_not_executed"
+                }
+                .into(),
+            );
             task.active_run = None;
         }
         put(db, "tasks", &task.id, &task).await

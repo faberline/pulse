@@ -96,8 +96,8 @@ impl Hub {
             .tool
             .as_ref()
             .ok_or_else(|| crate::Error::Rejected("missing tool proposal".into()))?;
-        if matches!(call.operation, ReadOp::BrowserAction { .. }) {
-            return self.propose_browser_action(token, call, time).await;
+        if call.operation.is_effect() {
+            return self.propose_action(token, call, time).await;
         }
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
         let (mut task, mut run) = current(&mut tx, token, time).await?;

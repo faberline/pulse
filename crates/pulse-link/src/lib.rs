@@ -1,8 +1,8 @@
+mod action_intent;
 pub mod browser;
 mod browser_admission;
 mod browser_controls;
 pub mod browser_network;
-mod browser_orchestration;
 pub mod browser_runtime;
 pub mod browser_session;
 pub mod client;
@@ -14,6 +14,7 @@ mod computer_transport;
 mod conversation;
 pub mod executor;
 pub mod journal;
+mod operation_orchestration;
 pub mod protocol;
 pub mod provider;
 pub mod remote;
