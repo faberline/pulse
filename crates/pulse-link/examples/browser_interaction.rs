@@ -39,7 +39,7 @@ fn ensure(ok: bool, why: &str) -> Result<()> {
 
 fn page(count: usize) -> Html<String> {
     Html(format!(
-        "<!doctype html><meta charset=utf-8><title>Pulse interaction fixture</title><h1>Counter: {count}</h1><form action=/count method=post><input type=hidden name=job value=pulse-fixture><button type=submit>Count once</button></form><label>Message <input type=text value=''></label>"
+        "<!doctype html><meta charset=utf-8><title>Pulse interaction fixture</title><h1>Counter: {count}</h1><form action=/count method=post accept-charset=UTF-8><input type=hidden name=job value=pulse-fixture><button type=submit>Count once</button></form><label>Message <input type=text value=''></label>"
     ))
 }
 fn model(operation: ReadOp, id: &str) -> Reply {
@@ -182,8 +182,22 @@ async fn main() -> Result<()> {
     }
     let cut = std::env::args().nth(2);
     ensure(
-        cut.as_deref()
-            .is_none_or(|c| matches!(c, "effect" | "result" | "stale" | "reject")),
+        cut.as_deref().is_none_or(|c| {
+            matches!(
+                c,
+                "effect"
+                    | "result"
+                    | "stale"
+                    | "reject"
+                    | "external"
+                    | "charset"
+                    | "implicit"
+                    | "direction"
+                    | "wrap"
+                    | "charset-field"
+                    | "base"
+            )
+        }),
         "unknown native crash cut",
     )?;
     let driver = PathBuf::from(
@@ -203,6 +217,22 @@ async fn main() -> Result<()> {
     let visible_revision = Arc::new(AtomicUsize::new(0));
     let get_revision = visible_revision.clone();
     let refresh = cut.as_deref() == Some("stale");
+    let unsupported = cut
+        .as_deref()
+        .filter(|c| {
+            matches!(
+                *c,
+                "external"
+                    | "charset"
+                    | "implicit"
+                    | "direction"
+                    | "wrap"
+                    | "charset-field"
+                    | "base"
+            )
+        })
+        .map(str::to_owned);
+    let form_case = unsupported.clone();
     let count_path = dir.path().join("counter.txt");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let origin = format!("http://{}/", listener.local_addr()?);
@@ -212,8 +242,42 @@ async fn main() -> Result<()> {
             get(move || {
                 let counter = get_count.clone();
                 let revision = get_revision.clone();
+                let form_case = form_case.clone();
                 async move {
                     let mut result = page(counter.load(Ordering::SeqCst));
+                    match form_case.as_deref() {
+                        Some("external") => {
+                            result.0 = result
+                                .0
+                                .replace("<form action=", "<form id=fixture action=");
+                            result.0.push_str(
+                                "<input form=fixture type=hidden name=external value=extra>",
+                            );
+                        }
+                        Some("charset") => {
+                            result.0 = result
+                                .0
+                                .replace("accept-charset=UTF-8", "accept-charset=Shift_JIS")
+                        }
+                        Some("implicit") => result.0 = result.0.replace("accept-charset=UTF-8", ""),
+                        Some("direction") => {
+                            result.0 = result.0.replace(
+                                "<input type=hidden name=job value=pulse-fixture>",
+                                "<input type=text name=job value=pulse-fixture dirname=job.dir>",
+                            )
+                        }
+                        Some("wrap") => {
+                            result.0 = result.0.replace(
+                                "<input type=hidden name=job value=pulse-fixture>",
+                                "<textarea name=job wrap=hard cols=1>pulse-fixture</textarea>",
+                            )
+                        }
+                        Some("charset-field") => {
+                            result.0 = result.0.replace("name=job", "name=_charset_")
+                        }
+                        Some("base") => result.0.push_str("<base target=another-window>"),
+                        _ => {}
+                    }
                     if refresh {
                         result.0.push_str(&format!(
                             "<p>View revision: {}</p><meta http-equiv=refresh content=4>",
@@ -297,6 +361,30 @@ async fn main() -> Result<()> {
             "native inspection failed: {outcome:?}"
         )));
     };
+    if let Some(case) = unsupported {
+        ensure(
+            !observation
+                .elements
+                .iter()
+                .any(|e| matches!(e.kind, BrowserElementKind::Button { .. })),
+            "unsupported form exposed for approval",
+        )?;
+        ensure(
+            counter.load(Ordering::SeqCst) == 0,
+            "unsupported form submitted",
+        )?;
+        std::fs::write(
+            dir.path().join("unsupported-form.json"),
+            serde_json::to_vec_pretty(&json!({"case":case,"counter":0,"outcome":outcome}))?,
+        )?;
+        runtime.maintain(None, &[]).await;
+        server.abort();
+        println!(
+            "Native unsupported form passed ({case}): {}",
+            dir.keep().display()
+        );
+        return Ok(());
+    }
     ensure(
         observation.elements.len() == 2,
         "native control catalog missing",

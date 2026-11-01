@@ -108,8 +108,8 @@ impl FixtureBrowser {
         )?;
         let charset = text(self.property(form, "acceptCharset").await?, 64)?.to_ascii_lowercase();
         ensure(
-            charset.is_empty() || matches!(charset.as_str(), "utf-8" | "utf8"),
-            "unsupported form charset",
+            matches!(charset.as_str(), "utf-8" | "utf8"),
+            "explicit UTF-8 form charset required",
         )?;
         let controls = self
             .find_controls(Some(form), "input,textarea,select,button")
@@ -123,7 +123,23 @@ impl FixtureBrowser {
             if name.is_empty() {
                 continue;
             }
+            ensure(
+                !name.eq_ignore_ascii_case("_charset_"),
+                "automatic charset fields are unsupported",
+            )?;
             let tag = text(self.control_get(&id, "name").await?, 32)?;
+            if matches!(tag.as_str(), "input" | "textarea") {
+                ensure(
+                    self.control_get(&id, "attribute/dirname").await?.is_null(),
+                    "automatic direction fields are unsupported",
+                )?;
+            }
+            if tag == "textarea" {
+                ensure(
+                    text(self.property(&id, "wrap").await?, 32)? != "hard",
+                    "automatic form line wrapping is unsupported",
+                )?;
+            }
             let kind = if tag == "textarea" {
                 "textarea".into()
             } else {
