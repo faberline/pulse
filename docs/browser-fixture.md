@@ -1,6 +1,6 @@
 # 專用瀏覽器觀察基礎
 
-工作單：[#19](https://github.com/faberline/pulse/issues/19)。對應 [日常助理 D03](dot-parity.md)。這是開發用 adapter，尚未接進 server、模型或 SwiftUI 工具。
+工作單：[#19](https://github.com/faberline/pulse/issues/19)。對應 [日常助理 D03](dot-parity.md)。本頁記錄原始開發 adapter。後續產品讀取整合見 [browser-chat.md](browser-chat.md)，產品不使用這個未受網路限制的入口。
 
 `FixtureBrowser` 經本機 WebDriver 建立新 Chrome session。沒有 attach 既有 profile 或接受任意 JS 的介面。只發送固定命令：建立／刪除 session、導覽、取得目前 URL、標題、body 文字與 PNG 截圖。session 與 element ID 先核對，再組成固定路徑。
 

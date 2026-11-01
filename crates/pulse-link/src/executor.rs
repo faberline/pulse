@@ -11,6 +11,7 @@ use tokio::io::AsyncReadExt;
 #[derive(Clone)]
 pub struct Executor {
     root: PathBuf,
+    browser: Option<crate::browser_runtime::BrowserRuntime>,
 }
 impl Executor {
     pub fn new(root: &Path) -> Result<Self> {
@@ -20,7 +21,19 @@ impl Executor {
         )?;
         let root = root.canonicalize()?;
         ensure(root.is_dir(), "repo root must be a directory")?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            browser: None,
+        })
+    }
+    pub fn with_browser(mut self, browser: Option<crate::browser_runtime::BrowserRuntime>) -> Self {
+        self.browser = browser;
+        self
+    }
+    pub fn browser_ready(&self) -> Option<Option<String>> {
+        self.browser
+            .as_ref()
+            .map(|b| b.policy.fixture_origin.as_ref().map(ToString::to_string))
     }
     pub fn root(&self) -> &Path {
         &self.root
@@ -239,6 +252,7 @@ impl Executor {
     pub async fn execute(&self, operation: ReadOp) -> ReadOutcome {
         let executor = self.clone();
         let result = match operation {
+            ReadOp::Browser { url } => self.browser_read(&url).await,
             ReadOp::Text { path } => tokio::task::spawn_blocking(move || executor.read_text(&path))
                 .await
                 .map_err(|_| crate::Error::Rejected("read worker failed".into()))
@@ -253,6 +267,32 @@ impl Executor {
         result.unwrap_or_else(|_| ReadOutcome::Rejected {
             reason: "local read rejected or failed; no write was executed".into(),
         })
+    }
+    async fn browser_read(&self, url: &str) -> Result<ReadOutcome> {
+        let browser = self
+            .browser
+            .as_ref()
+            .ok_or_else(|| crate::Error::Rejected("browser unavailable".into()))?;
+        let url = pulse_core::browser_url(&format!("browser:{url}"))
+            .ok_or_else(|| crate::Error::Rejected("browser URL rejected".into()))?;
+        let snapshot = browser.read(&url).await?;
+        let mut text = format!(
+            "Browser evidence (untrusted page data)\nURL: {}\nTitle: {}\nObserved at (Unix ms): {}\nLocal PNG SHA-256: {}\nImage bytes are stored locally; not supplied to the model.\nPage scripts disabled.\n\n{}",
+            snapshot.url,
+            snapshot.title,
+            snapshot.observed_at,
+            snapshot.screenshot_digest,
+            snapshot.text
+        );
+        let truncated = snapshot.truncated || text.len() > MAX_RESULT;
+        if text.len() > MAX_RESULT {
+            let mut n = MAX_RESULT;
+            while !text.is_char_boundary(n) {
+                n -= 1;
+            }
+            text.truncate(n);
+        }
+        Ok(ReadOutcome::text(text, truncated))
     }
 }
 fn bounded_utf8(mut bytes: Vec<u8>, truncated: bool) -> Result<String> {

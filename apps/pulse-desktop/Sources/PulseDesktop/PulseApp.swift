@@ -132,10 +132,12 @@ struct ChatView: View {
       if let task = model.task {
         Text(task.status).font(.caption)
         Button("取消任務", action: model.cancelTask).disabled(task.terminal || task.cancelRequested)
-        DisclosureGroup("更多操作") {
-          Button("讀取 README") { model.read(["kind": "text", "path": "README.md"]) }
-          Button("Git 狀態") { model.read(["kind": "git_status"]) }
-        }.disabled(task.terminal)
+        if task.scope == nil || task.scope == "pulse:read" {
+          DisclosureGroup("更多操作") {
+            Button("讀取 README") { model.read(["kind": "text", "path": "README.md"]) }
+            Button("Git 狀態") { model.read(["kind": "git_status"]) }
+          }.disabled(task.terminal)
+        }
       }
       Button("更新進度") { model.action(["kind": "status"]) }
       Button(model.state.stopped ? "恢復本機工具" : "暫停本機工具", action: model.toggleLocal)

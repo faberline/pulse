@@ -672,6 +672,7 @@ impl Hub {
                                 && !task.state.terminal()
                                 && !task.cancel_requested
                                 && task.scope == "pulse:read"
+                                && operation.permitted_by(&task.scope)
                                 && task.deadline > time,
                             "read authorization invalid",
                         )?;
@@ -810,6 +811,7 @@ impl Hub {
                     ReadOp::List { path } => format!("目錄 {path}"),
                     ReadOp::Text { path } | ReadOp::GitDiff { path } => path,
                     ReadOp::GitStatus => "Git 狀態".into(),
+                    ReadOp::Browser { url } => format!("網頁 {url}"),
                 };
                 let body = match outcome {
                     ReadOutcome::Completed {
@@ -933,6 +935,7 @@ async fn session(hub: Arc<Hub>, device: String, mut socket: WebSocket) {
                         ClientWire::Ack{sequence,id}=>hub.ack(&device,number(&sequence)?,&id).await?,
                         ClientWire::Heartbeat{epoch:claimed}=>{ensure(number(&claimed)?==epoch,"heartbeat epoch")?;hub.renew(&device,epoch,now()).await?;send(&mut socket,&ServerWire::Renewed{epoch:epoch.to_string(),lease_ms:LEASE_MS as u32}).await?;}
                         ClientWire::Hello{..}=>return Err(crate::Error::Rejected("duplicate hello".into())),
+                        ClientWire::BrowserReady{fixture_origin}=>hub.browser_ready(&device,epoch,fixture_origin.as_deref(),now()).await?,
                     }}
                     Message::Close(_)=>break,
                     Message::Ping(data)=>{socket.send(Message::Pong(data)).await.map_err(|_|crate::Error::Rejected("socket closed".into()))?;}

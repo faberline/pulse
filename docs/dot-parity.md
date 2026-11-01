@@ -10,7 +10,7 @@
 |---|---|---|
 | D01 | 安裝 app，設定模型與連線，配對後從一個對話框工作 | 部分。已有 bundle、Keychain 與兩角色配對；仍需首次啟動及重新安裝實測 |
 | D02 | 用自然對話交錯 A/B，追問、修訂、查詢與取消 | 部分。已有明確目標的控制、歧義澄清與有效決策；仍需一般追問與較完整的自然語言關聯 |
-| D03 | 開啟網頁，導覽、讀取內容、截圖，附 URL 與取得時間 | 部分。已有專用 Chrome 的自有測試頁 adapter 與原生文字／截圖證據；尚未接進產品、一般網站及完整網路權限，見 browser-fixture.md |
+| D03 | 開啟網頁，導覽、讀取內容、截圖，附 URL 與取得時間 | 部分。已接上對話／兩家模型／local Chrome 讀取。已有 public 頁面與私網阻擋實測；頁面腳本停用、截圖僅留本機，互動及圖片交付尚待接受，見 browser-chat.md |
 | D04 | 觀察指定 app，點擊與輸入，能隨時停止 | 待實作。須有真正 macOS adapter、系統權限檢查、目標與畫面新鮮度核對 |
 | D05 | 操作前看清楚目標與效果，批准後才執行；改動後的舊批准失效 | 部分。core 只有模擬效果；真實工具須綁定 task revision、目標、intent digest、operation ID 與 local 能力 |
 | D06 | 明確要求記住偏好，能查來源、修正與刪除，重啟仍有效 | 待實作。沿用 K15 的 90 天知識期限；記憶不能產生授權，刪除須處理檢索、context 與恢復副本 |
@@ -49,4 +49,5 @@
 - [#19](https://github.com/faberline/pulse/issues/19)：專用瀏覽器觀察基礎。75 個正常 Rust 測試與真正 Chrome fixture 通過；工具尚未暴露給模型。此項是後續產品整合的準備，仍須獨立接受。
 - [#22](https://github.com/faberline/pulse/issues/22)：持久的一次性批准核心，見 [批准基礎](v0.5-approval.md)。95 個正常 Rust 測試及 155 個 hard-exit 子程序樣本通過；真實 browser／computer 的操作卡片與派工仍待整合，D05 保持未接受。
 - [#24](https://github.com/faberline/pulse/issues/24)：修正第 1001 次查詢被拒絕的通知交接缺口，見 [交接證據](notification-handoff.md)。107 個正常 Rust 測試通過；新增工作前先恢復 pending 人類事件，通知背壓不重複呼叫模型。執行版本為 `pulse-remote-7`。
+- [#26](https://github.com/faberline/pulse/issues/26)：真實 browser 讀取接進單一對話、依網址限縮的模型工具、獨立 local process 與持久 receipt。兩家原生 UI 各 2 次模型呼叫／1 次 Chrome 讀取，隨機頁面標記一致。私網跳轉／子資源、頁面腳本、下載與中途取消另做原生檢查，見 [瀏覽器對話候選](browser-chat.md)。D03 尚未接受，D04 電腦操作仍待實作。
 - 原 v0.1–v0.4 issue／PR 仍保留原狀。milestone 名稱已改為純版本號，原 description 與需求完整保留。v0.1 尚有三項開啟的工作，發布判定仍為 HOLD，沒有 RC 或發布接受。

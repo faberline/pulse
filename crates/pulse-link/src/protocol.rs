@@ -38,14 +38,21 @@ pub enum ReadOp {
     Text { path: String },
     GitStatus,
     GitDiff { path: String },
+    Browser { url: String },
 }
 impl ReadOp {
     /// Stable lexical identity only. Executor scope, secret and symlink checks remain separate.
     pub(crate) fn canonical(&self) -> Result<Self> {
+        if let Self::Browser { url } = self {
+            let url = pulse_core::browser_url(&format!("browser:{url}"))
+                .ok_or_else(|| crate::Error::Rejected("invalid browser URL".into()))?;
+            return Ok(Self::Browser { url: url.into() });
+        }
         let path = match self {
             Self::List { path } if path.is_empty() => return Ok(self.clone()),
             Self::List { path } | Self::Text { path } | Self::GitDiff { path } => path,
             Self::GitStatus => return Ok(self.clone()),
+            Self::Browser { .. } => unreachable!(),
         };
         let parts = std::path::Path::new(path)
             .components()
@@ -63,7 +70,16 @@ impl ReadOp {
             Self::Text { .. } => Self::Text { path },
             Self::GitDiff { .. } => Self::GitDiff { path },
             Self::GitStatus => unreachable!(),
+            Self::Browser { .. } => unreachable!(),
         })
+    }
+    pub fn permitted_by(&self, scope: &str) -> bool {
+        match self {
+            Self::Browser { url } => {
+                pulse_core::browser_url(scope).is_some_and(|allowed| allowed.as_str() == url)
+            }
+            _ => scope == "pulse:read",
+        }
     }
 }
 
@@ -193,6 +209,9 @@ pub struct ChatMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientWire {
+    BrowserReady {
+        fixture_origin: Option<String>,
+    },
     Hello {
         device: String,
         cursor: String,

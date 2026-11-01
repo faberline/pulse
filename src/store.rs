@@ -127,7 +127,7 @@ impl Store {
         let (mut task, _) = current(db, token, now).await?;
         require(
             task.state == State::WaitingDevice
-                && task.scope == "pulse:read"
+                && crate::read_scope(&task.scope)
                 && task.tool_calls < 16
                 && !unresolved(db, &task.id).await?,
             "remote read policy or limit",
@@ -889,7 +889,7 @@ async fn apply(
                 dependencies,
             } => {
                 require(
-                    !id.is_empty() && !goal.trim().is_empty() && scope == "pulse:read",
+                    !id.is_empty() && !goal.trim().is_empty() && crate::read_scope(&scope),
                     "invalid task goal/scope/ID",
                 )?;
                 let existing: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE id=?")
@@ -952,17 +952,23 @@ async fn apply(
                 id,
                 expected_revision,
                 goal,
+                scope,
             } => {
                 let mut task: Task = load(db, "tasks", &id).await?;
                 require(
                     task.revision == expected_revision
                         && !task.state.terminal()
                         && !task.cancel_requested
-                        && !goal.trim().is_empty(),
+                        && !goal.trim().is_empty()
+                        && scope.as_ref().is_none_or(|s| crate::read_scope(s)),
                     "revision or task state conflict",
                 )?;
                 task.revision += 1;
                 task.goal = goal.clone();
+                if let Some(scope) = scope {
+                    task.scope = scope;
+                    task.authorization_event = event_id.into();
+                }
                 task.decisions.push(Decision {
                     event_id: event_id.into(),
                     text: goal,
@@ -1165,7 +1171,7 @@ async fn reconcile_read(
     require(
         task.revision == revision
             && !task.cancel_requested
-            && task.scope == "pulse:read"
+            && crate::read_scope(&task.scope)
             && task.deadline > now,
         "read review revision, scope or deadline",
     )?;
