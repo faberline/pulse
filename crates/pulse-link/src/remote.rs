@@ -9,7 +9,7 @@ pub fn versions() -> Versions {
 }
 fn manifest(provider: Option<&Provider>) -> Versions {
     Versions {
-        workflow: "pulse-remote-6".into(),
+        workflow: "pulse-remote-7".into(),
         schema: "1".into(),
         prompt: "effective-read-2".into(),
         tools: "pulse-read-2".into(),
@@ -22,6 +22,18 @@ pub async fn step(hub: &Hub, time: i64) -> Result<bool> {
     step_with(hub, None, time).await
 }
 pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Result<bool> {
+    if !hub.core.notification_capacity_available().await? {
+        return Ok(false);
+    }
+    let pending = hub.core.pending_events(100).await?;
+    if !pending.is_empty() {
+        // Finish durable ingress (including cancellation) before starting more work.
+        for event in pending {
+            hub.core.route(&event).await?;
+            hub.notify_change();
+        }
+        return Ok(true);
+    }
     match hub.dispatch_model_read(&manifest(provider), time).await {
         Ok(true) => return Ok(true),
         Ok(false) | Err(crate::Error::Capacity) => {}
@@ -53,16 +65,16 @@ pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Res
                 Ok(request) => {
                     let round = run.checkpoint["round"].as_u64().unwrap_or(0);
                     let call = format!("model:{}:{}:{round}", run.token.run_id, run.token.revision);
-                    match hub
-                        .core
-                        .reserve(
+                    match commit_when_room(|| {
+                        hub.core.reserve(
                             &run.token,
                             &call,
                             20_000,
                             "luna-haiku-short-ceiling-2026-11-01",
                             now(),
                         )
-                        .await
+                    })
+                    .await
                     {
                         Ok(true) => match request.send().await {
                             Ok(reply) => {
@@ -102,9 +114,8 @@ pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Res
             }
         }
     }
-    let result = hub
-        .core
-        .advance(
+    let result = commit_when_room(|| {
+        hub.core.advance(
             &run.token,
             State::Blocked,
             json!({"phase":"waiting","reason":reason}),
@@ -112,7 +123,8 @@ pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Res
             None,
             now(),
         )
-        .await;
+    })
+    .await;
     if let Err(error) = result
         && !matches!(error, pulse_core::Error::Rejected(_))
     {
@@ -128,8 +140,28 @@ pub async fn run(hub: Hub) -> Result<()> {
         .recover(&manifest(provider.as_ref()), now())
         .await?;
     loop {
-        if !step_with(&hub, provider.as_ref(), now()).await? {
+        let progressed = match step_with(&hub, provider.as_ref(), now()).await {
+            Ok(progressed) => progressed,
+            Err(crate::Error::Capacity | crate::Error::Core(pulse_core::Error::Capacity)) => false,
+            Err(error) => return Err(error),
+        };
+        if !progressed {
             tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+}
+
+// Retry only local transactions. Each attempt rechecks the token and deadline;
+// never wrap an HTTP/provider call in this loop.
+async fn commit_when_room<T, F, Fut>(mut commit: F) -> pulse_core::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = pulse_core::Result<T>>,
+{
+    loop {
+        match commit().await {
+            Err(pulse_core::Error::Capacity) => tokio::time::sleep(Duration::from_secs(1)).await,
+            result => return result,
         }
     }
 }

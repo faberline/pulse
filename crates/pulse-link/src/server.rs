@@ -296,17 +296,27 @@ impl Hub {
         Ok(())
     }
     pub async fn snapshot(&self, device: &str, epoch: u64, time: i64) -> Result<()> {
+        // Projection reads and the domain-notification handoff share one committed view.
+        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
         let local = sqlx::query(
             "SELECT lease_until,stopped FROM link_device WHERE role='local_executor' AND revoked=0",
         )
-        .fetch_optional(&self.db)
+        .fetch_optional(&mut *tx)
         .await?
         .map(|row| LocalStatus {
             connected: row.get::<i64, _>("lease_until") > time,
             stopped: row.get::<i64, _>("stopped") != 0,
         })
         .unwrap_or_default();
-        let mut tasks = self.core.list_tasks(20).await?;
+        let data: Vec<String> = sqlx::query_scalar(
+            "SELECT data FROM tasks ORDER BY json_extract(data,'$.created_at') DESC,id LIMIT 20",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut tasks = data
+            .into_iter()
+            .map(|data| serde_json::from_str::<pulse_core::Task>(&data))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         for task in &mut tasks {
             task.goal = short(&task.goal, 2048);
             task.decisions.clear();
@@ -321,7 +331,7 @@ impl Hub {
         let mut rows = sqlx::query(
             "SELECT id,body FROM link_chat ORDER BY created_at DESC,rowid DESC LIMIT 10",
         )
-        .fetch_all(&self.db)
+        .fetch_all(&mut *tx)
         .await?;
         rows.reverse();
         let messages = rows
@@ -351,8 +361,42 @@ impl Hub {
                 }
             }
         }
-        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
         Self::enqueue(&mut tx, device, epoch, payload).await?;
+        // This ACK means durable transfer of coalescible state updates, never user read/acceptance.
+        // Human journal replays may carry their original epoch; the current device lease owns delivery.
+        let active_chat: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM link_device WHERE id=? AND role='chat' AND revoked=0 AND lease_until>?")
+            .bind(device).bind(time).fetch_one(&mut *tx).await?;
+        if active_chat == 1 {
+            let cursor: Option<String> = sqlx::query_scalar(
+                "SELECT value FROM settings WHERE key='chat_core_outbox_cursor'",
+            )
+            .fetch_optional(&mut *tx)
+            .await?;
+            let cursor = cursor
+                .as_deref()
+                .unwrap_or("0")
+                .parse::<i64>()
+                .map_err(|_| crate::Error::Rejected("invalid core notification cursor".into()))?;
+            ensure(cursor >= 0, "invalid core notification cursor")?;
+            let allocated: i64 = sqlx::query_scalar(
+                "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='outbox'),0)",
+            )
+            .fetch_one(&mut *tx)
+            .await?;
+            ensure(
+                cursor <= allocated,
+                "core notification cursor exceeds its history",
+            )?;
+            let latest: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(sequence),0) FROM outbox")
+                .fetch_one(&mut *tx)
+                .await?;
+            if latest > cursor {
+                sqlx::query("UPDATE outbox SET acknowledged=1 WHERE acknowledged=0 AND sequence>? AND sequence<=?")
+                    .bind(cursor).bind(latest).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO settings(key,value) VALUES('chat_core_outbox_cursor',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+                    .bind(latest.to_string()).execute(&mut *tx).await?;
+            }
+        }
         tx.commit().await?;
         Ok(())
     }

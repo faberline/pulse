@@ -48,4 +48,5 @@
 - [PR #20](https://github.com/faberline/pulse/pull/20)：日常進度問句與明確控制，head `eb55b3afe60807e55bba7a5394afdfa0b80970df`。69 個正常 Rust 測試及六項當前 head CI 通過。D02 仍缺一般追問與完整自然語言關聯。
 - [#19](https://github.com/faberline/pulse/issues/19)：專用瀏覽器觀察基礎。75 個正常 Rust 測試與真正 Chrome fixture 通過；工具尚未暴露給模型。此項是後續產品整合的準備，仍須獨立接受。
 - [#22](https://github.com/faberline/pulse/issues/22)：持久的一次性批准核心，見 [批准基礎](v0.5-approval.md)。95 個正常 Rust 測試及 155 個 hard-exit 子程序樣本通過；真實 browser／computer 的操作卡片與派工仍待整合，D05 保持未接受。
+- [#24](https://github.com/faberline/pulse/issues/24)：修正第 1001 次查詢被拒絕的通知交接缺口，見 [交接證據](notification-handoff.md)。107 個正常 Rust 測試通過；新增工作前先恢復 pending 人類事件，通知背壓不重複呼叫模型。執行版本為 `pulse-remote-7`。
 - 原 v0.1–v0.4 issue／PR 仍保留原狀。milestone 名稱已改為純版本號，原 description 與需求完整保留。v0.1 尚有三項開啟的工作，發布判定仍為 HOLD，沒有 RC 或發布接受。
