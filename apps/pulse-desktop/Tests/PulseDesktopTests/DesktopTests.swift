@@ -93,6 +93,17 @@ final class DesktopTests: XCTestCase {
     XCTAssertEqual(serverBinding("https://PULSE.example:443"), "https://pulse.example/")
     XCTAssertNotEqual(serverBinding("https://pulse.example:444"), "https://pulse.example/")
   }
+  func testQueryReceiptClearsDraftWithoutCreatingTask() {
+    let pending = PendingSubmit(sourceID: "query", taskID: "unused", text: "查詢 A、B",
+      binding: ["https://pulse.example/", "/private"])
+    var state = NativeState()
+    state.server = "https://pulse.example/"
+    state.messages = [ChatMessage(id: "query", body: "已保存訊息：查詢 A、B")]
+    XCTAssertTrue(state.tasks.isEmpty)
+    XCTAssertEqual(pending.confirmedDraft(pending.text, by: state), "")
+    XCTAssertTrue(state.messages[0].isUser)
+    XCTAssertEqual(state.messages[0].displayBody, "查詢 A、B")
+  }
   func testSafeLinksRejectExecutionAndCredentials() {
     for value in [
       "javascript:alert(1)", "file:///tmp/a", "http://example.com",

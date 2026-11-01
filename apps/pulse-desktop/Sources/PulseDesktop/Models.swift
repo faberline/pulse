@@ -3,10 +3,11 @@ import Foundation
 struct ChatMessage: Decodable, Identifiable, Sendable {
   let id: String
   let body: String
-  var isUser: Bool { ["已保存任務：", "本機待送：", "雲端已收件："].contains { body.hasPrefix($0) } }
+  var isEvidence: Bool { body.hasPrefix("只讀工具結果") }
+  var isUser: Bool { ["已保存任務：", "已保存訊息：", "本機待送：", "雲端已收件："].contains { body.hasPrefix($0) } }
   var displayBody: String {
     var value = body
-    for prefix in ["已保存任務：", "本機待送：", "雲端已收件："] where value.hasPrefix(prefix) {
+    for prefix in ["已保存任務：", "已保存訊息：", "本機待送：", "雲端已收件："] where value.hasPrefix(prefix) {
       value.removeFirst(prefix.count)
     }
     return value.replacingOccurrences(of: "\n\n模型尚未接入。可選任務後使用只讀工具。", with: "")

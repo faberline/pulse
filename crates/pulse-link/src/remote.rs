@@ -9,9 +9,9 @@ pub fn versions() -> Versions {
 }
 fn manifest(provider: Option<&Provider>) -> Versions {
     Versions {
-        workflow: "pulse-remote-3".into(),
+        workflow: "pulse-remote-4".into(),
         schema: "1".into(),
-        prompt: "read-evidence-1".into(),
+        prompt: "effective-read-1".into(),
         tools: "pulse-read-1".into(),
         model: provider.map(|p| p.model).unwrap_or("unconfigured").into(),
         provider_api: "function-call-1".into(),
@@ -36,6 +36,11 @@ pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Res
         if task.scope != "pulse:read" {
             reason = "scope_not_supported";
         } else {
+            let (prompt, history) = match hub.model_context(&run).await {
+                Ok(context) => context,
+                Err(crate::Error::Rejected(_)) => return Ok(true),
+                Err(error) => return Err(error),
+            };
             let round = run.checkpoint["round"].as_u64().unwrap_or(0);
             let call = format!("model:{}:{}:{round}", run.token.run_id, run.token.revision);
             match hub
@@ -49,36 +54,28 @@ pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Res
                 )
                 .await
             {
-                Ok(true) => {
-                    let prompt = serde_json::to_string(
-                        &json!({"goal":task.goal,"task_id":task.id,"revision":task.revision.to_string(),"authorization_event":task.authorization_event,"scope":task.scope}),
-                    )?;
-                    let history = hub.model_history(&run).await?;
-                    match provider.generate_with(&prompt, &history).await {
-                        Ok(reply) => {
-                            hub.core
-                                .settle(&call, reply.cost, &serde_json::to_string(&reply.usage)?)
-                                .await?;
-                            let saved = if reply.tool.is_some() {
-                                hub.model_proposal(&run.token, &reply, now()).await
-                            } else {
-                                hub.model_reply(&run.token, &reply, provider.model, now())
-                                    .await
-                            };
-                            match saved {
-                                Ok(()) => return Ok(true),
-                                Err(crate::Error::Rejected(_)) => {
-                                    reason = "model_result_not_applied"
-                                }
-                                Err(error) => return Err(error),
-                            }
-                        }
-                        Err(_) => {
-                            hub.core.cost_unknown(&call).await?;
-                            reason = "provider_call_failed_cost_reserved";
+                Ok(true) => match provider.generate_with(&prompt, &history).await {
+                    Ok(reply) => {
+                        hub.core
+                            .settle(&call, reply.cost, &serde_json::to_string(&reply.usage)?)
+                            .await?;
+                        let saved = if reply.tool.is_some() {
+                            hub.model_proposal(&run.token, &reply, now()).await
+                        } else {
+                            hub.model_reply(&run.token, &reply, provider.model, now())
+                                .await
+                        };
+                        match saved {
+                            Ok(()) => return Ok(true),
+                            Err(crate::Error::Rejected(_)) => reason = "model_result_not_applied",
+                            Err(error) => return Err(error),
                         }
                     }
-                }
+                    Err(_) => {
+                        hub.core.cost_unknown(&call).await?;
+                        reason = "provider_call_failed_cost_reserved";
+                    }
+                },
                 Ok(false) => reason = "previous_call_not_retried",
                 Err(pulse_core::Error::Rejected(_)) => {
                     hub.notify_change();

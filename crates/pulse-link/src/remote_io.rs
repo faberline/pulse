@@ -53,6 +53,26 @@ async fn current(db: &mut SqliteConnection, token: &Token, time: i64) -> Result<
 }
 
 impl Hub {
+    /// Build context from the current Human decision and same-revision evidence only.
+    pub async fn model_context(&self, run: &Run) -> Result<(String, Vec<Exchange>)> {
+        let task = {
+            let mut db = self.db.acquire().await?;
+            let (task, _) = current(&mut db, &run.token, crate::now()).await?;
+            ensure(
+                task.state == State::Planning,
+                "context requires a claimed task",
+            )?;
+            task
+        };
+        let history = self.model_history(run).await?;
+        let prompt = serde_json::to_string(&json!({
+            "goal":task.goal,"effective_decision":task.decisions.last(),
+            "task_id":task.id,"revision":task.revision.to_string(),
+            "authorization_event":task.authorization_event,"scope":task.scope
+        }))?;
+        Ok((prompt, history))
+    }
+
     /// Persist a model proposal before attempting any dispatch. This is not Human input.
     pub async fn model_proposal(&self, token: &Token, reply: &Reply, time: i64) -> Result<()> {
         let call = reply

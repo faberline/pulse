@@ -58,7 +58,13 @@ struct ChatView: View {
                     if message.isUser { Spacer(minLength: 40) }
                     VStack(alignment: .leading, spacing: 8) {
                       Text(message.label).font(.caption).foregroundStyle(.secondary)
-                      RichContent(source: message.displayBody)
+                      if message.isEvidence {
+                        DisclosureGroup(String(message.body.split(separator: "\n").first ?? "工具證據")) {
+                          RichContent(source: message.displayBody)
+                        }
+                      } else {
+                        RichContent(source: message.displayBody)
+                      }
                     }
                     .padding(14).frame(maxWidth: .infinity, alignment: .leading)
                     .background(

@@ -1,4 +1,5 @@
 pub mod client;
+mod conversation;
 pub mod executor;
 pub mod journal;
 pub mod protocol;

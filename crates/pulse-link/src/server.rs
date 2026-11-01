@@ -19,6 +19,7 @@ pub struct Hub {
     pub core: Store,
     pub(crate) db: SqlitePool,
     changes: tokio::sync::watch::Sender<u64>,
+    human: Arc<tokio::sync::Mutex<()>>,
 }
 impl Hub {
     pub fn new(core: Store) -> Self {
@@ -27,6 +28,7 @@ impl Hub {
             core,
             db,
             changes: tokio::sync::watch::channel(0).0,
+            human: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
     fn changed(&self) {
@@ -93,7 +95,8 @@ impl Hub {
         sqlx::query("INSERT OR IGNORE INTO link_chat VALUES(?,?,?)")
             .bind(id)
             .bind(format!(
-                "模型回覆（{model}）：\n\n{}\n\n這是文字回覆，任務尚未驗收。",
+                "模型回覆（{model} · {}）：\n\n{}\n\n分析已保存，任務待確認。",
+                crate::conversation::label(&task),
                 reply.text
             ))
             .bind(time)
@@ -515,6 +518,7 @@ impl Hub {
     ) -> Result<()> {
         match &envelope.payload {
             DevicePayload::Human { source_id, action } => {
+                let _human = self.human.lock().await;
                 ensure(
                     !source_id.is_empty() && source_id.len() <= 128,
                     "source ID limit",
@@ -525,15 +529,18 @@ impl Hub {
                             id.len() <= 128 && !goal.trim().is_empty() && goal.len() <= 4096,
                             "task size",
                         )?;
-                        vec![Command::Create {
-                            id: id.clone(),
-                            goal: goal.clone(),
-                            scope: "pulse:read".into(),
-                            priority: 0,
-                            requires_device: false,
-                            parent: None,
-                            dependencies: vec![],
-                        }]
+                        // Replays use the durable original plan, not newer task revisions.
+                        let prior:Option<String>=sqlx::query_scalar("SELECT payload FROM events WHERE source=? AND source_id=? AND origin='human'").bind(format!("device:{device}")).bind(source_id).fetch_optional(&self.db).await?;
+                        if let Some(prior) = prior {
+                            let payload: serde_json::Value = serde_json::from_str(&prior)?;
+                            ensure(
+                                payload["native_action"] == serde_json::to_value(action)?,
+                                "source identity conflict",
+                            )?;
+                            serde_json::from_value(payload["commands"].clone())?
+                        } else {
+                            crate::conversation::plan(id, goal, &self.core.list_tasks(100).await?)
+                        }
                     }
                     HumanAction::Cancel { task_id, revision } => vec![Command::Cancel {
                         id: task_id.clone(),
@@ -561,7 +568,21 @@ impl Hub {
                 )?;
                 match action {
                     HumanAction::Submit { goal, .. } => {
-                        self.chat(source_id, &format!("已保存任務：{goal}"), time)
+                        let body = match &outcome {
+                            pulse_core::Outcome::Clarification { question } => question.clone(),
+                            pulse_core::Outcome::Applied { task_ids } => {
+                                let mut lines = vec!["訊息已保存。".to_owned()];
+                                for id in task_ids {
+                                    let task = self.core.task(id).await?;
+                                    lines.push(crate::conversation::status(&task));
+                                }
+                                lines.join("\n")
+                            }
+                            pulse_core::Outcome::Rejected { .. } => unreachable!("rejected above"),
+                        };
+                        self.chat(source_id, &format!("已保存訊息：{goal}"), time)
+                            .await?;
+                        self.chat(&format!("reply:{source_id}"), &body, time)
                             .await?
                     }
                     HumanAction::Read {
@@ -658,7 +679,7 @@ impl Hub {
             } => {
                 ensure(outcome.valid(), "invalid device result")?;
                 let row = sqlx::query(
-                    "SELECT device,epoch,task_id,task_revision,result FROM link_reads WHERE id=?",
+                    "SELECT device,epoch,task_id,task_revision,request,result FROM link_reads WHERE id=?",
                 )
                 .bind(operation_id)
                 .fetch_optional(&self.db)
@@ -717,11 +738,19 @@ impl Hub {
                     ensure(stored == encoded, "result conflict")?;
                 }
                 tx.commit().await?;
+                let operation: ReadOp = serde_json::from_str(&row.get::<String, _>("request"))?;
+                let read_label = match operation {
+                    ReadOp::List { path } => format!("目錄 {path}"),
+                    ReadOp::Text { path } | ReadOp::GitDiff { path } => path,
+                    ReadOp::GitStatus => "Git 狀態".into(),
+                };
                 let body = match outcome {
                     ReadOutcome::Completed {
                         text, truncated, ..
                     } => format!(
-                        "只讀工具結果{}\n\n```text\n{}\n```\n\n這是工具證據，不是模型分析或任務成功。",
+                        "只讀工具結果 · {} · {}{}\n\n```text\n{}\n```\n\n這是工具證據，任務尚待確認。",
+                        crate::conversation::label(&before),
+                        read_label,
                         if *truncated { "（已截斷）" } else { "" },
                         short(text, 7000)
                     ),
