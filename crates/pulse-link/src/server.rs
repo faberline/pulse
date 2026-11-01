@@ -17,7 +17,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct Hub {
     pub core: Store,
-    db: SqlitePool,
+    pub(crate) db: SqlitePool,
     changes: tokio::sync::watch::Sender<u64>,
 }
 impl Hub {
@@ -43,6 +43,10 @@ impl Hub {
         model: &str,
         time: i64,
     ) -> Result<()> {
+        ensure(
+            reply.tool.is_none(),
+            "tool proposal cannot be a final reply",
+        )?;
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
         let data: String = sqlx::query_scalar("SELECT data FROM tasks WHERE id=?")
             .bind(&token.task_id)
@@ -60,12 +64,19 @@ impl Hub {
                 && task.deadline > time
                 && task.state == pulse_core::State::Planning
                 && task.active_run.as_deref() == Some(&token.run_id)
-                && run.token.epoch == token.epoch,
+                && run.token == *token,
             "stale model reply",
         )?;
-        let id = format!("model:{}:{}", token.run_id, token.revision);
-        run.checkpoint =
-            json!({"phase":"reply_saved","model":model,"reply":reply.text,"usage":reply.usage});
+        let id = format!(
+            "model:{}:{}:{}",
+            token.run_id,
+            token.revision,
+            run.checkpoint["round"].as_u64().unwrap_or(0)
+        );
+        run.checkpoint["phase"] = json!("reply_saved");
+        run.checkpoint["model"] = json!(model);
+        run.checkpoint["reply"] = json!(reply.text);
+        run.checkpoint["usage"] = reply.usage.clone();
         task.state = pulse_core::State::Blocked;
         task.reason = Some("model_reply_ready".into());
         task.evidence.push(id.clone());
@@ -240,7 +251,7 @@ impl Hub {
         let n=sqlx::query("UPDATE link_device SET lease_until=? WHERE id=? AND epoch=? AND revoked=0 AND lease_until>?").bind(time+LEASE_MS).bind(device).bind(epoch as i64).bind(time).execute(&self.db).await?.rows_affected();
         ensure(n == 1, "lease expired or fenced")
     }
-    async fn enqueue(
+    pub(crate) async fn enqueue(
         db: &mut sqlx::SqliteConnection,
         device: &str,
         epoch: u64,
@@ -672,20 +683,39 @@ impl Hub {
                     ReadOutcome::Rejected { .. } => "rejected",
                 };
                 let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
-                let changed=sqlx::query("UPDATE link_reads SET state=?,result=? WHERE id=? AND (result IS NULL OR result=?)")
-                    .bind(state)
-                    .bind(&encoded)
-                    .bind(operation_id)
-                    .bind(&encoded).execute(&mut *tx).await?.rows_affected();
-                ensure(changed == 1, "result conflict")?;
-                Store::device_observation_in(
-                    &mut tx,
-                    task_id,
-                    number(revision)?,
-                    operation_id,
-                    matches!(outcome, ReadOutcome::Unknown { .. }),
+                let before_data: String = sqlx::query_scalar("SELECT data FROM tasks WHERE id=?")
+                    .bind(task_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                let before: pulse_core::Task = serde_json::from_str(&before_data)?;
+                let changed = sqlx::query(
+                    "UPDATE link_reads SET state=?,result=? WHERE id=? AND result IS NULL",
                 )
-                .await?;
+                .bind(state)
+                .bind(&encoded)
+                .bind(operation_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+                if changed == 1 {
+                    Store::device_observation_in(
+                        &mut tx,
+                        task_id,
+                        number(revision)?,
+                        operation_id,
+                        matches!(outcome, ReadOutcome::Unknown { .. }),
+                    )
+                    .await?;
+                    Self::continue_model_read(&mut tx, &before, operation_id, outcome, time)
+                        .await?;
+                } else {
+                    let stored: String =
+                        sqlx::query_scalar("SELECT result FROM link_reads WHERE id=?")
+                            .bind(operation_id)
+                            .fetch_one(&mut *tx)
+                            .await?;
+                    ensure(stored == encoded, "result conflict")?;
+                }
                 tx.commit().await?;
                 let body = match outcome {
                     ReadOutcome::Completed {

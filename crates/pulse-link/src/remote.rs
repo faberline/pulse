@@ -1,4 +1,4 @@
-//! Pulse-owned text execution. No shell or model-authorized tools.
+//! Pulse-owned bounded model execution. Proposals never grant authority.
 use crate::{Result, now, provider::Provider, server::Hub};
 use pulse_core::{State, Versions};
 use serde_json::json;
@@ -9,12 +9,12 @@ pub fn versions() -> Versions {
 }
 fn manifest(provider: Option<&Provider>) -> Versions {
     Versions {
-        workflow: "pulse-remote-2".into(),
+        workflow: "pulse-remote-3".into(),
         schema: "1".into(),
-        prompt: "text-only-1".into(),
-        tools: "none".into(),
+        prompt: "read-evidence-1".into(),
+        tools: "pulse-read-1".into(),
         model: provider.map(|p| p.model).unwrap_or("unconfigured").into(),
-        provider_api: "text-1".into(),
+        provider_api: "function-call-1".into(),
         policy: "read-only-1".into(),
     }
 }
@@ -22,6 +22,11 @@ pub async fn step(hub: &Hub, time: i64) -> Result<bool> {
     step_with(hub, None, time).await
 }
 pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Result<bool> {
+    match hub.dispatch_model_read(&manifest(provider), time).await {
+        Ok(true) => return Ok(true),
+        Ok(false) | Err(crate::Error::Capacity) => {}
+        Err(error) => return Err(error),
+    }
     let Some(run) = hub.core.claim_next(&manifest(provider), time).await? else {
         return Ok(false);
     };
@@ -31,7 +36,8 @@ pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Res
         if task.scope != "pulse:read" {
             reason = "scope_not_supported";
         } else {
-            let call = format!("model:{}:{}", run.token.run_id, run.token.revision);
+            let round = run.checkpoint["round"].as_u64().unwrap_or(0);
+            let call = format!("model:{}:{}:{round}", run.token.run_id, run.token.revision);
             match hub
                 .core
                 .reserve(
@@ -45,19 +51,25 @@ pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Res
             {
                 Ok(true) => {
                     let prompt = serde_json::to_string(
-                        &json!({"goal":task.goal,"task_id":task.id,"revision":task.revision.to_string(),"available_evidence":[],"tools_available":false}),
+                        &json!({"goal":task.goal,"task_id":task.id,"revision":task.revision.to_string(),"authorization_event":task.authorization_event,"scope":task.scope}),
                     )?;
-                    match provider.generate(&prompt).await {
+                    let history = hub.model_history(&run).await?;
+                    match provider.generate_with(&prompt, &history).await {
                         Ok(reply) => {
                             hub.core
                                 .settle(&call, reply.cost, &serde_json::to_string(&reply.usage)?)
                                 .await?;
-                            match hub
-                                .model_reply(&run.token, &reply, provider.model, now())
-                                .await
-                            {
+                            let saved = if reply.tool.is_some() {
+                                hub.model_proposal(&run.token, &reply, now()).await
+                            } else {
+                                hub.model_reply(&run.token, &reply, provider.model, now())
+                                    .await
+                            };
+                            match saved {
                                 Ok(()) => return Ok(true),
-                                Err(crate::Error::Rejected(_)) => return Ok(true),
+                                Err(crate::Error::Rejected(_)) => {
+                                    reason = "model_result_not_applied"
+                                }
                                 Err(error) => return Err(error),
                             }
                         }

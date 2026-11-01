@@ -4,6 +4,7 @@ pub mod journal;
 pub mod protocol;
 pub mod provider;
 pub mod remote;
+mod remote_io;
 pub mod server;
 
 #[derive(Debug, thiserror::Error)]

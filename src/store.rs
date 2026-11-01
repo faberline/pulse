@@ -115,6 +115,28 @@ impl Store {
         put(db, "tasks", id, &task).await
     }
 
+    /// Trusted remote dispatch shares the transport transaction and requires a live run token.
+    pub async fn authorize_remote_read(
+        db: &mut SqliteConnection,
+        token: &Token,
+        operation: &str,
+        now: i64,
+    ) -> Result<()> {
+        let (mut task, _) = current(db, token, now).await?;
+        require(
+            task.state == State::WaitingDevice
+                && task.scope == "pulse:read"
+                && task.tool_calls < 16
+                && !unresolved(db, &task.id).await?,
+            "remote read policy or limit",
+        )?;
+        task.tool_calls += 1;
+        task.state = State::Dispatched;
+        task.reason = Some("model_read_dispatched".into());
+        task.evidence.push(format!("dispatch:{operation}"));
+        put(db, "tasks", &task.id, &task).await
+    }
+
     /// Trusted transport observer. Records device evidence, never verifies the goal.
     pub async fn device_observation(
         &self,
