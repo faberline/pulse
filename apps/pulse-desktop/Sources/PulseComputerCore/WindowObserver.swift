@@ -5,7 +5,7 @@ import CryptoKit
 
 @MainActor
 public enum WindowObserver {
-  private static func running(_ target: ComputerTarget, launched: Date? = nil) throws -> NSRunningApplication {
+  static func running(_ target: ComputerTarget, launched: Date? = nil) throws -> NSRunningApplication {
     _ = try ComputerTarget(bundleID: target.bundle_id, pid: target.pid, windowID: target.window_id)
     guard let app = NSRunningApplication(processIdentifier: target.pid),
       app.bundleIdentifier == target.bundle_id, !app.isTerminated, let start = app.launchDate,
@@ -26,7 +26,7 @@ public enum WindowObserver {
     _ = try running(target, launched: start)
     return ComputerSelection(target: target, process_launched_at: expectedProcessLaunchedAt)
   }
-  private static func window(_ target: ComputerTarget) async throws -> SCWindow {
+  static func window(_ target: ComputerTarget) async throws -> SCWindow {
     let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
     let windows = content.windows.filter { $0.windowID == target.window_id }
     guard windows.count == 1, let window = windows.first,

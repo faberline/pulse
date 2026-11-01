@@ -72,7 +72,12 @@ impl Store {
                 && (proposal.target.starts_with("fixture:")
                     || serde_json::from_value::<BrowserIntent>(proposal.intent.clone()).is_ok_and(
                         |intent| intent.target() == proposal.target && intent.observation.valid(),
-                    ))
+                    )
+                    || serde_json::from_value::<ComputerIntent>(proposal.intent.clone())
+                        .is_ok_and(|intent| {
+                            intent.target().as_deref() == Some(&proposal.target)
+                                && intent.observation.valid_evidence()
+                        }))
                 && proposal.target.len() > 8
                 && proposal.target.len() <= 512
                 && proposal.intent.is_object()
@@ -280,6 +285,8 @@ async fn verify_source(
     )?;
     if proposal.target.starts_with("browser:") {
         verify_browser_evidence(db, proposal).await?;
+    } else if proposal.target.starts_with("computer:") {
+        verify_computer_evidence(db, proposal).await?;
     }
     Ok(())
 }
@@ -288,11 +295,76 @@ fn target_policy(task: &Task, proposal: &OperationProposal, now: i64) -> bool {
     if proposal.target.starts_with("fixture:") {
         return task.scope == "pulse:read";
     }
+    if proposal.target.starts_with("computer:") {
+        return serde_json::from_value::<ComputerIntent>(proposal.intent.clone()).is_ok_and(
+            |intent| {
+                intent.target().as_deref() == Some(&proposal.target)
+                    && intent.valid(&task.scope, now)
+                    && intent.observation.binding.task_id == proposal.token.task_id
+                    && intent.observation.binding.revision == proposal.token.revision
+                    && proposal.expires_at <= intent.observation.expires_at
+            },
+        );
+    }
     serde_json::from_value::<BrowserIntent>(proposal.intent.clone()).is_ok_and(|intent| {
         proposal.target == intent.target()
             && intent.valid(&task.scope, now)
             && proposal.expires_at <= intent.observation.expires_at
     })
+}
+
+async fn verify_computer_evidence(
+    db: &mut SqliteConnection,
+    proposal: &OperationProposal,
+) -> Result<()> {
+    let intent: ComputerIntent = serde_json::from_value(proposal.intent.clone())?;
+    let observation = &intent.observation;
+    let binding = &observation.binding;
+    let revision = binding.revision.to_string();
+    let row=sqlx::query("SELECT r.device,r.epoch,r.task_id,r.task_revision,r.request,r.result,a.metadata,a.png FROM link_reads r JOIN link_artifacts a ON a.operation_id=r.id WHERE r.id=? AND r.state='completed' AND json_extract(r.request,'$.kind')='computer_inspect' AND a.png IS NOT NULL")
+        .bind(&binding.operation_id).fetch_optional(&mut *db).await?
+        .ok_or_else(||Error::Rejected("computer proposal lacks original image and receipt".into()))?;
+    let outcome: ReadOutcome = serde_json::from_str(&row.get::<String, _>("result"))?;
+    let image: Value = serde_json::from_str(&row.get::<String, _>("metadata"))?;
+    let read: Value = serde_json::from_str(&row.get::<String, _>("request"))?;
+    let png: Vec<u8> = row.get("png");
+    let dimensions = browser_png_dimensions(&png)
+        .ok_or_else(|| Error::Rejected("invalid computer source PNG".into()))?;
+    require(
+        observation.valid_evidence()
+            && binding.task_id == proposal.token.task_id
+            && binding.revision == proposal.token.revision
+            && row.get::<String, _>("device") == binding.device
+            && row.get::<i64, _>("epoch").to_string() == binding.epoch.to_string()
+            && row.get::<String, _>("task_id") == binding.task_id
+            && row.get::<String, _>("task_revision") == binding.revision.to_string()
+            && read["selection"] == serde_json::to_value(observation.selection())?
+            && format!("{:x}", Sha256::digest(&png)) == observation.image.digest
+            && png.len() == observation.image.length as usize
+            && dimensions == (observation.image.width, observation.image.height)
+            && image["task_id"] == binding.task_id
+            && image["revision"].as_str() == Some(revision.as_str())
+            && image.get("url").is_none_or(|value| value == "")
+            && image["computer"]["binding"] == serde_json::to_value(binding)?
+            && image["computer"]["selection"] == serde_json::to_value(observation.selection())?
+            && image["title"] == observation.title
+            && image["observed_at"] == observation.observed_at
+            && image["digest"] == observation.image.digest
+            && image["length"] == observation.image.length
+            && image["width"] == observation.image.width
+            && image["height"] == observation.image.height
+            && outcome.valid()
+            && matches!(&outcome,ReadOutcome::Completed{computer:Some(actual),observation:None,..} if actual.as_ref()==observation),
+        "computer source receipt or image binding mismatch",
+    )?;
+    verify_receipt_source(
+        db,
+        &binding.device,
+        &binding.operation_id,
+        &binding.task_id,
+        outcome,
+    )
+    .await
 }
 
 async fn verify_browser_evidence(
@@ -325,29 +397,46 @@ async fn verify_browser_evidence(
             && matches!(&outcome,ReadOutcome::Completed{observation:Some(observation),..} if observation==&intent.observation),
         "browser source receipt or image binding mismatch",
     )?;
+    verify_receipt_source(
+        db,
+        &intent.local_device,
+        &intent.source_operation_id,
+        &proposal.token.task_id,
+        outcome,
+    )
+    .await
+}
+
+async fn verify_receipt_source(
+    db: &mut SqliteConnection,
+    device: &str,
+    operation_id: &str,
+    task_id: &str,
+    outcome: ReadOutcome,
+) -> Result<()> {
     let source = sqlx::query(
         "SELECT id,payload,outcome FROM events WHERE source=? AND source_id=? AND origin='tool'",
     )
-    .bind(format!("device-result:{}", intent.local_device))
-    .bind(&intent.source_operation_id)
+    .bind(format!("device-result:{device}"))
+    .bind(operation_id)
     .fetch_optional(&mut *db)
     .await?
-    .ok_or_else(|| Error::Rejected("browser receipt source missing".into()))?;
+    .ok_or_else(|| Error::Rejected("operation receipt source missing".into()))?;
     let payload: Value = serde_json::from_str(&source.get::<String, _>("payload"))?;
     let linked: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM event_tasks WHERE event_id=? AND task_id=?")
             .bind(source.get::<String, _>("id"))
-            .bind(&proposal.token.task_id)
+            .bind(task_id)
             .fetch_one(db)
             .await?;
     require(
-        payload["result"] == serde_json::to_value(outcome)?
+        digest(&payload["result"])? == digest(&outcome)?
             && linked == 1
             && applied_to(
                 source.get::<Option<String>, _>("outcome").as_deref(),
-                &proposal.token.task_id,
+                task_id,
             ),
-        "browser receipt must retain its linked Tool source",
+        "operation receipt must retain its linked Tool source",
     )
 }
 

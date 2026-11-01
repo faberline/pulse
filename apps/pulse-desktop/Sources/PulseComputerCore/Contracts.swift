@@ -61,14 +61,33 @@ public struct ComputerRequest: Sendable {
   public let kind: String
   public let binding: ComputerBinding?
   public let expectedProcessLaunchedAt: Int64?
+  public var action: ComputerActionIntent? = nil
   public static func decode(_ data: Data) throws -> Self {
     do { return try decodeValue(data) }
     catch { throw ComputerError.invalidRequest }
   }
   private static func decodeValue(_ data: Data) throws -> Self {
-    guard data.count <= 16_384,
+    guard data.count <= 65_536,
       let value = try JSONSerialization.jsonObject(with: data) as? [String: Any],
       let kind = value["kind"] as? String else { throw ComputerError.invalidRequest }
+    if kind == "act" {
+      guard Set(value.keys) == ["kind", "binding", "intent"],
+        let binding = value["binding"] as? [String: Any],
+        Set(binding.keys) == ["operation_id", "task_id", "revision", "device", "epoch"],
+        let intent = value["intent"] as? [String: Any]
+      else { throw ComputerError.invalidRequest }
+      let decoded = try JSONDecoder().decode(ComputerBinding.self, from: JSONSerialization.data(withJSONObject: binding))
+      try decoded.validate()
+      let action = try ComputerActionIntent.decode(intent)
+      guard action.observation.binding.task_id == decoded.task_id,
+        action.observation.binding.revision == decoded.revision,
+        action.observation.binding.device == decoded.device,
+        action.observation.binding.epoch == decoded.epoch,
+        action.observation.binding.operation_id != decoded.operation_id
+      else { throw ComputerError.invalidRequest }
+      return Self(kind: kind, binding: decoded, expectedProcessLaunchedAt: action.observation.process_launched_at, action: action)
+    }
+    guard data.count <= 16_384 else { throw ComputerError.invalidRequest }
     if kind == "status", Set(value.keys) == ["kind"] { return Self(kind: kind, binding: nil, expectedProcessLaunchedAt: nil) }
     let keys = Set(value.keys)
     if kind == "probe", keys == ["kind", "expected_process_launched_at"],
@@ -144,10 +163,12 @@ public struct ComputerResponse: Codable, Sendable {
   public let observation: ComputerObservation?
   public let error: ComputerError?
   public let selection: ComputerSelection?
-  public init(permissions: ComputerPermissions, observation: ComputerObservation? = nil, error: ComputerError? = nil, selection: ComputerSelection? = nil) {
-    version = "pulse-computer-observe-3"; self.permissions = permissions
+  public let action: ComputerActionReceipt?
+  public init(permissions: ComputerPermissions, observation: ComputerObservation? = nil, error: ComputerError? = nil, selection: ComputerSelection? = nil, action: ComputerActionReceipt? = nil) {
+    version = "pulse-computer-observe-4"; self.permissions = permissions
     self.observation = observation; self.error = error
     self.selection = selection
+    self.action = action
   }
 }
 

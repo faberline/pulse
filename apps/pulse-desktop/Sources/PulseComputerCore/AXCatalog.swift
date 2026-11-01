@@ -99,4 +99,25 @@ struct AXCatalog {
     guard try JSONEncoder().encode(output).count <= 32_768 else { throw ComputerError.evidenceLimit }
     return (output, truncated)
   }
+  func resolve(_ window: AXUIElement, id: String) throws -> AXUIElement {
+    guard computerElementPath(id) else { throw ComputerError.invalidRequest }
+    var element = window
+    let path = id.split(separator: ".").dropFirst()
+    for component in path {
+      try safeOwner(element)
+      guard let index = Int(component) else { throw ComputerError.invalidRequest }
+      let next = try children(element, attribute: kAXChildrenAttribute, limit: 128)
+      guard next.indices.contains(index) else { throw ComputerError.targetChanged }
+      element = next[index]
+    }
+    try safeOwner(element)
+    return element
+  }
+  private func safeOwner(_ element: AXUIElement) throws {
+    var owner: pid_t = 0
+    guard AXUIElementGetPid(element, &owner) == .success, owner == pid,
+      try value(element, kAXSubroleAttribute) as? String != kAXSecureTextFieldSubrole,
+      try value(element, kAXRoleAttribute) as? String != "AXSecureTextField"
+    else { throw ComputerError.targetChanged }
+  }
 }

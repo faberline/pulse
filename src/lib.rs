@@ -2,6 +2,7 @@
 //! Callers are trusted application code; transport authentication belongs to v0.3.
 mod browser_operation;
 mod computer_observation;
+mod computer_operation;
 mod model;
 mod read;
 mod scope;
@@ -9,6 +10,7 @@ mod store;
 
 pub use browser_operation::*;
 pub use computer_observation::*;
+pub use computer_operation::*;
 pub use model::*;
 pub use read::*;
 pub use scope::*;

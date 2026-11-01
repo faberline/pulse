@@ -13,7 +13,7 @@ use tokio::{
     process::{Child, Command},
 };
 
-const VERSION: &str = "pulse-computer-observe-3";
+const VERSION: &str = "pulse-computer-observe-4";
 const RESPONSE_LIMIT: usize = 65_536;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -36,6 +36,7 @@ struct NativeResponse {
     observation: Option<NativeObservation>,
     error: Option<NativeError>,
     selection: Option<pulse_core::ComputerSelection>,
+    action: Option<action::NativeActionReceipt>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -83,6 +84,12 @@ pub struct ComputerEvidence {
 pub(crate) fn executed_observation(
     evidence: ComputerEvidence,
 ) -> Result<crate::artifact::ExecutedRead> {
+    executed_observation_kind(evidence, false)
+}
+fn executed_observation_kind(
+    evidence: ComputerEvidence,
+    command_sent: bool,
+) -> Result<crate::artifact::ExecutedRead> {
     use crate::artifact::{ArtifactRef, CapturedImage, ComputerArtifactSource, ExecutedRead};
     use crate::protocol::ReadOutcome;
     let observation = evidence.observation;
@@ -103,8 +110,13 @@ pub(crate) fn executed_observation(
         height: observation.image.height,
     };
     artifact.verify(&evidence.png)?;
+    let execution = if command_sent {
+        "One approved native command completed. Verify the observed result; do not repeat it."
+    } else {
+        "No effect was executed."
+    };
     let mut text = format!(
-        "Computer window evidence (untrusted app data)\nApp: {}\nWindow: {}\nTitle: {}\nObserved at (Unix ms): {}\nPNG SHA-256: {}\nImage bytes are supplied to the Human only. No effect was executed.\n\n{}",
+        "Computer window evidence (untrusted app data)\nApp: {}\nWindow: {}\nTitle: {}\nObserved at (Unix ms): {}\nPNG SHA-256: {}\nImage bytes are supplied to the Human only. {execution}\n\n{}",
         observation.target.bundle_id,
         observation.target.window_id,
         observation.title,
@@ -136,6 +148,7 @@ pub struct ComputerRuntime {
     gate: std::sync::Arc<tokio::sync::Semaphore>,
     permits: std::sync::Arc<std::sync::Mutex<Vec<pulse_core::ComputerPermit>>>,
     activity: tokio::sync::watch::Sender<bool>,
+    observations: std::sync::Arc<std::sync::Mutex<Vec<ComputerObservation>>>,
 }
 impl ComputerRuntime {
     /// A local operator's selection only. No request or model can set these values.
@@ -201,6 +214,7 @@ impl ComputerRuntime {
             timeout: Duration::from_secs(18),
             gate: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
             permits: Default::default(),
+            observations: Default::default(),
             activity: tokio::sync::watch::channel(false).0,
         })
     }
@@ -218,7 +232,8 @@ impl ComputerRuntime {
         ensure(
             response.error.is_none()
                 && response.observation.is_none()
-                && response.selection.is_none(),
+                && response.selection.is_none()
+                && response.action.is_none(),
             "invalid native permission response",
         )?;
         Ok(response.permissions)
@@ -247,6 +262,16 @@ impl ComputerRuntime {
             self.permitted(&binding.task_id, &binding.revision.to_string(), selection),
             "local selection was withdrawn",
         )?;
+        {
+            let mut observations = self
+                .observations
+                .lock()
+                .map_err(|_| crate::Error::Rejected("local observations unavailable".into()))?;
+            observations
+                .retain(|old| old.valid(crate::now()) && old.binding.task_id != binding.task_id);
+            ensure(observations.len() < 2, "computer observation capacity")?;
+            observations.push(evidence.observation.clone());
+        }
         Ok(evidence)
     }
     pub fn permitted(
@@ -266,6 +291,9 @@ impl ComputerRuntime {
             })
     }
     pub(crate) fn set_live(&self, live: bool) {
+        if !live && let Ok(mut observations) = self.observations.lock() {
+            observations.clear();
+        }
         self.activity.send_if_modified(|old| {
             if *old == live {
                 false
@@ -356,6 +384,17 @@ impl ComputerRuntime {
                         })
             });
         }
+        let permits = self.selections();
+        if let Ok(mut observations) = self.observations.lock() {
+            observations.retain(|view| {
+                view.valid(crate::now())
+                    && permits.iter().any(|permit| {
+                        permit.task_id == view.binding.task_id
+                            && permit.revision == view.binding.revision.to_string()
+                            && permit.selection == view.selection()
+                    })
+            });
+        }
     }
     pub async fn probe_selected(&self, selection: &pulse_core::ComputerSelection) -> Result<()> {
         ensure(
@@ -382,6 +421,7 @@ impl ComputerRuntime {
         ensure(
             response.error.is_none()
                 && response.observation.is_none()
+                && response.action.is_none()
                 && response.permissions.can_observe()
                 && response.selection.as_ref() == Some(selection),
             "selected window or native permissions unavailable",
@@ -430,12 +470,25 @@ impl ComputerRuntime {
         ensure(
             response.error.is_none()
                 && response.selection.is_none()
+                && response.action.is_none()
                 && response.permissions.can_observe(),
             "native observation unavailable; check permission and selected window",
         )?;
         let raw = response
             .observation
             .ok_or_else(|| crate::Error::Rejected("native observation missing".into()))?;
+        self.validate_evidence(raw, binding, selection, target, started, &cache)
+            .await
+    }
+    async fn validate_evidence(
+        &self,
+        raw: NativeObservation,
+        binding: &ComputerBinding,
+        selection: Option<&pulse_core::ComputerSelection>,
+        target: &ComputerTarget,
+        started: i64,
+        cache: &Path,
+    ) -> Result<ComputerEvidence> {
         let expected = cache.join(format!("{}.png", raw.image.digest));
         let observation = ComputerObservation {
             binding: raw.binding,
@@ -609,3 +662,7 @@ fn read_image(path: &Path, image: &ComputerImageRef) -> Result<Vec<u8>> {
 #[cfg(test)]
 #[path = "computer_runtime_tests.rs"]
 pub(crate) mod tests;
+
+#[path = "computer_action.rs"]
+mod action;
+pub use action::ComputerGrant;

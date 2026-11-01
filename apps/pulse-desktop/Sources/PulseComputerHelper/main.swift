@@ -23,13 +23,16 @@ struct PulseComputerHelper {
         var input = Data()
         while let chunk = try FileHandle.standardInput.read(upToCount: 1024), !chunk.isEmpty {
           input.append(chunk)
-          guard input.count <= 16_384 else { throw ComputerError.invalidRequest }
+          guard input.count <= 65_536 else { throw ComputerError.invalidRequest }
         }
         let request = try ComputerRequest.decode(input)
         if request.kind == "status" { response = ComputerResponse(permissions: permissions) }
         else if request.kind == "probe", let launched = request.expectedProcessLaunchedAt {
           let selection = try await WindowObserver.probe(target: target, expectedProcessLaunchedAt: launched)
           response = ComputerResponse(permissions: computerPermissions(), selection: selection)
+        }
+        else if request.kind == "act", let binding = request.binding, let action = request.action {
+          response = await WindowActor.act(target: target, binding: binding, intent: action, cache: URL(fileURLWithPath: arguments[7]))
         }
         else if let binding = request.binding {
           let observation = try await WindowObserver.observe(target: target, binding: binding, cache: URL(fileURLWithPath: arguments[7]), expectedProcessLaunchedAt: request.expectedProcessLaunchedAt)

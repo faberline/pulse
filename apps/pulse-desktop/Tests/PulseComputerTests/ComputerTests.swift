@@ -9,7 +9,7 @@ final class ComputerTests: XCTestCase {
     for (key, value) in changes { binding[key] = value }
     return try JSONSerialization.data(withJSONObject: ["kind": "observe", "binding": binding])
   }
-  func testReadOnlyProtocolRejectsEffectsExtraFieldsAndInvalidBindings() throws {
+  func testReadAndStatusRequestsRejectEffectsExtraFieldsAndInvalidBindings() throws {
     XCTAssertEqual(try ComputerRequest.decode(Data(#"{"kind":"status"}"#.utf8)).kind, "status")
     XCTAssertEqual(try ComputerRequest.decode(request()).binding?.operation_id, "observe-1")
     for data in [Data(#"{"kind":"click"}"#.utf8), Data(#"{"kind":"type","text":"send"}"#.utf8), Data(#"{"kind":"status","target":"other"}"#.utf8), Data(#"{"kind":"observe","binding":{}}"#.utf8), Data("not json".utf8), Data(repeating: 32, count: 16_385)] {

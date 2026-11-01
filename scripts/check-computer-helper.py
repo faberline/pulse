@@ -4,6 +4,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 helper = pathlib.Path(sys.argv[1]).resolve(strict=True)
@@ -16,7 +17,7 @@ def call(arguments, payload=None):
     )
     assert len(result.stdout) <= 65_536
     value = json.loads(result.stdout)
-    assert value["version"] == "pulse-computer-observe-3"
+    assert value["version"] == "pulse-computer-observe-4"
     assert type(value["permissions"]["accessibility"]) is bool
     assert type(value["permissions"]["screen_capture"]) is bool
     assert value.get("observation") is None
@@ -33,7 +34,27 @@ with tempfile.TemporaryDirectory(prefix="pulse-computer-check-") as directory:
     assert denied["error"] in ["permissions_required", "target_unavailable"]
     denied = call(arguments, json.dumps({"kind": "probe", "expected_process_launched_at": "1"}).encode())
     assert denied["error"] in ["permissions_required", "target_unavailable"]
-    for payload in [b'{"kind":"click"}', b'{"kind":"type","text":"send"}', b'{"kind":"script"}', b" " * 16_385]:
+    now = int(time.time() * 1000)
+    source = dict(binding, operation_id="source-no-target")
+    intent = {
+        "observation": {
+            "binding": source,
+            "target": {"bundle_id": arguments[1], "pid": 2147483647, "window_id": 1},
+            "process_launched_at": 1, "title": "Missing owned fixture",
+            "frame": {"x": 0, "y": 0, "width": 100, "height": 100},
+            "elements": [{"id": "window.0", "role": "AXButton", "label": "Count",
+                          "value": None, "can_press": True, "can_set_text": False}],
+            "truncated": False, "nonce": str(uuid.uuid4()), "observed_at": now,
+            "expires_at": now + 120000,
+            "image": {"digest": "a" * 64, "length": 100, "width": 1, "height": 1},
+        },
+        "element_id": "window.0", "effect": {"kind": "press"},
+    }
+    denied = call(arguments, json.dumps({"kind": "act", "binding": binding, "intent": intent}).encode())
+    assert denied["error"] in ["permissions_required", "target_unavailable"]
+    assert denied["action"] == {"binding": binding,
+                                "source_nonce": intent["observation"]["nonce"], "state": "not_executed"}
+    for payload in [b'{"kind":"click"}', b'{"kind":"type","text":"send"}', b'{"kind":"script"}', b'{"kind":"act"}', b" " * 16_385]:
         assert call(arguments, payload)["error"] == "invalid_request"
     for launched in [0, True, "0", "01", "+1", "9223372036854775808"]:
         payload = {"kind": "observe", "binding": binding, "expected_process_launched_at": launched}

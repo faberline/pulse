@@ -15,11 +15,22 @@ if mode=='oversize': print('x'*65537);sys.exit(0)
 if mode=='stderr': sys.stderr.write('x'*4097);sys.exit(0)
 if mode=='exit': sys.exit(74)
 if mode=='invalid': print('not-json');sys.exit(0)
-response={'version':'pulse-computer-observe-3','permissions':{'accessibility':True,'screen_capture':True}}
+response={'version':'pulse-computer-observe-4','permissions':{'accessibility':True,'screen_capture':True}}
 if mode=='version':response['version']='unknown-helper'
 if mode=='extra':response['grant']='forged'
 if sys.argv[1:]!=['--status']:
  request=json.load(sys.stdin)
+ if request['kind']=='act':
+  response['action']={'binding':request['binding'],'source_nonce':request['intent']['observation']['nonce'],'state':'completed'}
+  if mode=='action-rejected':
+   response['action']['state']='not_executed';response['error']='target_changed';print(json.dumps(response));sys.exit(0)
+  counter=script.with_suffix('.effects')
+  counter.write_text(str(int(counter.read_text())+1 if counter.exists() else 1))
+  if mode=='action-hang':time.sleep(60)
+  if mode=='action-unknown':response['action']['state']='unknown';response['error']='accessibility_unavailable';print(json.dumps(response));sys.exit(0)
+  if mode=='action-binding':response['action']['binding']['task_id']='other'
+  if mode=='action-missing':del response['action']
+  if mode=='action-bad-image':response['action']['state']='completed'
  if mode=='selected':assert request.get('expected_process_launched_at')=='1'
  args=dict(zip(sys.argv[1::2],sys.argv[2::2]))
  if request['kind']=='probe':
@@ -38,13 +49,16 @@ if sys.argv[1:]!=['--status']:
   path.write_bytes(png);path.chmod(0o600)
  now=int(time.time()*1000)
  observation={'binding':request['binding'],'target':{'bundle_id':args['--bundle-id'],'pid':int(args['--pid']),'window_id':int(args['--window-id'])},'process_launched_at':1,'title':'Mock window','frame':{'x':0,'y':0,'width':1,'height':1},'elements':[{'id':'window.0','role':'AXButton','label':'Count','value':None,'can_press':True,'can_set_text':False}],'truncated':False,'nonce':'dd493179-2d63-4f6f-bd52-9b8ca6c2ca38','observed_at':now,'expires_at':now+120000,'image':{'digest':digest,'length':len(png),'width':1,'height':1,'path':str(path)}}
+ if mode.startswith('action-'):
+  observation['elements'].append({'id':'window.1','role':'AXTextField','label':'Message','value':'before','can_press':False,'can_set_text':True})
+  if request['kind']=='act' and request['intent']['effect']['kind']=='set_text':observation['elements'][1]['value']=request['intent']['effect']['text']
  if mode=='binding':observation['binding']['task_id']='other-task'
  if mode=='epoch':observation['binding']['epoch']='9'
  if mode=='target':observation['target']['window_id']+=1
  if mode=='path':observation['image']['path']=str(cache.parent/'other.png')
  if mode=='size':observation['image']['length']+=1
  if mode=='dimensions':observation['image']['width']=2
- if mode=='digest':observation['image']['digest']='0'*64
+ if mode in ['digest','action-bad-image']:observation['image']['digest']='0'*64
  if mode=='mode':path.chmod(0o644)
  if mode=='tamper':path.write_bytes(bytes(len(png)))
  if mode=='stale':observation['observed_at']-=100000;observation['expires_at']-=100000
@@ -60,7 +74,26 @@ script.with_suffix('.done').write_text('response constructed')
 pub(crate) fn fixture(mode: &str) -> (tempfile::TempDir, ComputerRuntime) {
     let dir = tempfile::tempdir().unwrap();
     let helper = dir.path().join(format!("{mode}.py"));
-    std::fs::write(&helper, FIXTURE).unwrap();
+    // Resolve Apple's SDK launcher outside the measured native-child deadlines. The
+    // actual Python runtime runs the fixture; production still uses its fixed helper.
+    #[cfg(target_os = "macos")]
+    let script = {
+        static PYTHON: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let python = PYTHON.get_or_init(|| {
+            let output = std::process::Command::new("/usr/bin/xcrun")
+                .args(["--find", "python3"])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let path = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+            assert!(path.starts_with('/') && !path.chars().any(char::is_whitespace));
+            path
+        });
+        FIXTURE.replacen("#!/usr/bin/python3", &format!("#!{python}"), 1)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let script = FIXTURE;
+    std::fs::write(&helper, script).unwrap();
     std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
     let target = ComputerTarget {
         bundle_id: "com.faberline.PulseComputerFixture".into(),
