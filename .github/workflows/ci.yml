@@ -32,6 +32,12 @@ jobs:
       - name: Build macOS desktop bundle (ad hoc signature)
         if: runner.os == 'macOS'
         run: sh scripts/build-macos-app.sh --debug
+      - name: Computer helper process checks (no capture or permission request)
+        if: runner.os == 'macOS'
+        run: python3 scripts/check-computer-helper.py target/debug/Pulse.app/Contents/MacOS/pulse-computer
+      - name: Build owned computer fixture (no launch)
+        if: runner.os == 'macOS'
+        run: sh scripts/build-computer-fixture.sh
       - name: Fixture demonstration
         run: |
           cargo run --locked --example durable_demo -- "${RUNNER_TEMP}/pulse-demo.db"
