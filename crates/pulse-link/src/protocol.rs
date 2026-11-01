@@ -108,6 +108,12 @@ pub enum HumanAction {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DevicePayload {
+    ArtifactChunk {
+        operation_id: String,
+        artifact: crate::artifact::ArtifactRef,
+        index: u32,
+        data: String,
+    },
     Human {
         source_id: String,
         action: HumanAction,
@@ -204,6 +210,8 @@ pub enum ServerPayload {
 pub struct ChatMessage {
     pub id: String,
     pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<crate::artifact::ArtifactRef>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -270,6 +278,10 @@ pub struct Credential {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeCommand {
+    LoadArtifact {
+        operation_id: String,
+        digest: String,
+    },
     Pair {
         code: String,
     },
@@ -284,6 +296,12 @@ pub enum NativeCommand {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NativeState {
+    #[serde(default)]
+    pub artifact_loading: Option<String>,
+    #[serde(default)]
+    pub artifact_failure: Option<String>,
+    #[serde(default)]
+    pub artifacts: Vec<crate::artifact::LocalArtifact>,
     #[serde(default)]
     pub server: String,
     pub connected: bool,

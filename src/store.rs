@@ -49,7 +49,7 @@ impl Store {
             .fetch_one(&pool)
             .await?;
         require(
-            schema <= 4,
+            schema <= 5,
             "database schema is newer than this application",
         )?;
         sqlx::migrate!().run(&pool).await?;

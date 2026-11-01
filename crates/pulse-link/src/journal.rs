@@ -354,7 +354,7 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                 operation_id,
                 task_id,
                 revision,
-                ..
+                operation,
             } => {
                 ensure(
                     self.role == ClientRole::LocalExecutor,
@@ -373,8 +373,16 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                     sqlx::query_scalar("SELECT COALESCE(SUM(length(data)),0) FROM local_outbox")
                         .fetch_one(&mut *tx)
                         .await?;
+                let browser = matches!(operation, ReadOp::Browser { .. });
                 ensure(
-                    used < 998 && size + 2 * MAX_FRAME as i64 <= 64 * 1024 * 1024,
+                    used < if browser { 934 } else { 998 }
+                        && size
+                            + if browser {
+                                8 * 1024 * 1024
+                            } else {
+                                2 * MAX_FRAME as i64
+                            }
+                            <= 64 * 1024 * 1024,
                     "result outbox capacity unavailable",
                 )?;
                 if permitted && lease && epoch == message_epoch {
@@ -435,6 +443,14 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         envelope: &Envelope<ServerPayload>,
         outcome: ReadOutcome,
     ) -> Result<()> {
+        self.finish_work_image(envelope, outcome, None).await
+    }
+    pub async fn finish_work_image(
+        &self,
+        envelope: &Envelope<ServerPayload>,
+        outcome: ReadOutcome,
+        image: Option<crate::artifact::CapturedImage>,
+    ) -> Result<()> {
         ensure(outcome.valid(), "invalid result")?;
         if let ServerPayload::Read {
             operation_id,
@@ -453,6 +469,47 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                 matches!(state.as_deref(), Some("accepted" | "running")),
                 "work already finished or missing",
             )?;
+            if let Some(mut image) = image {
+                image.artifact.task_id = task_id.clone();
+                image.artifact.revision = revision.clone();
+                use base64::Engine;
+                ensure(
+                    matches!(
+                        &envelope.payload,
+                        ServerPayload::Read {
+                            operation: ReadOp::Browser { .. },
+                            ..
+                        }
+                    ) && matches!(outcome, ReadOutcome::Completed { .. }),
+                    "image requires completed browser work",
+                )?;
+                image.artifact.verify(&image.png)?;
+                let used: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM local_outbox")
+                    .fetch_one(&mut *tx)
+                    .await?;
+                let size: i64 =
+                    sqlx::query_scalar("SELECT COALESCE(SUM(length(data)),0) FROM local_outbox")
+                        .fetch_one(&mut *tx)
+                        .await?;
+                ensure(
+                    used + (image.artifact.chunks() as i64) < 1000
+                        && size + 8 * 1024 * 1024 <= 64 * 1024 * 1024,
+                    "artifact result capacity unavailable",
+                )?;
+                for (index, bytes) in image.png.chunks(crate::artifact::CHUNK).enumerate() {
+                    self.enqueue_in(
+                        &mut tx,
+                        DevicePayload::ArtifactChunk {
+                            operation_id: operation_id.clone(),
+                            artifact: image.artifact.clone(),
+                            index: index as u32,
+                            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                        },
+                        number(&envelope.epoch)?,
+                    )
+                    .await?;
+                }
+            }
             self.enqueue_in(
                 &mut tx,
                 DevicePayload::Result {
@@ -500,6 +557,21 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
             .map(|s| serde_json::from_str::<NativeState>(&s))
             .transpose()?
             .unwrap_or_default();
+        for message in &state.messages {
+            if let Some(artifact) = &message.artifact {
+                let data: Option<String> =
+                    sqlx::query_scalar("SELECT value FROM local_meta WHERE key=?")
+                        .bind(format!("image:{}", message.id))
+                        .fetch_optional(&self.db)
+                        .await?;
+                if let Some(data) = data {
+                    let image: crate::artifact::LocalArtifact = serde_json::from_str(&data)?;
+                    if image.artifact == *artifact {
+                        state.artifacts.push(image);
+                    }
+                }
+            }
+        }
         for row in
             sqlx::query("SELECT id,body,accepted FROM local_pending ORDER BY rowid LIMIT 100")
                 .fetch_all(&self.db)
@@ -517,6 +589,7 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                 body
             };
             state.messages.push(ChatMessage {
+                artifact: None,
                 id: row.get("id"),
                 body: format!(
                     "{}：{}",

@@ -65,6 +65,9 @@ struct ChatView: View {
                       } else {
                         RichContent(source: message.displayBody)
                       }
+                      if let artifact = message.artifact {
+                        BrowserScreenshot(model: model, message: message, artifact: artifact)
+                      }
                     }
                     .padding(14).frame(maxWidth: .infinity, alignment: .leading)
                     .background(

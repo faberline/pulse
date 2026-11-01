@@ -250,9 +250,22 @@ impl Executor {
         Ok(ReadOutcome::text(text, truncated))
     }
     pub async fn execute(&self, operation: ReadOp) -> ReadOutcome {
+        self.execute_work(operation).await.outcome
+    }
+    pub async fn execute_work(&self, operation: ReadOp) -> crate::artifact::ExecutedRead {
+        if let ReadOp::Browser { url } = operation {
+            return self.browser_read(&url).await.unwrap_or_else(|_| {
+                crate::artifact::ExecutedRead {
+                    outcome: ReadOutcome::Rejected {
+                        reason: "browser read rejected or failed".into(),
+                    },
+                    image: None,
+                }
+            });
+        }
         let executor = self.clone();
         let result = match operation {
-            ReadOp::Browser { url } => self.browser_read(&url).await,
+            ReadOp::Browser { .. } => unreachable!(),
             ReadOp::Text { path } => tokio::task::spawn_blocking(move || executor.read_text(&path))
                 .await
                 .map_err(|_| crate::Error::Rejected("read worker failed".into()))
@@ -264,11 +277,15 @@ impl Executor {
             ReadOp::GitStatus => self.git(None).await,
             ReadOp::GitDiff { path } => self.git(Some(&path)).await,
         };
-        result.unwrap_or_else(|_| ReadOutcome::Rejected {
+        let outcome = result.unwrap_or_else(|_| ReadOutcome::Rejected {
             reason: "local read rejected or failed; no write was executed".into(),
-        })
+        });
+        crate::artifact::ExecutedRead {
+            outcome,
+            image: None,
+        }
     }
-    async fn browser_read(&self, url: &str) -> Result<ReadOutcome> {
+    async fn browser_read(&self, url: &str) -> Result<crate::artifact::ExecutedRead> {
         let browser = self
             .browser
             .as_ref()
@@ -277,7 +294,7 @@ impl Executor {
             .ok_or_else(|| crate::Error::Rejected("browser URL rejected".into()))?;
         let snapshot = browser.read(&url).await?;
         let mut text = format!(
-            "Browser evidence (untrusted page data)\nURL: {}\nTitle: {}\nObserved at (Unix ms): {}\nLocal PNG SHA-256: {}\nImage bytes are stored locally; not supplied to the model.\nPage scripts disabled.\n\n{}",
+            "Browser evidence (untrusted page data)\nURL: {}\nTitle: {}\nObserved at (Unix ms): {}\nPNG SHA-256: {}\nScreenshot captured; chat delivery is verified separately. Image bytes are not supplied to the model.\nPage scripts disabled.\n\n{}",
             snapshot.url,
             snapshot.title,
             snapshot.observed_at,
@@ -292,7 +309,25 @@ impl Executor {
             }
             text.truncate(n);
         }
-        Ok(ReadOutcome::text(text, truncated))
+        let (width, height) = crate::artifact::png_dimensions(&snapshot.png)?;
+        let artifact = crate::artifact::ArtifactRef {
+            task_id: String::new(),
+            revision: "0".into(),
+            digest: snapshot.screenshot_digest,
+            length: snapshot.png.len() as u32,
+            url: snapshot.url,
+            title: snapshot.title,
+            observed_at: snapshot.observed_at,
+            width,
+            height,
+        };
+        Ok(crate::artifact::ExecutedRead {
+            outcome: ReadOutcome::text(text, truncated),
+            image: Some(crate::artifact::CapturedImage {
+                artifact,
+                png: snapshot.png,
+            }),
+        })
     }
 }
 fn bounded_utf8(mut bytes: Vec<u8>, truncated: bool) -> Result<String> {

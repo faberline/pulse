@@ -334,13 +334,17 @@ impl Hub {
         .fetch_all(&mut *tx)
         .await?;
         rows.reverse();
-        let messages = rows
-            .into_iter()
-            .map(|r| ChatMessage {
-                id: r.get("id"),
-                body: r.get("body"),
-            })
-            .collect();
+        let mut messages = Vec::new();
+        for row in rows {
+            let id: String = row.get("id");
+            let metadata: Option<String> = sqlx::query_scalar("SELECT a.metadata FROM link_artifacts a JOIN link_reads r ON a.operation_id=r.id WHERE a.operation_id=? AND r.state='completed' AND a.png IS NOT NULL")
+                .bind(&id).fetch_optional(&mut *tx).await?;
+            messages.push(ChatMessage {
+                id,
+                body: row.get("body"),
+                artifact: metadata.map(|s| serde_json::from_str(&s)).transpose()?,
+            });
+        }
         let mut payload = ServerPayload::Snapshot {
             tasks,
             messages,
@@ -459,6 +463,7 @@ impl Hub {
                 (&envelope.payload, role.as_str()),
                 (DevicePayload::Human { .. }, "chat")
                     | (DevicePayload::Result { .. }, "local_executor")
+                    | (DevicePayload::ArtifactChunk { .. }, "local_executor")
             ),
             "client role cannot send this payload",
         )?;
@@ -561,6 +566,22 @@ impl Hub {
         time: i64,
     ) -> Result<()> {
         match &envelope.payload {
+            DevicePayload::ArtifactChunk {
+                operation_id,
+                artifact,
+                index,
+                data,
+            } => {
+                self.artifact_chunk(
+                    device,
+                    number(&envelope.epoch)?,
+                    operation_id,
+                    artifact,
+                    *index,
+                    data,
+                )
+                .await?
+            }
             DevicePayload::Human { source_id, action } => {
                 let _human = self.human.lock().await;
                 ensure(
@@ -840,6 +861,7 @@ pub fn router(hub: Hub) -> Router {
         .route("/v1/devices/connect", get(upgrade))
         .route("/v1/tasks", get(tasks))
         .route("/v1/tasks/{id}", get(task))
+        .route("/v1/artifacts/{id}/{digest}", get(artifact))
         .layer(DefaultBodyLimit::max(MAX_FRAME))
         .with_state(Arc::new(hub))
 }
@@ -862,6 +884,27 @@ async fn pair(State(hub): State<Arc<Hub>>, bytes: Bytes) -> impl IntoResponse {
             axum::Json(json!({"error":"pairing rejected"})),
         ),
     }
+}
+async fn artifact(
+    State(hub): State<Arc<Hub>>,
+    headers: HeaderMap,
+    Path((id, digest)): Path<(String, String)>,
+) -> axum::response::Response {
+    if let Ok(token) = bearer(&headers)
+        && let Ok(device) = hub.authenticate(token).await
+        && let Ok(png) = hub.artifact_png(&device, &id, &digest, now()).await
+    {
+        return (
+            [
+                ("content-type", "image/png"),
+                ("cache-control", "no-store"),
+                ("x-content-type-options", "nosniff"),
+            ],
+            png,
+        )
+            .into_response();
+    }
+    StatusCode::NOT_FOUND.into_response()
 }
 async fn tasks(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> impl IntoResponse {
     if let Ok(token) = bearer(&headers)

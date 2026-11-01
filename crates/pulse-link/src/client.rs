@@ -250,7 +250,24 @@ impl Device {
         let mut ticker = tokio::time::interval(Duration::from_millis(250));
         let mut message = "配對後可連線。模型尚未接入。".to_string();
         let mut pairing: Option<tokio::task::JoinHandle<Result<Credential>>> = None;
+        let mut artifact_download: Option<
+            tokio::task::JoinHandle<Result<crate::artifact::LocalArtifact>>,
+        > = None;
+        let mut artifact_loading: Option<String> = None;
+        let mut artifact_failure: Option<String> = None;
         let result=async {loop {tokio::select! {
+            completed=async{match artifact_download.as_mut(){Some(task)=>task.await,None=>std::future::pending().await}}=>{
+                artifact_download=None;
+                let loaded_id=artifact_loading.take();
+                match completed {
+                    Ok(Ok(image))=>{match self.journal.save_artifact(&image).await {
+                        Ok(())=>message="截圖已核對並保存。".into(),
+                        Err(crate::Error::Rejected(_))=>message="截圖來源已更新。請重新選取。".into(),
+                        Err(error)=>return Err(error),
+                    }}
+                    _=>{artifact_failure=loaded_id;message="截圖尚未取得。可按截圖重試；不會重新瀏覽。".into();},
+                }
+            }
             completed=async {match pairing.as_mut(){Some(task)=>task.await,None=>std::future::pending().await}}=>{
                 pairing=None;
                 match completed {
@@ -265,11 +282,21 @@ impl Device {
             }
             _=ticker.tick()=>{
                 let mut state=self.journal.view().await?;state.server=self.config.server.to_string();state.paired=credential.is_some();state.connected=link_rx.borrow().connected;state.message=message.clone();
+                state.artifact_loading=artifact_loading.clone();state.artifact_failure=artifact_failure.clone();
                 states.send_replace(state);
             }
             done=&mut worker=>{done.map_err(|_|crate::Error::Rejected("local worker stopped".into()))??;return Err(crate::Error::Rejected("local worker stopped".into()));}
             command=commands.recv()=>{
                 match command {
+                    Some(NativeCommand::LoadArtifact{operation_id,digest})=>{
+                        if artifact_download.is_some(){continue;}
+                        if let Some(credential)=credential.clone() {
+                            match self.journal.artifact_request(&operation_id,&digest).await {
+                                Ok(artifact)=>{artifact_loading=Some(operation_id.clone());artifact_failure=None;message="正在載入截圖…".into();let config=self.config.clone();artifact_download=Some(tokio::spawn(async move{crate::artifact_client::download(&config,&credential,&operation_id,&artifact).await}));}
+                                Err(_)=>message="截圖要求已拒絕。請核對來源。".into(),
+                            }
+                        }
+                    }
                     None|Some(NativeCommand::Shutdown)=>break,
                     Some(NativeCommand::KillSwitch{stopped})=>{
                         if self.journal.role == ClientRole::Chat {
@@ -299,6 +326,10 @@ impl Device {
             }
         }}Ok(())}.await;
         lease_tx.send_replace(Lease::default());
+        if let Some(task) = artifact_download {
+            task.abort();
+            let _ = task.await;
+        }
         if let Some(task) = pairing {
             task.abort();
             let _ = task.await;
@@ -494,7 +525,7 @@ async fn work(journal: Journal, executor: Executor, lease: watch::Receiver<Lease
                         revision,
                         ..
                     } => {
-                        let read = executor.execute(operation.clone());
+                        let read = executor.execute_work(operation.clone());
                         tokio::pin!(read);
                         let mut monitor = tokio::time::interval(Duration::from_millis(100));
                         loop {
@@ -506,7 +537,7 @@ async fn work(journal: Journal, executor: Executor, lease: watch::Receiver<Lease
                                     let obsolete = view.tasks.iter().find(|t| t.id == *task_id)
                                         .is_some_and(|t| t.revision.to_string() != *revision || t.cancel_requested || t.state.terminal());
                                     if !live.live() || live.epoch != current.epoch || journal.stopped().await? || obsolete {
-                                        break ReadOutcome::Unknown { reason: "local read interrupted by stop, revision, cancellation or expired session".into() };
+                                        break crate::artifact::ExecutedRead {outcome:ReadOutcome::Unknown { reason: "local read interrupted by stop, revision, cancellation or expired session".into() },image:None};
                                     }
                                 }
                             }
@@ -515,11 +546,16 @@ async fn work(journal: Journal, executor: Executor, lease: watch::Receiver<Lease
                     _ => return Err(crate::Error::Rejected("invalid work record".into())),
                 }
             } else {
-                ReadOutcome::Unknown {
-                    reason: "worker stopped or session lease is no longer valid".into(),
+                crate::artifact::ExecutedRead {
+                    outcome: ReadOutcome::Unknown {
+                        reason: "worker stopped or session lease is no longer valid".into(),
+                    },
+                    image: None,
                 }
             };
-            journal.finish_work(&envelope, outcome).await?;
+            journal
+                .finish_work_image(&envelope, outcome.outcome, outcome.image)
+                .await?;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

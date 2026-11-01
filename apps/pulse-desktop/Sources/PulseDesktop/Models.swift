@@ -3,6 +3,10 @@ import Foundation
 struct ChatMessage: Decodable, Identifiable, Sendable {
   let id: String
   let body: String
+  let artifact: BrowserArtifact?
+  init(id: String, body: String, artifact: BrowserArtifact? = nil) {
+    self.id = id; self.body = body; self.artifact = artifact
+  }
   var isEvidence: Bool { body.hasPrefix("只讀工具結果") }
   var isUser: Bool { ["已保存任務：", "已保存訊息：", "本機待送：", "雲端已收件："].contains { body.hasPrefix($0) } }
   var displayBody: String {
@@ -38,7 +42,7 @@ struct PulseTask: Decodable, Identifiable, Sendable {
 }
 struct NativeState: Decodable, Sendable {
   enum CodingKeys: String, CodingKey {
-    case server, connected, stopped, paired, message, pending, tasks, messages
+    case server, connected, stopped, paired, message, pending, tasks, messages, artifacts, artifact_loading, artifact_failure
     case localConnected = "local_connected"
     case syncedAt = "synced_at"
   }
@@ -52,6 +56,9 @@ struct NativeState: Decodable, Sendable {
   var syncedAt: Int64?
   var tasks: [PulseTask] = []
   var messages: [ChatMessage] = []
+  var artifacts: [LocalBrowserArtifact]?
+  var artifact_loading: String?
+  var artifact_failure: String?
 }
 struct ConnectionSettings: Codable, Equatable {
   var server = ""

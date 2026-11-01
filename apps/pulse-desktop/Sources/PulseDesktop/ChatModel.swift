@@ -13,6 +13,11 @@ final class ChatModel: ObservableObject {
   @Published var showProgress = false
   @Published var image: NSImage?
   @Published var imageName = ""
+  @Published var browserImages: [String: NSImage] = [:]
+  private var loadingBrowserImages = Set<String>()
+  private var requestedBrowserImages = Set<String>()
+  private var failedBrowserImages = Set<String>()
+  private var imageRequestInFlight: String?
   @Published var selectedTask: String?
   @Published private(set) var pending: PendingSubmit?
   private var activeBinding: [String]?
@@ -51,6 +56,7 @@ final class ChatModel: ObservableObject {
       pending = nil
       state = NativeState()
       selectedTask = nil
+      browserImages = [:]; loadingBrowserImages = []; requestedBrowserImages = []; failedBrowserImages = []; imageRequestInFlight = nil
     }
     activeBinding = settings.binding
     generation = UUID()
@@ -80,6 +86,28 @@ final class ChatModel: ObservableObject {
   func receive(_ value: NativeState, generation id: UUID) {
     guard generation == id else { return }
     state = value
+    let liveImages = Set(value.messages.filter { $0.artifact != nil }.map(\.id))
+    browserImages = browserImages.filter { liveImages.contains($0.key) }
+    let cachedArtifacts = value.artifacts ?? []
+    if let id = imageRequestInFlight, cachedArtifacts.contains(where: { $0.operation_id == id }) || value.artifact_failure == id {
+      imageRequestInFlight = nil
+    }
+    for cached in cachedArtifacts where browserImages[cached.operation_id] == nil && !loadingBrowserImages.contains(cached.operation_id) && !failedBrowserImages.contains(cached.operation_id) {
+      loadingBrowserImages.insert(cached.operation_id)
+      let generation = generation
+      let directory = settings.dataDir
+      Task {
+        let data = await Task.detached { verifiedBrowserImageData(cached, directory: directory) }.value
+        guard self.generation == generation else { return }
+        self.loadingBrowserImages.remove(cached.operation_id)
+        if let data, let image = NSImage(data: data) { self.browserImages[cached.operation_id] = image }
+        else { self.failedBrowserImages.insert(cached.operation_id) }
+      }
+    }
+    if value.connected, imageRequestInFlight == nil, value.artifact_loading == nil,
+      let message = value.messages.first(where: { message in message.artifact != nil && !requestedBrowserImages.contains(message.id) && !cachedArtifacts.contains(where: { $0.operation_id == message.id }) }) {
+      loadBrowserArtifact(message)
+    }
     if let pending {
       if let remaining = pending.confirmedDraft(draft, by: value) {
         draft = remaining
@@ -116,6 +144,13 @@ final class ChatModel: ObservableObject {
   func read(_ operation: [String: Any]) {
     guard let task, !task.terminal else { return }
     action(["kind": "read", "task_id": task.id, "revision": task.revision, "operation": operation])
+  }
+  func loadBrowserArtifact(_ message: ChatMessage) {
+    guard let artifact = message.artifact, imageRequestInFlight == nil else { return }
+    failedBrowserImages.remove(message.id)
+    if send(["kind": "load_artifact", "operation_id": message.id, "digest": artifact.digest]) {
+      requestedBrowserImages.insert(message.id); imageRequestInFlight = message.id
+    }
   }
   func toggleLocal() { send(["kind": "kill_switch", "stopped": !state.stopped]) }
   func pickDataDirectory() {
