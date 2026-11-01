@@ -8,6 +8,8 @@ Pulse 是單人使用的事件驅動助理。它有三個元件：server、對�
 
 remote executor 由 Pulse 自己實作。它沿用現有 `pulse-core` 的持久任務、派工、checkpoint 與恢復機制。它不需要對應一台 VM，也不依賴 AW。實際模型與工具執行迴圈接續 v0.4。
 
+v0.4 已接上 server 內的 remote 排程與文字模型。預設使用 Luna，可用 `PULSE_PROVIDER=anthropic` 選 Haiku。沒有 key 時保存 `provider_not_configured`；回覆及用量持久保存，任務仍待驗收。工具迴圈與多輪決策 context 尚未完成。
+
 主畫面只有一個可換行的對話輸入框。連線與配對在「設定」；任務與工具操作在可收起的「進度」。圖片以系統選取視窗開啟，不必輸入路徑。
 
 本機 WebSocket 與恢復測試已驗證。三元件版本的實機證據見 v0.3 文件。正式遠端 WSS、完整畫面互動與效能驗收仍待驗證。真實模型與雲端部署尚未接入。

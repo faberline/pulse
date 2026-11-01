@@ -2,6 +2,8 @@ pub mod client;
 pub mod executor;
 pub mod journal;
 pub mod protocol;
+pub mod provider;
+pub mod remote;
 pub mod server;
 
 #[derive(Debug, thiserror::Error)]

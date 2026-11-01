@@ -33,6 +33,65 @@ impl Hub {
         self.changes
             .send_modify(|version| *version = version.wrapping_add(1));
     }
+    pub(crate) fn notify_change(&self) {
+        self.changed();
+    }
+    pub async fn model_reply(
+        &self,
+        token: &pulse_core::Token,
+        reply: &crate::provider::Reply,
+        model: &str,
+        time: i64,
+    ) -> Result<()> {
+        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+        let data: String = sqlx::query_scalar("SELECT data FROM tasks WHERE id=?")
+            .bind(&token.task_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let mut task: pulse_core::Task = serde_json::from_str(&data)?;
+        let data: String = sqlx::query_scalar("SELECT data FROM runs WHERE id=?")
+            .bind(&token.run_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let mut run: pulse_core::Run = serde_json::from_str(&data)?;
+        ensure(
+            task.revision == token.revision
+                && !task.cancel_requested
+                && task.deadline > time
+                && task.state == pulse_core::State::Planning
+                && task.active_run.as_deref() == Some(&token.run_id)
+                && run.token.epoch == token.epoch,
+            "stale model reply",
+        )?;
+        let id = format!("model:{}:{}", token.run_id, token.revision);
+        run.checkpoint =
+            json!({"phase":"reply_saved","model":model,"reply":reply.text,"usage":reply.usage});
+        task.state = pulse_core::State::Blocked;
+        task.reason = Some("model_reply_ready".into());
+        task.evidence.push(id.clone());
+        sqlx::query("UPDATE tasks SET data=? WHERE id=?")
+            .bind(serde_json::to_string(&task)?)
+            .bind(&task.id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE runs SET data=? WHERE id=?")
+            .bind(serde_json::to_string(&run)?)
+            .bind(&token.run_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT OR IGNORE INTO link_chat VALUES(?,?,?)")
+            .bind(id)
+            .bind(format!(
+                "模型回覆（{model}）：\n\n{}\n\n這是文字回覆，任務尚未驗收。",
+                reply.text
+            ))
+            .bind(time)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        self.changed();
+        Ok(())
+    }
     pub async fn pairing(&self, role: ClientRole, time: i64) -> Result<String> {
         let code = secret()?;
         sqlx::query("INSERT INTO link_pairings(digest,expires,role) VALUES(?,?,?)")
@@ -491,14 +550,8 @@ impl Hub {
                 )?;
                 match action {
                     HumanAction::Submit { goal, .. } => {
-                        self.chat(
-                            source_id,
-                            &format!(
-                                "已保存任務：{goal}\n\n模型尚未接入。可選任務後使用只讀工具。"
-                            ),
-                            time,
-                        )
-                        .await?
+                        self.chat(source_id, &format!("已保存任務：{goal}"), time)
+                            .await?
                     }
                     HumanAction::Read {
                         task_id,

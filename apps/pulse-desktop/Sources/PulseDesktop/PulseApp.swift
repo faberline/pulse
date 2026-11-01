@@ -50,7 +50,7 @@ struct ChatView: View {
                 if model.state.messages.isEmpty {
                   VStack(alignment: .leading, spacing: 8) {
                     Text("從一句話開始。").font(.title)
-                    Text("模型尚未接入。訊息會先保存。").foregroundStyle(.secondary)
+                    Text("訊息與回覆會顯示在這裡。").foregroundStyle(.secondary)
                   }.padding(.vertical, 90).frame(maxWidth: .infinity, alignment: .center)
                 }
                 ForEach(model.state.messages) { message in
@@ -99,7 +99,7 @@ struct ChatView: View {
                 !model.canSend)
             }
             HStack {
-              Text(model.notice.isEmpty ? "模型尚未接入，訊息會先保存。" : model.notice).font(.caption)
+              Text(model.notice.isEmpty ? "訊息會先保存，回覆與進度會自動同步。" : model.notice).font(.caption)
                 .foregroundStyle(.secondary)
               Spacer()
             }
