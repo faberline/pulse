@@ -9,6 +9,7 @@ pub mod client;
 mod computer_admission;
 mod computer_control;
 pub mod computer_runtime;
+pub mod computer_selection;
 mod computer_transport;
 mod conversation;
 pub mod executor;

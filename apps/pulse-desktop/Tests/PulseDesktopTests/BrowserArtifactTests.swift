@@ -3,6 +3,22 @@ import CryptoKit
 @testable import PulseDesktop
 
 final class BrowserArtifactTests: XCTestCase {
+  func testWindowReselectionRetainsTaskRevisionAndDoesNotCreateAnotherGoal() throws {
+    let selection = ComputerArtifactSource.Selection(target: .init(bundle_id: "com.faberline.PulseComputerFixture", pid: 42, window_id: 7), process_launched_at: 1)
+    let pending = PendingWindowReselection(sourceID: "selection", taskID: "same-task", revision: "3", selection: selection, selectedAt: 1000, binding: ["https://pulse.example/", "private"])
+    XCTAssertEqual(pending.command["kind"] as? String, "rebind_computer")
+    XCTAssertEqual(pending.command["task_id"] as? String, "same-task")
+    XCTAssertEqual(pending.command["revision"] as? String, "3")
+    XCTAssertEqual(pending.command["selected_at"] as? Int64, 1000)
+    XCTAssertNil(pending.command["id"]);XCTAssertNil(pending.command["goal"])
+    func task(_ state: String, cancel: Bool = false) -> PulseTask {
+      PulseTask(id: "same-task", goal: "read", revision: "3", state: state, scope: "computer:com.app:42:7:1", reason: nil, cancelRequested: cancel)
+    }
+    XCTAssertTrue(task("waiting_device").canReselectWindow)
+    XCTAssertFalse(task("outcome_unknown").canReselectWindow)
+    XCTAssertFalse(task("dispatched").canReselectWindow)
+    XCTAssertFalse(task("waiting_device", cancel: true).canReselectWindow)
+  }
   func testComputerSubmitRetainsOneSelectionAndTimestampUntilCloudReceipt() throws {
     let selection = ComputerArtifactSource.Selection(target: .init(bundle_id: "com.faberline.PulseComputerFixture", pid: 42, window_id: 7), process_launched_at: 1)
     let pending = PendingSubmit(sourceID: "source", taskID: "task", text: "讀取視窗", binding: ["https://pulse.example/", "private"], computer: selection, selectedAt: 1000)

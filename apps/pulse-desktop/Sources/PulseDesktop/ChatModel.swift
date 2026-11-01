@@ -13,6 +13,9 @@ final class ChatModel: ObservableObject {
   @Published var showProgress = false
   @Published var showComputerPicker = false
   @Published var selectedComputer: ComputerWindowChoice?
+  @Published var reselectingTask: PulseTask?
+  @Published private(set) var pendingWindowReselection: PendingWindowReselection?
+  private var reselectionGeneration: UUID?
   @Published var image: NSImage?
   @Published var imageName = ""
   @Published var browserImages: [String: NSImage] = [:]
@@ -61,6 +64,7 @@ final class ChatModel: ObservableObject {
       state = NativeState()
       selectedTask = nil
       selectedComputer = nil
+      reselectingTask = nil; pendingWindowReselection = nil
       browserImages = [:]; browserImageDigests = [:]; loadingBrowserImages = []; requestedBrowserImages = []; failedBrowserImages = []; imageRequestInFlight = nil
     }
     activeBinding = settings.binding
@@ -89,9 +93,22 @@ final class ChatModel: ObservableObject {
       retriedGeneration = generation
     }
   }
+  func chooseComputerWindow(_ window: ComputerWindowChoice) {
+    guard let task = reselectingTask else {selectedComputer = window;return}
+    guard task.canReselectWindow, state.tasks.contains(where: { $0.id == task.id && $0.revision == task.revision && $0.canReselectWindow }),
+      let binding = activeBinding, pendingWindowReselection == nil else {
+      notice = "任務已變更。請更新進度後重新選擇。";return
+    }
+    let pending = PendingWindowReselection(sourceID: UUID().uuidString, taskID: task.id, revision: task.revision,
+      selection: window.selection, selectedAt: Int64(Date().timeIntervalSince1970 * 1000), binding: binding)
+    if send(pending.command) {pendingWindowReselection = pending;reselectionGeneration = generation}
+    reselectingTask = nil
+  }
   func receive(_ value: NativeState, generation id: UUID) {
     guard generation == id else { return }
     state = value
+    if value.connected && value.computer_failure == nil { notice = "" }
+    else if !value.paired { notice = "請到設定完成對話框配對。" }
     browserDecisionPending = value.connected ? browserDecisionPending.filter { id, previous in value.messages.first(where: { $0.approval?.proposal.id == id })?.approval?.state == previous } : [:]
     let liveImages = Set(value.messages.filter { $0.artifact != nil }.map(\.artifactID))
     browserImages = browserImages.filter { liveImages.contains($0.key) }
@@ -122,22 +139,29 @@ final class ChatModel: ObservableObject {
       loadBrowserArtifact(message)
     }
     if let pending {
-      if value.computer_failure == pending.sourceID {
-        self.pending = nil
-        notice = value.message
-      } else if let remaining = pending.confirmedDraft(draft, by: value) {
+      if let remaining = pending.confirmedDraft(draft, by: value) {
         draft = remaining
         if selectedComputer?.selection == pending.computer { selectedComputer = nil }
         self.pending = nil
+      } else if value.computer_failure == pending.sourceID {
+        self.pending = nil; notice = value.message
       } else if pending.binding == activeBinding {
         // A restart retries the original IDs, never a second task.
         // The transport journal, not UI polling, handles ordinary retries.
         retryPendingIfNeeded()
       }
     }
+    if let pending = pendingWindowReselection {
+      if let receipt = value.computer_selections?.first(where: { $0.source_id == pending.sourceID && $0.task_id == pending.taskID }) {
+        pendingWindowReselection = nil
+        notice = receipt.state == "invalidated" ? "任務已變更，這次視窗選擇未套用。" : "視窗選擇已保存，等待本機核對。"
+      } else if value.computer_failure == pending.sourceID {pendingWindowReselection = nil;notice = value.message}
+      else if pending.binding == activeBinding && reselectionGeneration != generation {
+        if send(pending.command) {reselectionGeneration = generation}
+      }
+    }
     if value.computer_selecting != nil { notice = "正在核對選定的程式視窗…" }
-    else if value.connected && value.computer_failure == nil { notice = "" }
-    else if !value.paired { notice = "請到設定完成對話框配對。" }
+    else if value.computer_failure != nil { notice = value.message }
   }
   private var retriedGeneration: UUID?
   private func retryPendingIfNeeded() {

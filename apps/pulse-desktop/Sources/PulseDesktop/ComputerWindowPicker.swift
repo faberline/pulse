@@ -12,6 +12,7 @@ struct ComputerWindowChoice: Identifiable, Equatable, Sendable {
 
 /// Opened only by the Human's composer button. No window inventory is sent to the server.
 struct ComputerWindowPicker: View {
+  var taskGoal: String? = nil
   let choose: (ComputerWindowChoice) -> Void
   @Environment(\.dismiss) private var dismiss
   @State private var windows: [ComputerWindowChoice] = []
@@ -19,6 +20,7 @@ struct ComputerWindowPicker: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 14) {
       Text("選擇程式視窗").font(.title2)
+      if let taskGoal {Text("替這個任務重新選擇：\(taskGoal)").lineLimit(2)}
       Text("只讀取你選的視窗。視窗文字會交給模型，原圖會顯示在對話中。這不會點擊或輸入。")
         .font(.callout).foregroundStyle(.secondary)
       if windows.isEmpty { Text(message).padding(.vertical) }

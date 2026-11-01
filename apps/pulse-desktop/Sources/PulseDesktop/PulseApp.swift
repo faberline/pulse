@@ -112,9 +112,9 @@ struct ChatView: View {
               } label: {
                 Label("圖片", systemImage: "photo")
               }
-              Button { model.showComputerPicker = true } label: { Label("程式視窗", systemImage: "macwindow") }
+              Button { model.reselectingTask = nil; model.showComputerPicker = true } label: { Label("程式視窗", systemImage: "macwindow") }
                 .disabled(model.pending != nil)
-                .sheet(isPresented: $model.showComputerPicker) { ComputerWindowPicker { model.selectedComputer = $0 } }
+                .sheet(isPresented: $model.showComputerPicker) { ComputerWindowPicker(taskGoal: model.reselectingTask?.goal, choose: model.chooseComputerWindow) }
               Spacer()
               Text("⌘ Enter 傳送").font(.caption).foregroundStyle(.secondary)
               Button("傳送", action: model.submit).buttonStyle(.borderedProminent).disabled(
@@ -148,6 +148,10 @@ struct ChatView: View {
       if let task = model.task {
         Text(task.status).font(.caption)
         Button("取消任務", action: model.cancelTask).disabled(task.terminal || task.cancelRequested)
+        if task.scope?.hasPrefix("computer:") == true {
+          Button("重新選擇視窗") { model.reselectingTask = task; model.showComputerPicker = true }
+            .disabled(!task.canReselectWindow || model.pendingWindowReselection != nil || model.state.computer_selecting != nil)
+        }
         if task.scope == nil || task.scope == "pulse:read" {
           DisclosureGroup("更多操作") {
             Button("讀取 README") { model.read(["kind": "text", "path": "README.md"]) }

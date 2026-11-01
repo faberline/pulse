@@ -278,8 +278,12 @@ impl Device {
             completed=computer_selection.join_next(), if !computer_selection.is_empty()=>{
                 let id=computer_selecting.take();
                 match completed {
-                    Some(Ok(Ok(())))=>{computer_failure=None;message="視窗範圍已在本機核對，訊息已保存待送。".into();}
-                    _=>{computer_failure=id;message="視窗尚未連上。請核對地端程序、所選視窗與輔助使用／螢幕錄製權限；草稿已保留。".into();}
+                    Some(Ok(Ok(())))=>{
+                        let prepared=if let Some(id)=&id {self.journal.prepared_computer_selection(id).await?}else{false};
+                        if prepared {computer_failure=None;message="視窗範圍已在本機核對。".into();}
+                        else {computer_failure=id;message="任務已變更，這份視窗選擇未套用。".into();}
+                    }
+                    _=>{computer_failure=id;message="訊息已保存，視窗尚未連上。請核對地端連線、所選視窗與輔助使用／螢幕錄製權限。".into();}
                 }
             }
             completed=async{match artifact_download.as_mut(){Some(task)=>task.await,None=>std::future::pending().await}}=>{
@@ -309,22 +313,30 @@ impl Device {
             _=ticker.tick()=>{
                 let mut state=self.journal.view().await?;state.server=self.config.server.to_string();state.paired=credential.is_some();state.connected=link_rx.borrow().connected;state.message=message.clone();
                 state.artifact_loading=artifact_loading.clone();state.artifact_failure=artifact_failure.clone();
+                if computer_selection.is_empty() && let Some(entry)=self.journal.take_computer_selection(crate::now()).await? {
+                    computer_selecting=Some(entry.source_id.clone());let server=self.config.server.to_string();
+                    computer_selection.spawn(async move {crate::computer_control::prepare(&server,entry.permit,entry.replace).await});
+                }
                 state.computer_selecting=computer_selecting.clone();state.computer_failure=computer_failure.clone();
+                state.computer_selections=self.journal.computer_selection_statuses().await?;
                 states.send_replace(state);
             }
             done=&mut worker=>{done.map_err(|_|crate::Error::Rejected("local worker stopped".into()))??;return Err(crate::Error::Rejected("local worker stopped".into()));}
             command=commands.recv()=>{
                 match command {
                     Some(NativeCommand::SubmitComputer{source_id,id,goal,selection,selected_at})=>{
-                        if self.journal.role != ClientRole::Chat || !computer_selection.is_empty() {continue;}
-                        computer_failure=None;computer_selecting=Some(source_id.clone());message="正在核對選定的程式視窗…".into();
-                        let server=self.config.server.to_string(); let journal=self.journal.clone();
-                        computer_selection.spawn(async move {
-                            ensure(!source_id.is_empty() && source_id.len() <= 128 && !goal.trim().is_empty() && goal.len() <= 4096,"computer message size")?;
-                            let expires_at=selected_at.checked_add(900_000).ok_or_else(||crate::Error::Rejected("selection time overflow".into()))?;
-                            crate::computer_control::prepare(&server,pulse_core::ComputerPermit {task_id:id.clone(),revision:"1".into(),selection:selection.clone(),selected_at,expires_at}).await?;
-                            journal.action(&source_id,HumanAction::SubmitComputer{id,goal,selection}).await
-                        });
+                        match self.journal.queue_computer_selection(&source_id,HumanAction::SubmitComputer{id,goal,selection},selected_at).await {
+                            Ok(())=>{computer_failure=None;message="訊息已存入本機，視窗連上後會繼續。".into();},
+                            Err(crate::Error::Rejected(_)|crate::Error::Capacity)=>{computer_failure=Some(source_id);message="要求未保存。請核對視窗與佇列；草稿已保留。".into();},
+                            Err(error)=>return Err(error),
+                        }
+                    }
+                    Some(NativeCommand::RebindComputer{source_id,task_id,revision,selection,selected_at})=>{
+                        match self.journal.queue_computer_selection(&source_id,HumanAction::RebindComputer{task_id,revision,selection},selected_at).await {
+                            Ok(())=>{computer_failure=None;message="視窗選擇已保存，等待本機核對。".into();},
+                            Err(crate::Error::Rejected(_)|crate::Error::Capacity)=>{computer_failure=Some(source_id);message="視窗尚未更新。請核對目前任務與修訂；未知操作不會重做。".into();},
+                            Err(error)=>return Err(error),
+                        }
                     }
                     Some(NativeCommand::LoadArtifact{operation_id,digest})=>{
                         if artifact_download.is_some(){continue;}

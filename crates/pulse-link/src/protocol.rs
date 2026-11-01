@@ -172,6 +172,11 @@ pub enum HumanAction {
         goal: String,
         selection: pulse_core::ComputerSelection,
     },
+    RebindComputer {
+        task_id: String,
+        revision: String,
+        selection: pulse_core::ComputerSelection,
+    },
     Cancel {
         task_id: String,
         revision: String,
@@ -370,6 +375,13 @@ pub struct Credential {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeCommand {
+    RebindComputer {
+        source_id: String,
+        task_id: String,
+        revision: String,
+        selection: pulse_core::ComputerSelection,
+        selected_at: i64,
+    },
     SubmitComputer {
         source_id: String,
         id: String,
@@ -395,6 +407,8 @@ pub enum NativeCommand {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NativeState {
+    #[serde(default)]
+    pub computer_selections: Vec<crate::computer_selection::SelectionStatus>,
     #[serde(default)]
     pub computer_selecting: Option<String>,
     #[serde(default)]

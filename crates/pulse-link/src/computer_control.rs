@@ -18,6 +18,7 @@ struct SelectionRequest {
     version: u8,
     server: String,
     permit: ComputerPermit,
+    replace: bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -140,7 +141,7 @@ impl PickerChannel {
         ensure(bytes.len() <= 16_384, "local picker request too large")?;
         let request: SelectionRequest = parse(&bytes)?;
         ensure(
-            request.version == 1
+            request.version == 2
                 && request.server == self.server
                 && request.permit.valid(crate::now()),
             "invalid local picker request",
@@ -151,13 +152,17 @@ impl PickerChannel {
             .await
             .is_ok()
         {
-            runtime.permit_local(request.permit.clone()).is_ok()
+            if request.replace {
+                runtime.replace_local(request.permit.clone()).is_ok()
+            } else {
+                runtime.permit_local(request.permit.clone()).is_ok()
+            }
         } else {
             false
         };
         let written = stream
             .write_all(&serde_json::to_vec(&SelectionResponse {
-                version: 1,
+                version: 2,
                 ready,
             })?)
             .await;
@@ -177,10 +182,19 @@ impl Drop for PickerChannel {
     }
 }
 
-pub(crate) async fn prepare(server: &str, permit: ComputerPermit) -> Result<()> {
-    prepare_at(&control_directory(), server, permit).await
+pub(crate) async fn prepare(server: &str, permit: ComputerPermit, replace: bool) -> Result<()> {
+    prepare_mode(&control_directory(), server, permit, replace).await
 }
+#[cfg(test)]
 async fn prepare_at(directory: &Path, server: &str, permit: ComputerPermit) -> Result<()> {
+    prepare_mode(directory, server, permit, false).await
+}
+async fn prepare_mode(
+    directory: &Path,
+    server: &str,
+    permit: ComputerPermit,
+    replace: bool,
+) -> Result<()> {
     ensure(permit.valid(crate::now()), "local selection expired")?;
     let directory = directory.canonicalize()?;
     let metadata = std::fs::symlink_metadata(&directory)?;
@@ -197,9 +211,10 @@ async fn prepare_at(directory: &Path, server: &str, permit: ComputerPermit) -> R
         same_user(&stream)?;
         stream
             .write_all(&serde_json::to_vec(&SelectionRequest {
-                version: 1,
+                version: 2,
                 server: server.into(),
                 permit,
+                replace,
             })?)
             .await?;
         stream.shutdown().await?;
@@ -208,7 +223,7 @@ async fn prepare_at(directory: &Path, server: &str, permit: ComputerPermit) -> R
         ensure(bytes.len() <= 4096, "local picker response limit")?;
         let response: SelectionResponse = parse(&bytes)?;
         ensure(
-            response.version == 1 && response.ready,
+            response.version == 2 && response.ready,
             "local window or permissions unavailable",
         )
     })
@@ -279,6 +294,18 @@ mod tests {
             .is_err()
         );
         assert_eq!(runtime.selections().len(), 2);
+        let mut renewed = a.clone();
+        renewed.selected_at = crate::now();
+        renewed.expires_at = renewed.selected_at + 900_000;
+        prepare_mode(&directory, "https://pulse.example/", renewed.clone(), true)
+            .await
+            .unwrap();
+        assert!(runtime.selections().contains(&renewed));
+        assert!(
+            prepare_at(&directory, "https://pulse.example/", a)
+                .await
+                .is_err()
+        );
         worker.0.abort();
         let _ = (&mut worker.0).await;
         assert!(!path.exists());
@@ -307,9 +334,10 @@ mod tests {
             stream
                 .write_all(
                     &serde_json::to_vec(&SelectionRequest {
-                        version: 1,
+                        version: 2,
                         server: "https://other.example/".into(),
                         permit: permit(&runtime, "other"),
+                        replace: false,
                     })
                     .unwrap(),
                 )

@@ -191,7 +191,7 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         Ok(())
     }
 
-    async fn enqueue_in(
+    pub(crate) async fn enqueue_in(
         &self,
         db: &mut sqlx::SqliteConnection,
         payload: DevicePayload,

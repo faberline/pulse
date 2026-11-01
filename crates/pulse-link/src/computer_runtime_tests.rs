@@ -96,6 +96,52 @@ pub(crate) async fn assert_reaped(runtime: &ComputerRuntime) {
 }
 
 #[tokio::test]
+async fn only_explicit_reselection_can_replace_a_live_permit_and_never_downgrade_revision() {
+    let (_root, mut runtime) = fixture("good");
+    runtime.target = None;
+    let selected_at = crate::now() - 10;
+    let original = pulse_core::ComputerPermit {
+        task_id: "task".into(),
+        revision: "1".into(),
+        selection: pulse_core::ComputerSelection {
+            target: ComputerTarget {
+                bundle_id: "com.faberline.PulseComputerFixture".into(),
+                pid: 42,
+                window_id: 7,
+            },
+            process_launched_at: 1,
+        },
+        selected_at,
+        expires_at: selected_at + 900_000,
+    };
+    runtime.permit_local(original.clone()).unwrap();
+    let mut renewed = original.clone();
+    renewed.selected_at += 1;
+    renewed.expires_at += 1;
+    assert!(runtime.permit_local(renewed.clone()).is_err());
+    runtime.replace_local(renewed.clone()).unwrap();
+    runtime.replace_local(renewed.clone()).unwrap();
+    let mut changed = renewed.clone();
+    changed.selection.target.window_id += 1;
+    changed.selected_at += 1;
+    changed.expires_at += 1;
+    assert!(runtime.replace_local(changed.clone()).is_err());
+    changed.revision = "2".into();
+    runtime.replace_local(changed.clone()).unwrap();
+    assert!(!runtime.permitted("task", "1", &original.selection));
+    assert!(runtime.permitted("task", "2", &changed.selection));
+    renewed.selected_at += 3;
+    renewed.expires_at += 3;
+    assert!(runtime.replace_local(renewed).is_err());
+    let restarted =
+        ComputerRuntime::new(runtime.helper.clone(), runtime.directory.clone(), None).unwrap();
+    restarted.set_live(true);
+    assert!(!restarted.permitted("task", "2", &changed.selection));
+    restarted.replace_local(changed.clone()).unwrap();
+    assert!(restarted.permitted("task", "2", &changed.selection));
+}
+
+#[tokio::test]
 async fn local_selection_ends_on_reply_cancellation_or_revision_without_changing_task_truth() {
     let (root, runtime) = fixture("good");
     let store = pulse_core::Store::open(root.path().join("tasks.db"), "owner")

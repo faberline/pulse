@@ -34,6 +34,7 @@ struct PulseTask: Decodable, Identifiable, Sendable {
   let reason: String?
   let cancelRequested: Bool
   var terminal: Bool { ["succeeded", "failed", "cancelled"].contains(state) }
+  var canReselectWindow: Bool { scope?.hasPrefix("computer:") == true && !cancelRequested && ["queued", "waiting_device"].contains(state) }
   var status: String {
     if reason == "browser_capability_wait" { return "等待本機瀏覽器；請核對安裝與網址範圍" }
     if reason == "computer_capability_wait" || reason == "computer_selection_wait" { return "等待選定視窗或電腦存取權限" }
@@ -47,7 +48,7 @@ struct PulseTask: Decodable, Identifiable, Sendable {
 }
 struct NativeState: Decodable, Sendable {
   enum CodingKeys: String, CodingKey {
-    case server, connected, stopped, paired, message, pending, tasks, messages, artifacts, artifact_loading, artifact_failure, computer_selecting, computer_failure
+    case server, connected, stopped, paired, message, pending, tasks, messages, artifacts, artifact_loading, artifact_failure, computer_selecting, computer_failure, computer_selections
     case localConnected = "local_connected"
     case syncedAt = "synced_at"
   }
@@ -66,7 +67,9 @@ struct NativeState: Decodable, Sendable {
   var artifact_failure: String?
   var computer_selecting: String?
   var computer_failure: String?
+  var computer_selections: [ComputerSelectionStatus]?
 }
+struct ComputerSelectionStatus: Decodable, Sendable {let source_id: String;let task_id: String;let revision: String;let state: String}
 struct ConnectionSettings: Codable, Equatable {
   var server = ""
   var dataDir = FileManager.default.homeDirectoryForCurrentUser
@@ -157,6 +160,19 @@ func serverBinding(_ value: String) -> String {
     parts.port = nil
   }
   return parts.string ?? value
+}
+
+struct PendingWindowReselection {
+  let sourceID: String
+  let taskID: String
+  let revision: String
+  let selection: ComputerArtifactSource.Selection
+  let selectedAt: Int64
+  let binding: [String]
+  var command: [String: Any] {
+    ["kind":"rebind_computer","source_id":sourceID,"task_id":taskID,"revision":revision,
+      "selection":selection.wireValue,"selected_at":selectedAt]
+  }
 }
 func safeLink(_ url: URL) -> Bool {
   guard let value = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }

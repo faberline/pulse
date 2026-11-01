@@ -276,6 +276,12 @@ impl ComputerRuntime {
         });
     }
     pub(crate) fn permit_local(&self, permit: pulse_core::ComputerPermit) -> Result<()> {
+        self.admit_local(permit, false)
+    }
+    pub(crate) fn replace_local(&self, permit: pulse_core::ComputerPermit) -> Result<()> {
+        self.admit_local(permit, true)
+    }
+    fn admit_local(&self, permit: pulse_core::ComputerPermit, replace: bool) -> Result<()> {
         ensure(
             *self.activity.borrow(),
             "local computer executor is not live",
@@ -293,8 +299,24 @@ impl ComputerRuntime {
             .lock()
             .map_err(|_| crate::Error::Rejected("local selection unavailable".into()))?;
         entries.retain(|entry| entry.valid(crate::now()));
-        if let Some(old) = entries.iter().find(|entry| entry.task_id == permit.task_id) {
-            return ensure(old == &permit, "local computer selection identity conflict");
+        if let Some(old) = entries
+            .iter_mut()
+            .find(|entry| entry.task_id == permit.task_id)
+        {
+            if old == &permit {
+                return Ok(());
+            }
+            let old_revision = crate::protocol::number(&old.revision)?;
+            let new_revision = crate::protocol::number(&permit.revision)?;
+            ensure(
+                replace
+                    && permit.selected_at > old.selected_at
+                    && (new_revision > old_revision
+                        || (new_revision == old_revision && permit.selection == old.selection)),
+                "local computer selection identity conflict",
+            )?;
+            *old = permit;
+            return Ok(());
         }
         ensure(entries.len() < 2, "local computer selection capacity")?;
         entries.push(permit);
@@ -326,6 +348,7 @@ impl ComputerRuntime {
                         .find(|task| task.id == entry.task_id)
                         .is_none_or(|task| {
                             !task.state.terminal()
+                                && task.deadline > crate::now()
                                 && !task.cancel_requested
                                 && task.reason.as_deref() != Some("model_reply_ready")
                                 && task.revision.to_string() == entry.revision

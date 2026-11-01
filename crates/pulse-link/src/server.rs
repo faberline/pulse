@@ -659,6 +659,38 @@ impl Hub {
                             dependencies: vec![],
                         }]
                     }
+                    HumanAction::RebindComputer {
+                        task_id,
+                        revision,
+                        selection,
+                    } => {
+                        let prior:Option<String>=sqlx::query_scalar("SELECT payload FROM events WHERE source=? AND source_id=? AND origin='human'").bind(format!("device:{device}")).bind(source_id).fetch_optional(&self.db).await?;
+                        if let Some(prior) = prior {
+                            let payload: serde_json::Value = serde_json::from_str(&prior)?;
+                            ensure(
+                                payload["native_action"] == serde_json::to_value(action)?,
+                                "source identity conflict",
+                            )?;
+                            serde_json::from_value(payload["commands"].clone())?
+                        } else {
+                            let task = self.core.task(task_id).await?;
+                            let next = crate::computer_selection::rebind_revision(
+                                &task, revision, selection, time,
+                            )?;
+                            vec![if next == task.revision {
+                                Command::Query {
+                                    ids: vec![task_id.clone()],
+                                }
+                            } else {
+                                Command::Revise {
+                                    id: task_id.clone(),
+                                    expected_revision: task.revision,
+                                    goal: task.goal.clone(),
+                                    scope: selection.scope(),
+                                }
+                            }]
+                        }
+                    }
                     HumanAction::Cancel { task_id, revision } => vec![Command::Cancel {
                         id: task_id.clone(),
                         expected_revision: number(revision)?,
@@ -707,6 +739,18 @@ impl Hub {
                     "task control rejected",
                 )?;
                 match action {
+                    HumanAction::RebindComputer { task_id, .. } => {
+                        let task = self.core.task(task_id).await?;
+                        self.chat(
+                            source_id,
+                            &format!(
+                                "視窗選擇已保存。\n{}\n原任務、費用與期限會保留。",
+                                crate::conversation::status(&task)
+                            ),
+                            time,
+                        )
+                        .await?;
+                    }
                     HumanAction::DecideOperation { binding, approve } => {
                         let applied = matches!(&outcome,pulse_core::Outcome::Applied{task_ids} if task_ids.contains(&binding.task_id));
                         self.chat(
