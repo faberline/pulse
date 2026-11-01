@@ -34,3 +34,14 @@ with tempfile.TemporaryDirectory(prefix="pulse-computer-check-") as directory:
         assert call(arguments, payload)["error"] == "invalid_request"
     assert list(pathlib.Path(directory).iterdir()) == []
 print("Computer helper: native preflight and rejection checks passed; no capture or permission request.")
+
+if len(sys.argv) > 2:
+    executor = pathlib.Path(sys.argv[2]).resolve(strict=True)
+    result = subprocess.run([str(executor), "--computer-status"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=True)
+    assert len(result.stdout) <= 65_536
+    value = json.loads(result.stdout)
+    assert value["installed"] is True and "error" not in value
+    assert type(value["permissions"]["accessibility"]) is bool
+    assert type(value["permissions"]["screen_capture"]) is bool
+    assert value.get("observation") is None
+    print("Rust native bridge: permission probe passed without pairing, capture or model calls.")

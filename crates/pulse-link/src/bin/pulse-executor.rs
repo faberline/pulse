@@ -14,6 +14,22 @@ async fn main() {
     }
 }
 async fn run() -> Result<()> {
+    if std::env::args().skip(1).eq(["--computer-status"]) {
+        // Fixed sibling only. This command needs no server, credentials, target or cache.
+        let runtime = pulse_link::computer_runtime::ComputerRuntime::bundled(
+            std::path::Path::new("."),
+            None,
+        )?;
+        let value = match runtime {
+            Some(runtime) => match runtime.permissions().await {
+                Ok(permissions) => serde_json::json!({"installed":true,"permissions":permissions}),
+                Err(_) => serde_json::json!({"installed":true,"error":"native_probe_unavailable"}),
+            },
+            None => serde_json::json!({"installed":false,"error":"bundled_helper_missing"}),
+        };
+        println!("{}", serde_json::to_string(&value)?);
+        return Ok(());
+    }
     let (config, pairing) =
         Config::parse_with_pairing(std::env::args().skip(1), ClientRole::LocalExecutor)?;
     let device = Device::open(config, std::sync::Arc::new(NativeVault)).await?;

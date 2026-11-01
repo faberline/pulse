@@ -1,12 +1,14 @@
 //! In-process durable task core. No network listener, model client or tool executor.
 //! Callers are trusted application code; transport authentication belongs to v0.3.
 mod browser_operation;
+mod computer_observation;
 mod model;
 mod read;
 mod scope;
 mod store;
 
 pub use browser_operation::*;
+pub use computer_observation::*;
 pub use model::*;
 pub use read::*;
 pub use scope::*;

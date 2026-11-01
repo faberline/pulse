@@ -12,6 +12,7 @@ use tokio::io::AsyncReadExt;
 pub struct Executor {
     root: PathBuf,
     browser: Option<crate::browser_runtime::BrowserRuntime>,
+    computer: Option<crate::computer_runtime::ComputerRuntime>,
 }
 impl Executor {
     pub fn new(root: &Path) -> Result<Self> {
@@ -24,6 +25,7 @@ impl Executor {
         Ok(Self {
             root,
             browser: None,
+            computer: None,
         })
     }
     pub fn with_browser(mut self, browser: Option<crate::browser_runtime::BrowserRuntime>) -> Self {
@@ -34,6 +36,33 @@ impl Executor {
         self.browser
             .as_ref()
             .map(|b| b.policy.fixture_origin.as_ref().map(ToString::to_string))
+    }
+    pub fn with_computer(
+        mut self,
+        computer: Option<crate::computer_runtime::ComputerRuntime>,
+    ) -> Self {
+        self.computer = computer;
+        self
+    }
+    pub async fn computer_permissions(
+        &self,
+    ) -> Result<Option<crate::computer_runtime::ComputerPermissions>> {
+        match &self.computer {
+            Some(runtime) => runtime.permissions().await.map(Some),
+            None => Ok(None),
+        }
+    }
+    pub async fn observe_computer(
+        &self,
+        binding: &pulse_core::ComputerBinding,
+    ) -> Result<crate::computer_runtime::ComputerEvidence> {
+        self.computer
+            .as_ref()
+            .ok_or_else(|| {
+                crate::Error::Rejected("native computer observation is not installed".into())
+            })?
+            .observe(binding)
+            .await
     }
     pub fn root(&self) -> &Path {
         &self.root

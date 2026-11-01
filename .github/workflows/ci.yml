@@ -34,7 +34,7 @@ jobs:
         run: sh scripts/build-macos-app.sh --debug
       - name: Computer helper process checks (no capture or permission request)
         if: runner.os == 'macOS'
-        run: python3 scripts/check-computer-helper.py target/debug/Pulse.app/Contents/MacOS/pulse-computer
+        run: python3 scripts/check-computer-helper.py target/debug/Pulse.app/Contents/MacOS/pulse-computer target/debug/Pulse.app/Contents/MacOS/pulse-executor
       - name: Build owned computer fixture (no launch)
         if: runner.os == 'macOS'
         run: sh scripts/build-computer-fixture.sh

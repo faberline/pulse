@@ -188,9 +188,15 @@ impl Device {
     }
     async fn open_role(config: Config, vault: Arc<dyn Vault>, role: ClientRole) -> Result<Self> {
         let executor = if role == ClientRole::LocalExecutor {
-            Some(Executor::new(&config.repo)?.with_browser(
-                crate::browser_runtime::BrowserRuntime::from_environment(&config.data_dir)?,
-            ))
+            Some(
+                Executor::new(&config.repo)?
+                    .with_browser(crate::browser_runtime::BrowserRuntime::from_environment(
+                        &config.data_dir,
+                    )?)
+                    .with_computer(crate::computer_runtime::ComputerRuntime::from_environment(
+                        &config.data_dir,
+                    )?),
+            )
         } else {
             None
         };

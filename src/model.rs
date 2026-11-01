@@ -328,7 +328,7 @@ pub struct Health {
     pub unresolved_operations: u64,
 }
 
-mod decimal {
+pub(crate) mod decimal {
     use serde::{Deserialize, Deserializer, Serializer, de::Error};
     pub fn serialize<S: Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&value.to_string())

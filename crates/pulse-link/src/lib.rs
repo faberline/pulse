@@ -6,6 +6,7 @@ mod browser_orchestration;
 pub mod browser_runtime;
 pub mod browser_session;
 pub mod client;
+pub mod computer_runtime;
 mod conversation;
 pub mod executor;
 pub mod journal;
