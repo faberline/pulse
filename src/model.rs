@@ -181,6 +181,60 @@ pub enum Command {
         #[serde(with = "decimal")]
         expected_revision: u64,
     },
+    ApproveOperation {
+        binding: OperationBinding,
+    },
+    RejectOperation {
+        binding: OperationBinding,
+    },
+}
+
+/// Untrusted proposal data, bound to a persisted Tool event before it can wait for approval.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct OperationProposal {
+    pub id: String,
+    pub token: Token,
+    pub target: String,
+    pub intent: Value,
+    pub expires_at: i64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalState {
+    Pending,
+    Approved,
+    Rejected,
+    Withdrawn,
+    Expired,
+    Invalidated,
+    Dispatched,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct OperationRequest {
+    pub proposal: OperationProposal,
+    pub source_event: String,
+    pub intent_digest: String,
+    pub state: ApprovalState,
+    pub approval_event: Option<String>,
+    pub approved_by: Option<String>,
+    pub decision_event: Option<String>,
+    pub reason: Option<String>,
+    pub operation_id: Option<String>,
+}
+
+/// Exact binding displayed to the human. No field can choose its author or renew a grant.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OperationBinding {
+    pub task_id: String,
+    #[serde(with = "decimal")]
+    pub expected_revision: u64,
+    pub request_id: String,
+    pub intent_digest: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

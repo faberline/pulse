@@ -15,6 +15,8 @@ const DAY_LIMIT: i64 = 1_000_000;
 const TASK_BUDGET: i64 = 250_000;
 const DEADLINE_MS: i64 = 15 * 60 * 1_000;
 
+mod approvals;
+
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
@@ -47,7 +49,7 @@ impl Store {
             .fetch_one(&pool)
             .await?;
         require(
-            schema <= 3,
+            schema <= 4,
             "database schema is newer than this application",
         )?;
         sqlx::migrate!().run(&pool).await?;
@@ -187,6 +189,7 @@ impl Store {
                     .into(),
                 );
                 task.active_run = None;
+                approvals::invalidate(db, id, "local_result_changed_run").await?;
             }
         }
         put(db, "tasks", id, &task).await
@@ -327,8 +330,8 @@ impl Store {
     ) -> Result<(Option<Run>, bool)> {
         require(versions.valid(), "invalid version manifest")?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut changed = approvals::expire(&mut tx, now).await?;
         let mut tasks = tasks(&mut tx).await?;
-        let mut changed = false;
         for task in &mut tasks {
             if !task.state.terminal() && task.deadline <= now {
                 let state = if unresolved(&mut tx, &task.id).await? {
@@ -398,6 +401,7 @@ impl Store {
                     checkpoint: Value::Null,
                 }
             };
+            approvals::invalidate(&mut tx, &task.id, "run_reclaimed").await?;
             run.token.epoch = epoch(&mut tx).await?;
             task.state = State::Planning;
             task.reason = None;
@@ -485,6 +489,7 @@ impl Store {
                 continue;
             }
             if let Some(run_id) = &task.active_run {
+                let invalidated = approvals::invalidate(&mut tx, &task.id, "run_restarted").await?;
                 let mut run: Run = load(&mut tx, "runs", run_id).await?;
                 run.token.epoch = epoch(&mut tx).await?;
                 put(&mut tx, "runs", run_id, &run).await?;
@@ -497,6 +502,9 @@ impl Store {
                 } else if task.deadline <= now {
                     task.state = State::Blocked;
                     task.reason = Some("deadline_exhausted".into());
+                } else if invalidated {
+                    task.state = State::Blocked;
+                    task.reason = Some("approval_restart_review_required".into());
                 } else if task.state.active() {
                     task.state = State::Queued;
                 }
@@ -533,6 +541,7 @@ impl Store {
         };
         task.reason = Some(evidence.into());
         task.evidence.push(evidence.into());
+        approvals::invalidate(&mut tx, &task.id, "task_finished").await?;
         put(&mut tx, "tasks", &task.id, &task).await?;
         notify(
             &mut tx,
@@ -664,6 +673,9 @@ impl Store {
         )?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let (mut task, _) = current(&mut tx, token, now).await?;
+        let gated: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operation_requests WHERE json_extract(data,'$.proposal.token.run_id')=? AND json_extract(data,'$.proposal.token.revision')=? AND json_extract(data,'$.proposal.token.epoch')=?")
+            .bind(&token.run_id).bind(token.revision.to_string()).bind(token.epoch.to_string()).fetch_one(&mut *tx).await?;
+        require(gated == 0, "approved requests require gated dispatch")?;
         require(
             task.state == State::Ready && !unresolved(&mut tx, &task.id).await?,
             "operation not ready",
@@ -950,6 +962,7 @@ async fn apply(
                     supersedes: task.decisions.last().map(|d| d.event_id.clone()),
                 });
                 task.active_run = None;
+                approvals::invalidate(db, &id, "task_revised").await?;
                 task.state = if unresolved(db, &id).await? {
                     State::OutcomeUnknown
                 } else if task.requires_device {
@@ -971,6 +984,7 @@ async fn apply(
                 )?;
                 task.revision += 1;
                 task.cancel_requested = true;
+                approvals::invalidate(db, &id, "task_cancelled").await?;
                 task.state = if unresolved(db, &id).await? {
                     State::OutcomeUnknown
                 } else {
@@ -989,6 +1003,14 @@ async fn apply(
             } => {
                 reconcile_read(db, &id, expected_revision, event_id, now).await?;
                 id
+            }
+            Command::ApproveOperation { binding } => {
+                approvals::decide(db, event_id, &binding, true, now).await?;
+                binding.task_id
+            }
+            Command::RejectOperation { binding } => {
+                approvals::decide(db, event_id, &binding, false, now).await?;
+                binding.task_id
             }
             Command::Resume {
                 id,
