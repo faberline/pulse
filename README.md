@@ -59,6 +59,8 @@ v0.3 工作：[#9](https://github.com/faberline/pulse/issues/9)–[#12](https://
 
 ## 交付順序
 
+2026-11-01 已啟動日常桌面助理目標，包含瀏覽器與電腦操作。能力差距、實作順序與完成條件見 [日常助理驗收](docs/dot-parity.md)。目前只讀候選不代表這些新增能力已完成。
+
 | 階段 | 交付 |
 |---|---|
 | [v0.1](https://github.com/faberline/pulse/milestone/1) | 需求、架構、行為契約與驗收計畫 |

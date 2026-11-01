@@ -56,6 +56,108 @@ async fn reply(hub: &Hub, source: &str) -> String {
 }
 
 #[tokio::test]
+async fn everyday_progress_questions_are_read_only_and_do_not_start_model_work() {
+    let (_dir, hub, cred, epoch) = setup().await;
+    say(
+        &hub,
+        &cred,
+        epoch,
+        "create",
+        "任務 A：讀 README.md\n任務 B：讀 Cargo.toml",
+    )
+    .await;
+    let before = serde_json::to_value(hub.core.list_tasks(100).await.unwrap()).unwrap();
+    for (index, text) in [
+        "現在進度如何？",
+        "麻煩你看看 A 的進度",
+        "請先幫我看一下 A 進度如何？",
+        "A 現在怎麼樣？",
+        "B 完成了嗎？",
+        "A 和 B 的進度呢？",
+        "目前做到哪了？",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let source = format!("question-{index}");
+        say(&hub, &cred, epoch, &source, text).await;
+        assert!(reply(&hub, &source).await.contains("等待處理"), "{text}");
+        assert_eq!(
+            serde_json::to_value(hub.core.list_tasks(100).await.unwrap()).unwrap(),
+            before
+        );
+    }
+    say(&hub, &cred, epoch, "unknown-query", "C 完成了嗎？").await;
+    assert!(reply(&hub, "unknown-query").await.contains("請指明"));
+    assert_eq!(
+        serde_json::to_value(hub.core.list_tasks(100).await.unwrap()).unwrap(),
+        before
+    );
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM budget")
+        .fetch_one(&hub.core.application_pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn polite_controls_keep_explicit_targets_and_atomic_batch_validation() {
+    let (_dir, hub, cred, epoch) = setup().await;
+    say(
+        &hub,
+        &cred,
+        epoch,
+        "create",
+        "任務 A：讀 README.md\n任務 B：讀 Cargo.toml",
+    )
+    .await;
+    let tasks = hub.core.list_tasks(100).await.unwrap();
+    let a = tasks
+        .iter()
+        .find(|t| t.goal.starts_with("任務 A："))
+        .unwrap();
+    let b = tasks
+        .iter()
+        .find(|t| t.goal.starts_with("任務 B："))
+        .unwrap();
+    say(&hub, &cred, epoch, "ambiguous", "麻煩你先幫我取消它").await;
+    assert!(reply(&hub, "ambiguous").await.contains("請指明"));
+    say(
+        &hub,
+        &cred,
+        epoch,
+        "conflicting",
+        "請幫我修改 A：新需求\n麻煩取消 A",
+    )
+    .await;
+    assert!(reply(&hub, "conflicting").await.contains("請指明"));
+    assert_eq!(hub.core.task(&a.id).await.unwrap().revision, 1);
+    assert_eq!(hub.core.task(&b.id).await.unwrap().revision, 1);
+    say(
+        &hub,
+        &cred,
+        epoch,
+        "controls",
+        "請幫我修改 A：只讀 Cargo.toml\n麻煩你取消 B",
+    )
+    .await;
+    let revised = hub.core.task(&a.id).await.unwrap();
+    assert_eq!(revised.revision, 2);
+    assert_eq!(revised.goal, "任務 A：只讀 Cargo.toml");
+    assert_eq!(hub.core.task(&b.id).await.unwrap().state, State::Cancelled);
+    assert_eq!(hub.core.list_tasks(100).await.unwrap().len(), 2);
+    say(
+        &hub,
+        &cred,
+        epoch,
+        "controls",
+        "請幫我修改 A：只讀 Cargo.toml\n麻煩你取消 B",
+    )
+    .await;
+    assert_eq!(hub.core.task(&a.id).await.unwrap().revision, 2);
+}
+
+#[tokio::test]
 async fn single_chat_routes_multiple_tasks_and_never_creates_from_query_or_ambiguity() {
     let (_dir, hub, cred, epoch) = setup().await;
     say(

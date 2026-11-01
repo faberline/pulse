@@ -104,27 +104,65 @@ fn create(id: String, goal: String) -> Command {
         dependencies: vec![],
     }
 }
+fn request_text(text: &str) -> &str {
+    let mut text = text.trim().trim_end_matches(['。', '？', '?']).trim();
+    while let Some(rest) = ["請", "先", "幫我", "麻煩你", "麻煩"]
+        .iter()
+        .find_map(|prefix| text.strip_prefix(prefix))
+    {
+        text = rest.trim();
+    }
+    text
+}
 fn line(id: &str, text: &str, tasks: &[Task]) -> Vec<Command> {
+    let text = request_text(text);
     if let Some((label, goal)) = name(text) {
         if tasks.iter().any(|task| self::label(task) == label) {
             return clarify();
         }
         return vec![create(id.into(), format!("任務 {label}：{goal}"))];
     }
-    let text = text.trim_end_matches(['。', '？', '?']).trim();
-    let text = text.strip_prefix("請").unwrap_or(text).trim();
-    let text = text.strip_prefix("先").unwrap_or(text).trim();
     if matches!(
         text,
-        "查詢" | "狀態" | "進度" | "目前進度" | "目前狀態" | "查詢狀態" | "status"
+        "查詢"
+            | "狀態"
+            | "進度"
+            | "目前進度"
+            | "目前狀態"
+            | "查詢狀態"
+            | "status"
+            | "進度如何"
+            | "進度怎樣"
+            | "狀態如何"
+            | "現在進度如何"
+            | "目前進度如何"
+            | "目前做到哪了"
     ) {
         return vec![Command::Query {
             ids: tasks.iter().map(|t| t.id.clone()).collect(),
         }];
     }
-    if let Some(target) = text
-        .strip_suffix("進度")
-        .or_else(|| text.strip_suffix("狀態"))
+    let query = text
+        .strip_prefix("看一下")
+        .or_else(|| text.strip_prefix("看看"))
+        .unwrap_or(text)
+        .trim();
+    if let Some(target) = [
+        "現在進度如何",
+        "現在怎麼樣",
+        "進度如何",
+        "進度怎樣",
+        "進度呢",
+        "狀態如何",
+        "狀態呢",
+        "怎麼樣了",
+        "完成了嗎",
+        "做完了嗎",
+        "進度",
+        "狀態",
+    ]
+    .iter()
+    .find_map(|suffix| query.strip_suffix(suffix))
     {
         let target = target.trim().trim_end_matches('的').trim();
         return selected(target, tasks)
@@ -226,6 +264,7 @@ pub(crate) fn plan(id: &str, text: &str, tasks: &[Task]) -> Vec<Command> {
         .collect();
     // Multi-action input needs explicit lines. Ordinary multiline prose stays one goal.
     let explicit = |s: &str| {
+        let s = request_text(s);
         name(s).is_some()
             || [
                 "取消 ", "停止 ", "繼續 ", "修改 ", "補充 ", "查詢 ", "核對 ",
@@ -253,7 +292,7 @@ pub(crate) fn plan(id: &str, text: &str, tasks: &[Task]) -> Vec<Command> {
                 crate::protocol::hash_bytes(format!("{id}:{index}").as_bytes())
             )
         };
-        if let Some((label, _)) = name(piece)
+        if let Some((label, _)) = name(request_text(piece))
             && !aliases.insert(label)
         {
             return clarify();
