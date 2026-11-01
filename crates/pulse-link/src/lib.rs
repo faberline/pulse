@@ -1,3 +1,4 @@
+pub mod browser;
 pub mod client;
 mod conversation;
 pub mod executor;

@@ -1128,6 +1128,7 @@ name = "pulse-link"
 version = "0.3.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "chrono",
  "fs2",
  "futures-util",

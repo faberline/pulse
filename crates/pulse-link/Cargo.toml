@@ -7,13 +7,14 @@ rust-version = "1.96"
 [dependencies]
 pulse-core = { path = "../.." }
 axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 fs2 = "0.4"
 futures-util = { version = "0.3", features = ["sink"] }
 getrandom = "0.4"
 libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_jcs = "0.2"
