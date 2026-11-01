@@ -44,6 +44,41 @@ impl Executor {
         self.computer = computer;
         self
     }
+    pub(crate) fn computer_runtime(&self) -> Option<crate::computer_runtime::ComputerRuntime> {
+        self.computer.clone()
+    }
+    pub(crate) async fn computer_capabilities(&self) -> Vec<pulse_core::ComputerPermit> {
+        let Some(runtime) = &self.computer else {
+            return vec![];
+        };
+        let entries = runtime.selections();
+        if entries.is_empty() {
+            return entries;
+        }
+        let mut live = Vec::new();
+        for entry in entries {
+            if runtime.probe_selected(&entry.selection).await.is_ok()
+                && runtime.permitted(&entry.task_id, &entry.revision, &entry.selection)
+            {
+                live.push(entry);
+            }
+        }
+        live
+    }
+    pub(crate) fn computer_permitted(
+        &self,
+        operation: &ReadOp,
+        task: &str,
+        revision: &str,
+    ) -> bool {
+        match operation {
+            ReadOp::ComputerInspect { selection } => self
+                .computer
+                .as_ref()
+                .is_some_and(|runtime| runtime.permitted(task, revision, selection)),
+            _ => true,
+        }
+    }
     pub async fn computer_permissions(
         &self,
     ) -> Result<Option<crate::computer_runtime::ComputerPermissions>> {
@@ -71,6 +106,10 @@ impl Executor {
         self.browser.as_ref().is_some_and(|b| b.interactions)
     }
     pub async fn maintain_browser(&self, epoch: Option<u64>, tasks: &[pulse_core::Task]) {
+        if let Some(runtime) = &self.computer {
+            runtime.set_live(epoch.is_some());
+            runtime.maintain(tasks);
+        }
         if let Some(browser) = &self.browser {
             browser.maintain(epoch, tasks).await;
         }

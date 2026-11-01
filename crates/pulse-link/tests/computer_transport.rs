@@ -84,7 +84,28 @@ async fn dispatch(hub: &Hub, device: &str) -> (Credential, u64, Envelope<ServerP
         .await
         .unwrap();
     assert_eq!(reserved, 0);
-    assert_eq!(task.reason.as_deref(), Some("computer_selection_wait"));
+    assert_eq!(task.reason.as_deref(), Some("computer_capability_wait"));
+    // Controlled local capability report. Native probes are covered separately.
+    let local_epoch: i64 = sqlx::query_scalar("SELECT epoch FROM link_device WHERE id=?")
+        .bind(device)
+        .fetch_one(&hub.core.application_pool())
+        .await
+        .unwrap();
+    let selected_at = pulse_link::now();
+    hub.computer_ready(
+        device,
+        local_epoch as u64,
+        vec![pulse_core::ComputerPermit {
+            task_id: "window".into(),
+            revision: "1".into(),
+            selection: selection(),
+            selected_at,
+            expires_at: selected_at + 900_000,
+        }],
+        selected_at,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         send(
             hub,

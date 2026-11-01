@@ -15,13 +15,18 @@ if mode=='oversize': print('x'*65537);sys.exit(0)
 if mode=='stderr': sys.stderr.write('x'*4097);sys.exit(0)
 if mode=='exit': sys.exit(74)
 if mode=='invalid': print('not-json');sys.exit(0)
-response={'version':'pulse-computer-observe-2','permissions':{'accessibility':True,'screen_capture':True}}
+response={'version':'pulse-computer-observe-3','permissions':{'accessibility':True,'screen_capture':True}}
 if mode=='version':response['version']='unknown-helper'
 if mode=='extra':response['grant']='forged'
 if sys.argv[1:]!=['--status']:
  request=json.load(sys.stdin)
  if mode=='selected':assert request.get('expected_process_launched_at')=='1'
  args=dict(zip(sys.argv[1::2],sys.argv[2::2]))
+ if request['kind']=='probe':
+  response['selection']={'target':{'bundle_id':args['--bundle-id'],'pid':int(args['--pid']),'window_id':int(args['--window-id'])},'process_launched_at':int(request['expected_process_launched_at'])}
+  if mode=='probe-other':response['selection']['target']['window_id']+=1
+  if mode=='permission':response['permissions']['accessibility']=False
+  print(json.dumps(response));script.with_suffix('.done').write_text('probe constructed');sys.exit(0)
  cache=pathlib.Path(args['--cache'])
  png=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=')
  digest=hashlib.sha256(png).hexdigest()
@@ -52,7 +57,7 @@ print(json.dumps(response))
 script.with_suffix('.done').write_text('response constructed')
 "#;
 
-fn fixture(mode: &str) -> (tempfile::TempDir, ComputerRuntime) {
+pub(crate) fn fixture(mode: &str) -> (tempfile::TempDir, ComputerRuntime) {
     let dir = tempfile::tempdir().unwrap();
     let helper = dir.path().join(format!("{mode}.py"));
     std::fs::write(&helper, FIXTURE).unwrap();
@@ -63,6 +68,7 @@ fn fixture(mode: &str) -> (tempfile::TempDir, ComputerRuntime) {
         window_id: 7,
     };
     let runtime = ComputerRuntime::new(helper, dir.path().join("private"), Some(target)).unwrap();
+    runtime.set_live(true); // Controlled fixture; not native pairing/lease acceptance.
     (dir, runtime)
 }
 fn binding() -> ComputerBinding {
@@ -74,7 +80,7 @@ fn binding() -> ComputerBinding {
         epoch: 2,
     }
 }
-async fn assert_reaped(runtime: &ComputerRuntime) {
+pub(crate) async fn assert_reaped(runtime: &ComputerRuntime) {
     let pid = std::fs::read_to_string(runtime.helper.with_extension("pid"))
         .unwrap()
         .parse::<i32>()
@@ -87,6 +93,44 @@ async fn assert_reaped(runtime: &ComputerRuntime) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("owned native fixture process was not reaped");
+}
+
+#[tokio::test]
+async fn local_selection_ends_on_reply_cancellation_or_revision_without_changing_task_truth() {
+    let (root, runtime) = fixture("good");
+    let store = pulse_core::Store::open(root.path().join("tasks.db"), "owner")
+        .await
+        .unwrap();
+    let selection = pulse_core::ComputerSelection {
+        target: runtime.configured_target().unwrap().clone(),
+        process_launched_at: 1,
+    };
+    let event=store.ingest(pulse_core::Origin::Human,"fixture","selection",serde_json::json!({"commands":[{"kind":"create","id":"task","goal":"Read the owned window","scope":selection.scope().unwrap(),"priority":0,"requires_device":false}]}),crate::now()).await.unwrap();
+    store.route(&event.event_id).await.unwrap();
+    let task = store.task("task").await.unwrap();
+    let selected_at = crate::now();
+    let permit = pulse_core::ComputerPermit {
+        task_id: "task".into(),
+        revision: "1".into(),
+        selection: selection.clone(),
+        selected_at,
+        expires_at: selected_at + 900_000,
+    };
+    for change in ["reply", "cancel", "revision"] {
+        runtime.permit_local(permit.clone()).unwrap();
+        runtime.maintain(std::slice::from_ref(&task));
+        assert!(runtime.permitted("task", "1", &selection));
+        let mut changed = task.clone();
+        match change {
+            "reply" => changed.reason = Some("model_reply_ready".into()),
+            "cancel" => changed.cancel_requested = true,
+            _ => changed.revision += 1,
+        }
+        runtime.maintain(&[changed]);
+        assert!(!runtime.permitted("task", "1", &selection));
+    }
+    assert_eq!(store.task("task").await.unwrap().revision, 1);
+    assert!(!runtime.helper.with_extension("stage").exists());
 }
 
 #[tokio::test]
@@ -119,6 +163,16 @@ async fn bound_computer_dispatch_checks_selection_before_capture_and_returns_ori
     let executor = crate::executor::Executor::new(dir.path())
         .unwrap()
         .with_computer(Some(runtime.clone()));
+    let selected_at = crate::now();
+    runtime
+        .permit_local(pulse_core::ComputerPermit {
+            task_id: binding.task_id.clone(),
+            revision: binding.revision.to_string(),
+            selection: selection.clone(),
+            selected_at,
+            expires_at: selected_at + 900_000,
+        })
+        .unwrap();
     let work = crate::browser_session::WorkBinding {
         operation_id: binding.operation_id.clone(),
         task_id: binding.task_id.clone(),

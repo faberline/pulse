@@ -51,5 +51,5 @@
 - [#24](https://github.com/faberline/pulse/issues/24)：修正第 1001 次查詢被拒絕的通知交接缺口，見 [交接證據](notification-handoff.md)。107 個正常 Rust 測試通過；新增工作前先恢復 pending 人類事件，通知背壓不重複呼叫模型。執行版本為 `pulse-remote-7`。
 - [#26](https://github.com/faberline/pulse/issues/26)：真實 browser 讀取接進單一對話、依網址限縮的模型工具、獨立 local process 與持久 receipt。兩家原生 UI 各 2 次模型呼叫／1 次 Chrome 讀取，隨機頁面標記一致。私網跳轉／子資源、頁面腳本、下載與中途取消另做原生檢查，見 [瀏覽器對話候選](browser-chat.md)。D03 尚未接受，D04 電腦操作仍待實作。
 - [#28](https://github.com/faberline/pulse/issues/28)：接入原圖、Swift 批准卡片、一次性瀏覽器點擊與輸入。真實 Chrome 元件測試已涵蓋雙任務、偽造授權、拒絕、畫面變更與操作後程序中止。桌面與兩家模型的完整操作驗證仍待完成，見 [操作候選與剩餘驗收](browser-interaction.md)。本項尚未接受，完整 D01–D10 目標仍在進行。
-- 電腦觀察已接上 Rust 地端程序、精確程式範圍、持久派工與原圖傳送。Swift 能辨認程式視窗來源。對話框選擇程式、模型工具與真實擷取仍待完成，見 [電腦觀察候選](computer-observation.md)。這些元件測試不代表 D04 通過。
+- 電腦觀察已接上 Rust 地端程序、本機人類選擇通道、同一對話框的視窗選擇、限縮的模型工具、持久派工與原圖傳送。真實選擇／擷取與操作仍待實機驗收，同一任務在 local 重啟後的重新選擇也未完成，見 [電腦觀察候選](computer-observation.md)。元件測試不代表 D04／D08 通過。
 - 原 v0.1–v0.4 issue／PR 仍保留原狀。milestone 名稱已改為純版本號，原 description 與需求完整保留。v0.1 尚有三項開啟的工作，發布判定仍為 HOLD，沒有 RC 或發布接受。

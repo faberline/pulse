@@ -56,6 +56,26 @@ async fn reply(hub: &Hub, source: &str) -> String {
 }
 
 #[tokio::test]
+async fn unselected_computer_requests_ask_for_a_window_instead_of_reading_the_repo() {
+    let (_dir, hub, credential, epoch) = setup().await;
+    for (index, text) in ["請讀取視窗並摘要", "幫我讀這個視窗", "觀察程式", "操作電腦"]
+        .iter()
+        .enumerate()
+    {
+        let source = format!("window-{index}");
+        say(&hub, &credential, epoch, &source, text).await;
+        assert!(reply(&hub, &source).await.contains("程式視窗"));
+    }
+    assert!(hub.core.list_tasks(100).await.unwrap().is_empty());
+    assert!(!remote::step(&hub, pulse_link::now()).await.unwrap());
+    let budget: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM budget")
+        .fetch_one(&hub.core.application_pool())
+        .await
+        .unwrap();
+    assert_eq!(budget, 0);
+}
+
+#[tokio::test]
 async fn everyday_progress_questions_are_read_only_and_do_not_start_model_work() {
     let (_dir, hub, cred, epoch) = setup().await;
     say(

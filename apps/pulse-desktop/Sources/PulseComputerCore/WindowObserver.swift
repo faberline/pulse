@@ -9,10 +9,22 @@ public enum WindowObserver {
     _ = try ComputerTarget(bundleID: target.bundle_id, pid: target.pid, windowID: target.window_id)
     guard let app = NSRunningApplication(processIdentifier: target.pid),
       app.bundleIdentifier == target.bundle_id, !app.isTerminated, let start = app.launchDate,
-      launched == nil || start == launched,
-      NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid
+      launched == nil || start == launched
     else { throw ComputerError.targetUnavailable }
     return app
+  }
+  /// Exact selected background windows are readable. This never activates an app or captures pixels.
+  public static func probe(target: ComputerTarget, expectedProcessLaunchedAt: Int64) async throws -> ComputerSelection {
+    guard computerPermissions().canObserve else { throw ComputerError.permissionsRequired }
+    let app = try running(target)
+    guard let start = app.launchDate, expectedProcessLaunchedAt == Int64(start.timeIntervalSince1970 * 1000)
+    else { throw ComputerError.targetChanged }
+    let selected = try await window(target)
+    guard let title = selected.title else { throw ComputerError.targetUnavailable }
+    _ = try AXCatalog(pid: target.pid, deadline: ContinuousClock.now.advanced(by: .seconds(8)))
+      .window(title: title, frame: ComputerRect(selected.frame))
+    _ = try running(target, launched: start)
+    return ComputerSelection(target: target, process_launched_at: expectedProcessLaunchedAt)
   }
   private static func window(_ target: ComputerTarget) async throws -> SCWindow {
     let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)

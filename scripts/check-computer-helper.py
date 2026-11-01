@@ -16,10 +16,11 @@ def call(arguments, payload=None):
     )
     assert len(result.stdout) <= 65_536
     value = json.loads(result.stdout)
-    assert value["version"] == "pulse-computer-observe-2"
+    assert value["version"] == "pulse-computer-observe-3"
     assert type(value["permissions"]["accessibility"]) is bool
     assert type(value["permissions"]["screen_capture"]) is bool
     assert value.get("observation") is None
+    assert value.get("selection") is None
     return value
 
 
@@ -29,6 +30,8 @@ with tempfile.TemporaryDirectory(prefix="pulse-computer-check-") as directory:
     arguments = ["--bundle-id", "com.faberline.PulseComputerFixture", "--pid", "2147483647", "--window-id", "1", "--cache", directory]
     binding = {"operation_id": "probe-no-target", "task_id": "owned-fixture", "revision": "1", "device": str(uuid.uuid4()), "epoch": "1"}
     denied = call(arguments, json.dumps({"kind": "observe", "binding": binding}).encode())
+    assert denied["error"] in ["permissions_required", "target_unavailable"]
+    denied = call(arguments, json.dumps({"kind": "probe", "expected_process_launched_at": "1"}).encode())
     assert denied["error"] in ["permissions_required", "target_unavailable"]
     for payload in [b'{"kind":"click"}', b'{"kind":"type","text":"send"}', b'{"kind":"script"}', b" " * 16_385]:
         assert call(arguments, payload)["error"] == "invalid_request"

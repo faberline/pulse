@@ -62,6 +62,33 @@ impl ComputerSelection {
     }
 }
 
+/// Local Human selection cache. It has no authority over task state or effects.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerPermit {
+    pub task_id: String,
+    pub revision: String,
+    pub selection: ComputerSelection,
+    pub selected_at: i64,
+    pub expires_at: i64,
+}
+impl ComputerPermit {
+    pub fn valid(&self, now: i64) -> bool {
+        !self.task_id.is_empty()
+            && self.task_id.len() <= 128
+            && !self.task_id.chars().any(char::is_control)
+            && self
+                .revision
+                .parse::<u64>()
+                .is_ok_and(|n| n > 0 && n <= i64::MAX as u64 && n.to_string() == self.revision)
+            && self.selection.valid()
+            && self.selected_at > 0
+            && self.selected_at <= now.saturating_add(1000)
+            && self.selected_at.checked_add(900_000) == Some(self.expires_at)
+            && self.expires_at > now
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ComputerBinding {

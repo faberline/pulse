@@ -95,6 +95,14 @@ struct ChatView: View {
             }.padding(.horizontal)
           }
           VStack(spacing: 8) {
+            if let selected = model.selectedComputer {
+              HStack {
+                Image(systemName: "macwindow")
+                VStack(alignment: .leading) { Text(selected.appName); Text(selected.title).font(.caption).lineLimit(1) }
+                Spacer()
+                Button("移除視窗") { model.selectedComputer = nil }.disabled(model.pending != nil)
+              }
+            }
             Composer(text: $model.draft, submit: model.submit)
               .frame(height: 104).clipShape(RoundedRectangle(cornerRadius: 8))
               .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.25)))
@@ -104,6 +112,9 @@ struct ChatView: View {
               } label: {
                 Label("圖片", systemImage: "photo")
               }
+              Button { model.showComputerPicker = true } label: { Label("程式視窗", systemImage: "macwindow") }
+                .disabled(model.pending != nil)
+                .sheet(isPresented: $model.showComputerPicker) { ComputerWindowPicker { model.selectedComputer = $0 } }
               Spacer()
               Text("⌘ Enter 傳送").font(.caption).foregroundStyle(.secondary)
               Button("傳送", action: model.submit).buttonStyle(.borderedProminent).disabled(

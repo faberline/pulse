@@ -303,6 +303,9 @@ pub struct ChatMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientWire {
+    ComputerReady {
+        permits: Vec<pulse_core::ComputerPermit>,
+    },
     BrowserInteractionReady {
         fixture_origin: Option<String>,
     },
@@ -367,6 +370,13 @@ pub struct Credential {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeCommand {
+    SubmitComputer {
+        source_id: String,
+        id: String,
+        goal: String,
+        selection: pulse_core::ComputerSelection,
+        selected_at: i64,
+    },
     LoadArtifact {
         operation_id: String,
         digest: String,
@@ -385,6 +395,10 @@ pub enum NativeCommand {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NativeState {
+    #[serde(default)]
+    pub computer_selecting: Option<String>,
+    #[serde(default)]
+    pub computer_failure: Option<String>,
     #[serde(default)]
     pub artifact_loading: Option<String>,
     #[serde(default)]

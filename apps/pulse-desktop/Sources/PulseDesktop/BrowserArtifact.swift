@@ -44,9 +44,10 @@ struct ComputerArtifactSource: Decodable, Equatable, Sendable {
   struct Binding: Decodable, Equatable, Sendable {
     let operation_id: String; let task_id: String; let revision: String; let device: String; let epoch: String
   }
-  struct Selection: Decodable, Equatable, Sendable {
-    struct Target: Decodable, Equatable, Sendable { let bundle_id: String; let pid: Int32; let window_id: UInt32 }
+  struct Selection: Codable, Equatable, Sendable {
+    struct Target: Codable, Equatable, Sendable { let bundle_id: String; let pid: Int32; let window_id: UInt32 }
     let target: Target; let process_launched_at: Int64
+    var wireValue: [String: Any] { ["target":["bundle_id":target.bundle_id,"pid":target.pid,"window_id":target.window_id],"process_launched_at":process_launched_at] }
   }
   let binding: Binding; let selection: Selection
 }

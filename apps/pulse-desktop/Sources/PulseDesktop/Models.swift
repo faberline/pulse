@@ -36,6 +36,7 @@ struct PulseTask: Decodable, Identifiable, Sendable {
   var terminal: Bool { ["succeeded", "failed", "cancelled"].contains(state) }
   var status: String {
     if reason == "browser_capability_wait" { return "等待本機瀏覽器；請核對安裝與網址範圍" }
+    if reason == "computer_capability_wait" || reason == "computer_selection_wait" { return "等待選定視窗或電腦存取權限" }
     return [
       "queued": "排隊中", "planning": "規劃中", "dispatched": "已派工", "running": "執行中",
       "waiting_approval": "等待操作批准", "ready": "已批准，等待執行",
@@ -46,7 +47,7 @@ struct PulseTask: Decodable, Identifiable, Sendable {
 }
 struct NativeState: Decodable, Sendable {
   enum CodingKeys: String, CodingKey {
-    case server, connected, stopped, paired, message, pending, tasks, messages, artifacts, artifact_loading, artifact_failure
+    case server, connected, stopped, paired, message, pending, tasks, messages, artifacts, artifact_loading, artifact_failure, computer_selecting, computer_failure
     case localConnected = "local_connected"
     case syncedAt = "synced_at"
   }
@@ -63,6 +64,8 @@ struct NativeState: Decodable, Sendable {
   var artifacts: [LocalBrowserArtifact]?
   var artifact_loading: String?
   var artifact_failure: String?
+  var computer_selecting: String?
+  var computer_failure: String?
 }
 struct ConnectionSettings: Codable, Equatable {
   var server = ""
@@ -122,7 +125,14 @@ struct PendingSubmit {
   let taskID: String
   let text: String
   let binding: [String]
+  var computer: ComputerArtifactSource.Selection? = nil
+  var selectedAt: Int64? = nil
   var command: [String: Any] {
+    if let computer, let selectedAt {
+      return ["kind":"submit_computer", "source_id":sourceID,"id":taskID,"goal":text,
+        "selection":computer.wireValue,"selected_at":selectedAt]
+    }
+    return
     [
       "kind": "action", "source_id": sourceID,
       "action": ["kind": "submit", "id": taskID, "goal": text],

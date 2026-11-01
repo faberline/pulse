@@ -11,6 +11,8 @@ final class ChatModel: ObservableObject {
   @Published var pairCode = ""
   @Published var showSettings = false
   @Published var showProgress = false
+  @Published var showComputerPicker = false
+  @Published var selectedComputer: ComputerWindowChoice?
   @Published var image: NSImage?
   @Published var imageName = ""
   @Published var browserImages: [String: NSImage] = [:]
@@ -58,6 +60,7 @@ final class ChatModel: ObservableObject {
       pending = nil
       state = NativeState()
       selectedTask = nil
+      selectedComputer = nil
       browserImages = [:]; browserImageDigests = [:]; loadingBrowserImages = []; requestedBrowserImages = []; failedBrowserImages = []; imageRequestInFlight = nil
     }
     activeBinding = settings.binding
@@ -79,7 +82,8 @@ final class ChatModel: ObservableObject {
   func submit() {
     guard canSend, let binding = activeBinding else { return }
     let value = PendingSubmit(
-      sourceID: UUID().uuidString, taskID: UUID().uuidString, text: draft, binding: binding)
+      sourceID: UUID().uuidString, taskID: UUID().uuidString, text: draft, binding: binding,
+      computer: selectedComputer?.selection, selectedAt: selectedComputer == nil ? nil : Int64(Date().timeIntervalSince1970 * 1000))
     if send(value.command) {
       pending = value
       retriedGeneration = generation
@@ -118,8 +122,12 @@ final class ChatModel: ObservableObject {
       loadBrowserArtifact(message)
     }
     if let pending {
-      if let remaining = pending.confirmedDraft(draft, by: value) {
+      if value.computer_failure == pending.sourceID {
+        self.pending = nil
+        notice = value.message
+      } else if let remaining = pending.confirmedDraft(draft, by: value) {
         draft = remaining
+        if selectedComputer?.selection == pending.computer { selectedComputer = nil }
         self.pending = nil
       } else if pending.binding == activeBinding {
         // A restart retries the original IDs, never a second task.
@@ -127,7 +135,9 @@ final class ChatModel: ObservableObject {
         retryPendingIfNeeded()
       }
     }
-    if value.connected { notice = "" } else if !value.paired { notice = "請到設定完成對話框配對。" }
+    if value.computer_selecting != nil { notice = "正在核對選定的程式視窗…" }
+    else if value.connected && value.computer_failure == nil { notice = "" }
+    else if !value.paired { notice = "請到設定完成對話框配對。" }
   }
   private var retriedGeneration: UUID?
   private func retryPendingIfNeeded() {

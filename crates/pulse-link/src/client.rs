@@ -219,6 +219,16 @@ impl Device {
         mut commands: mpsc::Receiver<NativeCommand>,
         states: watch::Sender<NativeState>,
     ) -> Result<()> {
+        let computer_control = if let Some(runtime) =
+            self.executor.as_ref().and_then(Executor::computer_runtime)
+        {
+            Some(
+                crate::computer_control::PickerWorker::start(self.config.server.as_str(), runtime)
+                    .await?,
+            )
+        } else {
+            None
+        };
         let vault = self.vault.clone();
         let account = self.account.clone();
         let mut credential = tokio::task::spawn_blocking(move || vault.load(&account))
@@ -241,10 +251,7 @@ impl Device {
                 c,
                 lease_tx.clone(),
                 link_tx.clone(),
-                self.executor.as_ref().and_then(Executor::browser_ready),
-                self.executor
-                    .as_ref()
-                    .is_some_and(Executor::browser_interactions),
+                self.executor.clone(),
             ))
         });
         let journal = self.journal.clone();
@@ -264,7 +271,17 @@ impl Device {
         > = None;
         let mut artifact_loading: Option<String> = None;
         let mut artifact_failure: Option<String> = None;
+        let mut computer_selection = tokio::task::JoinSet::new();
+        let mut computer_selecting: Option<String> = None;
+        let mut computer_failure: Option<String> = None;
         let result=async {loop {tokio::select! {
+            completed=computer_selection.join_next(), if !computer_selection.is_empty()=>{
+                let id=computer_selecting.take();
+                match completed {
+                    Some(Ok(Ok(())))=>{computer_failure=None;message="視窗範圍已在本機核對，訊息已保存待送。".into();}
+                    _=>{computer_failure=id;message="視窗尚未連上。請核對地端程序、所選視窗與輔助使用／螢幕錄製權限；草稿已保留。".into();}
+                }
+            }
             completed=async{match artifact_download.as_mut(){Some(task)=>task.await,None=>std::future::pending().await}}=>{
                 artifact_download=None;
                 let loaded_id=artifact_loading.take();
@@ -283,7 +300,7 @@ impl Device {
                     Ok(Ok(value))=>{
                         lease_tx.send_replace(Lease::default());link_tx.send_replace(LinkState::default());
                         if let Some(task)=connection.take(){task.abort();let _=task.await;}
-                        connection=Some(tokio::spawn(reconnect(self.config.clone(),self.journal.clone(),value.clone(),lease_tx.clone(),link_tx.clone(),self.executor.as_ref().and_then(Executor::browser_ready),self.executor.as_ref().is_some_and(Executor::browser_interactions))));
+                        connection=Some(tokio::spawn(reconnect(self.config.clone(),self.journal.clone(),value.clone(),lease_tx.clone(),link_tx.clone(),self.executor.clone())));
                         credential=Some(value);message="配對完成。密鑰已存入 Keychain。".into();
                     }
                     _=>message="配對未完成。請核對伺服器、一次性配對碼及 Keychain 權限。若已兌換配對碼，須先由操作員撤銷再重試。".into(),
@@ -292,11 +309,23 @@ impl Device {
             _=ticker.tick()=>{
                 let mut state=self.journal.view().await?;state.server=self.config.server.to_string();state.paired=credential.is_some();state.connected=link_rx.borrow().connected;state.message=message.clone();
                 state.artifact_loading=artifact_loading.clone();state.artifact_failure=artifact_failure.clone();
+                state.computer_selecting=computer_selecting.clone();state.computer_failure=computer_failure.clone();
                 states.send_replace(state);
             }
             done=&mut worker=>{done.map_err(|_|crate::Error::Rejected("local worker stopped".into()))??;return Err(crate::Error::Rejected("local worker stopped".into()));}
             command=commands.recv()=>{
                 match command {
+                    Some(NativeCommand::SubmitComputer{source_id,id,goal,selection,selected_at})=>{
+                        if self.journal.role != ClientRole::Chat || !computer_selection.is_empty() {continue;}
+                        computer_failure=None;computer_selecting=Some(source_id.clone());message="正在核對選定的程式視窗…".into();
+                        let server=self.config.server.to_string(); let journal=self.journal.clone();
+                        computer_selection.spawn(async move {
+                            ensure(!source_id.is_empty() && source_id.len() <= 128 && !goal.trim().is_empty() && goal.len() <= 4096,"computer message size")?;
+                            let expires_at=selected_at.checked_add(900_000).ok_or_else(||crate::Error::Rejected("selection time overflow".into()))?;
+                            crate::computer_control::prepare(&server,pulse_core::ComputerPermit {task_id:id.clone(),revision:"1".into(),selection:selection.clone(),selected_at,expires_at}).await?;
+                            journal.action(&source_id,HumanAction::SubmitComputer{id,goal,selection}).await
+                        });
+                    }
                     Some(NativeCommand::LoadArtifact{operation_id,digest})=>{
                         if artifact_download.is_some(){continue;}
                         if let Some(credential)=credential.clone() {
@@ -318,6 +347,7 @@ impl Device {
                     }
                     Some(NativeCommand::Action{source_id,action})=>{
                         if self.journal.role != ClientRole::Chat {message="executor 不接受人類輸入。請使用對話框。".into();continue;}
+                        if matches!(&action,HumanAction::Submit{..}) {computer_failure=None;}
                         match self.journal.action(&source_id,action).await {Ok(())=>message="已存入本機待送佇列。".into(),Err(crate::Error::Rejected(_)|crate::Error::Capacity)=>message="要求未保存：內容或佇列已超過限制。".into(),Err(e)=>return Err(e)}
                     }
                     Some(NativeCommand::Pair{code})=>{
@@ -335,6 +365,11 @@ impl Device {
             }
         }}Ok(())}.await;
         lease_tx.send_replace(Lease::default());
+        computer_selection.abort_all();
+        while computer_selection.join_next().await.is_some() {}
+        if let Some(task) = computer_control {
+            task.stop().await;
+        }
         if let Some(task) = artifact_download {
             task.abort();
             let _ = task.await;
@@ -387,8 +422,7 @@ async fn reconnect(
     credential: Credential,
     lease: watch::Sender<Lease>,
     state: watch::Sender<LinkState>,
-    browser: Option<Option<String>>,
-    interactions: bool,
+    executor: Option<Executor>,
 ) {
     let mut delay = 1;
     loop {
@@ -399,8 +433,7 @@ async fn reconnect(
             &credential,
             &lease,
             &state,
-            browser.clone(),
-            interactions,
+            executor.clone(),
         )
         .await;
         lease.send_replace(Lease::default());
@@ -423,9 +456,15 @@ async fn connected(
     credential: &Credential,
     lease: &watch::Sender<Lease>,
     state: &watch::Sender<LinkState>,
-    browser: Option<Option<String>>,
-    interactions: bool,
+    executor: Option<Executor>,
 ) -> Result<()> {
+    let browser = executor.as_ref().and_then(Executor::browser_ready);
+    let interactions = executor
+        .as_ref()
+        .is_some_and(Executor::browser_interactions);
+    let mut computer_checks = tokio::task::JoinSet::new();
+    let mut computer_snapshot = None;
+    let mut computer_checked = Instant::now() - Duration::from_secs(5);
     let started = Instant::now();
     let mut url = config.server.join("v1/devices/connect")?;
     url.set_scheme(if config.server.scheme() == "https" {
@@ -473,7 +512,18 @@ async fn connected(
                 if let Some(epoch)=epoch {
                     ensure(lease.borrow().live(),"local lease expired")?;
                     if pending_heartbeat.is_none()&&last_heartbeat.elapsed()>=Duration::from_secs(15){last_heartbeat=Instant::now();pending_heartbeat=Some(last_heartbeat);wire(&mut socket,&ClientWire::Heartbeat{epoch:epoch.to_string()}).await?;}
+                    if computer_checked.elapsed() >= Duration::from_secs(5) && !journal.stopped().await? && let Some(executor) = executor.as_ref().filter(|e| e.computer_runtime().is_some()) {
+                        computer_checked = Instant::now();
+                        if computer_checks.is_empty() { let executor=executor.clone(); computer_checks.spawn(async move { executor.computer_capabilities().await }); }
+                    }
                     for envelope in journal.outgoing().await? {wire(&mut socket,&ClientWire::Data{envelope:Box::new(envelope)}).await?;}
+                }
+            }
+            result=computer_checks.join_next(), if !computer_checks.is_empty()=>{
+                if epoch.is_some() && lease.borrow().live() && !journal.stopped().await? {
+                    let permits=match result {Some(Ok(permits))=>permits,_=>vec![]};
+                    if !permits.is_empty() || computer_snapshot.as_ref() != Some(&permits) { wire(&mut socket,&ClientWire::ComputerReady{permits:permits.clone()}).await?; }
+                    computer_snapshot=Some(permits);
                 }
             }
             frame=socket.next()=>{
@@ -567,7 +617,7 @@ async fn work(journal: Journal, executor: Executor, lease: watch::Receiver<Lease
                                     let view = journal.view().await?;
                                     let obsolete = view.tasks.iter().find(|t| t.id == *task_id)
                                         .is_some_and(|t| t.revision.to_string() != *revision || t.cancel_requested || t.state.terminal());
-                                    if !live.live() || live.epoch != current.epoch || journal.stopped().await? || obsolete {
+                                    if !live.live() || live.epoch != current.epoch || journal.stopped().await? || obsolete || !executor.computer_permitted(operation,task_id,revision) {
                                         break crate::artifact::ExecutedRead {outcome:ReadOutcome::Unknown { reason: "local read interrupted by stop, revision, cancellation or expired session".into() },image:None};
                                     }
                                 }

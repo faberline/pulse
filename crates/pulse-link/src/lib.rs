@@ -6,6 +6,8 @@ mod browser_orchestration;
 pub mod browser_runtime;
 pub mod browser_session;
 pub mod client;
+mod computer_admission;
+mod computer_control;
 pub mod computer_runtime;
 mod computer_transport;
 mod conversation;

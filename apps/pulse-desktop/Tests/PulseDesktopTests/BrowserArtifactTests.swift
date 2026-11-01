@@ -3,6 +3,22 @@ import CryptoKit
 @testable import PulseDesktop
 
 final class BrowserArtifactTests: XCTestCase {
+  func testComputerSubmitRetainsOneSelectionAndTimestampUntilCloudReceipt() throws {
+    let selection = ComputerArtifactSource.Selection(target: .init(bundle_id: "com.faberline.PulseComputerFixture", pid: 42, window_id: 7), process_launched_at: 1)
+    let pending = PendingSubmit(sourceID: "source", taskID: "task", text: "讀取視窗", binding: ["https://pulse.example/", "private"], computer: selection, selectedAt: 1000)
+    let command = pending.command
+    XCTAssertEqual(command["kind"] as? String, "submit_computer")
+    XCTAssertEqual(command["selected_at"] as? Int64, 1000)
+    XCTAssertEqual(command["id"] as? String, "task")
+    let encoded = try JSONSerialization.data(withJSONObject: command["selection"]!)
+    XCTAssertEqual(try JSONDecoder().decode(ComputerArtifactSource.Selection.self, from: encoded), selection)
+    var state = NativeState(); state.server = "https://pulse.example/"
+    XCTAssertNil(pending.confirmedDraft("讀取視窗", by: state))
+    state.messages = [ChatMessage(id: "source", body: "已保存訊息：讀取視窗")]
+    XCTAssertEqual(pending.confirmedDraft("讀取視窗", by: state), "")
+    XCTAssertEqual(pending.confirmedDraft("新的草稿", by: state), "新的草稿")
+    XCTAssertEqual(pending.command["selected_at"] as? Int64, 1000)
+  }
   func testComputerPNGNeedsExactProcessSourceAndCannotMasqueradeAsBrowser() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }

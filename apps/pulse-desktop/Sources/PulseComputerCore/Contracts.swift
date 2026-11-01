@@ -52,6 +52,11 @@ public struct ComputerBinding: Codable, Equatable, Sendable {
   }
 }
 
+public struct ComputerSelection: Codable, Equatable, Sendable {
+  public let target: ComputerTarget
+  public let process_launched_at: Int64
+}
+
 public struct ComputerRequest: Sendable {
   public let kind: String
   public let binding: ComputerBinding?
@@ -66,6 +71,11 @@ public struct ComputerRequest: Sendable {
       let kind = value["kind"] as? String else { throw ComputerError.invalidRequest }
     if kind == "status", Set(value.keys) == ["kind"] { return Self(kind: kind, binding: nil, expectedProcessLaunchedAt: nil) }
     let keys = Set(value.keys)
+    if kind == "probe", keys == ["kind", "expected_process_launched_at"],
+      let text = value["expected_process_launched_at"] as? String,
+      let number = Int64(text), number > 0, String(number) == text {
+      return Self(kind: kind, binding: nil, expectedProcessLaunchedAt: number)
+    }
     guard kind == "observe", keys == ["kind", "binding"] || keys == ["kind", "binding", "expected_process_launched_at"],
       let binding = value["binding"] as? [String: Any],
       Set(binding.keys) == ["operation_id", "task_id", "revision", "device", "epoch"]
@@ -133,9 +143,11 @@ public struct ComputerResponse: Codable, Sendable {
   public let permissions: ComputerPermissions
   public let observation: ComputerObservation?
   public let error: ComputerError?
-  public init(permissions: ComputerPermissions, observation: ComputerObservation? = nil, error: ComputerError? = nil) {
-    version = "pulse-computer-observe-2"; self.permissions = permissions
+  public let selection: ComputerSelection?
+  public init(permissions: ComputerPermissions, observation: ComputerObservation? = nil, error: ComputerError? = nil, selection: ComputerSelection? = nil) {
+    version = "pulse-computer-observe-3"; self.permissions = permissions
     self.observation = observation; self.error = error
+    self.selection = selection
   }
 }
 

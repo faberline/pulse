@@ -773,6 +773,15 @@ impl Hub {
                         let worker = sqlx::query("SELECT id,epoch FROM link_device WHERE role='local_executor' AND revoked=0 AND stopped=0 AND lease_until>?").bind(time).fetch_optional(&mut *tx).await?.ok_or_else(||crate::Error::Rejected("local executor unavailable".into()))?;
                         let worker_id: String = worker.get("id");
                         let epoch: i64 = worker.get("epoch");
+                        if let ReadOp::ComputerInspect { selection } = operation {
+                            ensure(
+                                Self::computer_capable(
+                                    &mut tx, &worker_id, epoch, task_id, revision, selection, time,
+                                )
+                                .await?,
+                                "computer task lacks local Human selection",
+                            )?;
+                        }
                         let existing: i64 =
                             sqlx::query_scalar("SELECT COUNT(*) FROM link_reads WHERE id=?")
                                 .bind(&id)
@@ -1117,6 +1126,7 @@ async fn session(hub: Arc<Hub>, device: String, mut socket: WebSocket) {
                         ClientWire::Ack{sequence,id}=>hub.ack(&device,number(&sequence)?,&id).await?,
                         ClientWire::Heartbeat{epoch:claimed}=>{ensure(number(&claimed)?==epoch,"heartbeat epoch")?;hub.renew(&device,epoch,now()).await?;send(&mut socket,&ServerWire::Renewed{epoch:epoch.to_string(),lease_ms:LEASE_MS as u32}).await?;}
                         ClientWire::Hello{..}=>return Err(crate::Error::Rejected("duplicate hello".into())),
+                        ClientWire::ComputerReady{permits}=>hub.computer_ready(&device,epoch,permits,now()).await?,
                         ClientWire::BrowserReady{fixture_origin}=>hub.browser_ready(&device,epoch,fixture_origin.as_deref(),now()).await?,
                         ClientWire::BrowserInteractionReady{fixture_origin}=>hub.browser_interactive_ready(&device,epoch,fixture_origin.as_deref(),now()).await?,
                     }}

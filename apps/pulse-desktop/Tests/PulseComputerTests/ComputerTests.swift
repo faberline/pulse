@@ -39,6 +39,11 @@ final class ComputerTests: XCTestCase {
     XCTAssertEqual(boundedText(String(repeating: "文", count: 100_000), bytes: 256).utf8.count, 255)
   }
   func testExpectedProcessLaunchNeedsCanonicalPositiveString() throws {
+    let probe = try ComputerRequest.decode(Data(#"{"kind":"probe","expected_process_launched_at":"123"}"#.utf8))
+    XCTAssertEqual(probe.kind, "probe"); XCTAssertNil(probe.binding); XCTAssertEqual(probe.expectedProcessLaunchedAt, 123)
+    for input in [#"{"kind":"probe","expected_process_launched_at":123}"#, #"{"kind":"probe","expected_process_launched_at":"01"}"#, #"{"kind":"probe","expected_process_launched_at":"123","effect":"click"}"#] {
+      XCTAssertThrowsError(try ComputerRequest.decode(Data(input.utf8)))
+    }
     var object = try JSONSerialization.jsonObject(with: request()) as! [String: Any]
     object["expected_process_launched_at"] = "123"
     XCTAssertEqual(try ComputerRequest.decode(JSONSerialization.data(withJSONObject: object)).expectedProcessLaunchedAt, 123)

@@ -11,7 +11,12 @@ pub(crate) fn status(task: &Task) -> String {
         WaitingDevice if task.reason.as_deref() == Some("browser_capability_wait") => {
             "等待本機瀏覽器；請核對安裝與網址範圍"
         }
-        WaitingDevice if task.reason.as_deref() == Some("computer_selection_wait") => {
+        WaitingDevice
+            if matches!(
+                task.reason.as_deref(),
+                Some("computer_selection_wait" | "computer_capability_wait")
+            ) =>
+        {
             "等待選定程式與電腦存取權限"
         }
         WaitingDevice => "等待本機連線",
@@ -110,6 +115,20 @@ fn create(id: String, goal: String) -> Command {
     let request = name(request_text(&goal))
         .map(|(_, goal)| goal)
         .unwrap_or(&goal);
+    if [
+        "讀取視窗",
+        "讀這個視窗",
+        "觀察視窗",
+        "讀取程式",
+        "觀察程式",
+        "操作電腦",
+        "操作程式",
+    ]
+    .iter()
+    .any(|prefix| request_text(request).starts_with(prefix))
+    {
+        return Command::Clarify { question:"請先按對話框的「程式視窗」選擇要讀取的視窗，再傳送需求。目前只支援觀察；點擊與輸入尚未接上。".into() };
+    }
     let scope =
         match browser_scope(request) {
             Ok(scope) => scope.unwrap_or_else(|| "pulse:read".into()),
@@ -353,7 +372,7 @@ pub(crate) fn plan(id: &str, text: &str, tasks: &[Task]) -> Vec<Command> {
             .iter()
             .any(|c| matches!(c, Command::Clarify { .. }))
         {
-            return clarify();
+            return proposed;
         }
         for command in &proposed {
             let target = match command {

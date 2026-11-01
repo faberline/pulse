@@ -234,7 +234,8 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
     }
     pub async fn action(&self, source_id: &str, action: HumanAction) -> Result<()> {
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
-        if let HumanAction::Submit { goal, .. } = &action {
+        if let HumanAction::Submit { goal, .. } | HumanAction::SubmitComputer { goal, .. } = &action
+        {
             ensure(
                 !goal.trim().is_empty() && goal.len() <= 4096,
                 "goal must be 1..4096 bytes",

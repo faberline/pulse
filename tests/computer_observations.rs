@@ -143,3 +143,35 @@ fn computer_scope_has_one_canonical_process_instance_and_archived_evidence_canno
             .valid()
     );
 }
+
+#[test]
+fn local_computer_permit_has_a_fixed_lifetime_and_cannot_renew_on_retry() {
+    let permit = ComputerPermit {
+        task_id: "task".into(),
+        revision: "1".into(),
+        selection: observation().selection(),
+        selected_at: 1000,
+        expires_at: 901000,
+    };
+    assert!(permit.valid(1000));
+    assert!(permit.valid(900999));
+    assert!(!permit.valid(901000));
+    assert!(!permit.valid(-1));
+    for kind in [
+        "identity", "revision", "target", "start", "renew", "overflow",
+    ] {
+        let mut changed = permit.clone();
+        match kind {
+            "identity" => changed.task_id = "bad\nsource".into(),
+            "revision" => changed.revision = "01".into(),
+            "target" => changed.selection.target.pid = 0,
+            "start" => changed.selected_at = 0,
+            "renew" => changed.expires_at += 1,
+            _ => {
+                changed.selected_at = i64::MAX;
+                changed.expires_at = i64::MAX;
+            }
+        }
+        assert!(!changed.valid(1000), "{kind}");
+    }
+}

@@ -13,7 +13,7 @@ use tokio::{
     process::{Child, Command},
 };
 
-const VERSION: &str = "pulse-computer-observe-2";
+const VERSION: &str = "pulse-computer-observe-3";
 const RESPONSE_LIMIT: usize = 65_536;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -35,6 +35,7 @@ struct NativeResponse {
     permissions: ComputerPermissions,
     observation: Option<NativeObservation>,
     error: Option<NativeError>,
+    selection: Option<pulse_core::ComputerSelection>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -133,6 +134,8 @@ pub struct ComputerRuntime {
     target: Option<ComputerTarget>,
     timeout: Duration,
     gate: std::sync::Arc<tokio::sync::Semaphore>,
+    permits: std::sync::Arc<std::sync::Mutex<Vec<pulse_core::ComputerPermit>>>,
+    activity: tokio::sync::watch::Sender<bool>,
 }
 impl ComputerRuntime {
     /// A local operator's selection only. No request or model can set these values.
@@ -197,6 +200,8 @@ impl ComputerRuntime {
             target,
             timeout: Duration::from_secs(18),
             gate: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            permits: Default::default(),
+            activity: tokio::sync::watch::channel(false).0,
         })
     }
     pub fn configured_target(&self) -> Option<&ComputerTarget> {
@@ -211,14 +216,20 @@ impl ComputerRuntime {
             )
             .await?;
         ensure(
-            response.error.is_none() && response.observation.is_none(),
+            response.error.is_none()
+                && response.observation.is_none()
+                && response.selection.is_none(),
             "invalid native permission response",
         )?;
         Ok(response.permissions)
     }
     /// Local caller metadata is validated here. Human authorization remains upstream.
     pub async fn observe(&self, binding: &ComputerBinding) -> Result<ComputerEvidence> {
-        self.observe_inner(binding, None).await
+        let target = self
+            .target
+            .as_ref()
+            .ok_or_else(|| crate::Error::Rejected("no local computer target".into()))?;
+        self.observe_inner(binding, None, target).await
     }
     pub async fn observe_selected(
         &self,
@@ -226,20 +237,155 @@ impl ComputerRuntime {
         selection: &pulse_core::ComputerSelection,
     ) -> Result<ComputerEvidence> {
         ensure(
-            selection.valid() && self.target.as_ref() == Some(&selection.target),
-            "computer selection differs from local target",
+            self.permitted(&binding.task_id, &binding.revision.to_string(), selection),
+            "computer task lacks live local Human selection",
         )?;
-        self.observe_inner(binding, Some(selection)).await
+        let evidence = self
+            .observe_inner(binding, Some(selection), &selection.target)
+            .await?;
+        ensure(
+            self.permitted(&binding.task_id, &binding.revision.to_string(), selection),
+            "local selection was withdrawn",
+        )?;
+        Ok(evidence)
+    }
+    pub fn permitted(
+        &self,
+        task: &str,
+        revision: &str,
+        selection: &pulse_core::ComputerSelection,
+    ) -> bool {
+        *self.activity.borrow()
+            && self.permits.lock().is_ok_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry.valid(crate::now())
+                        && entry.task_id == task
+                        && entry.revision == revision
+                        && entry.selection == *selection
+                })
+            })
+    }
+    pub(crate) fn set_live(&self, live: bool) {
+        self.activity.send_if_modified(|old| {
+            if *old == live {
+                false
+            } else {
+                *old = live;
+                true
+            }
+        });
+    }
+    pub(crate) fn permit_local(&self, permit: pulse_core::ComputerPermit) -> Result<()> {
+        ensure(
+            *self.activity.borrow(),
+            "local computer executor is not live",
+        )?;
+        ensure(
+            permit.valid(crate::now())
+                && self
+                    .target
+                    .as_ref()
+                    .is_none_or(|target| *target == permit.selection.target),
+            "invalid local computer consent or operator scope",
+        )?;
+        let mut entries = self
+            .permits
+            .lock()
+            .map_err(|_| crate::Error::Rejected("local selection unavailable".into()))?;
+        entries.retain(|entry| entry.valid(crate::now()));
+        if let Some(old) = entries.iter().find(|entry| entry.task_id == permit.task_id) {
+            return ensure(old == &permit, "local computer selection identity conflict");
+        }
+        ensure(entries.len() < 2, "local computer selection capacity")?;
+        entries.push(permit);
+        Ok(())
+    }
+    pub(crate) fn selections(&self) -> Vec<pulse_core::ComputerPermit> {
+        self.permits
+            .lock()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|entry| entry.valid(crate::now()))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    pub(crate) fn revoke_local(&self, permit: &pulse_core::ComputerPermit) {
+        if let Ok(mut entries) = self.permits.lock() {
+            entries.retain(|entry| entry != permit);
+        }
+    }
+    pub(crate) fn maintain(&self, tasks: &[pulse_core::Task]) {
+        if let Ok(mut entries) = self.permits.lock() {
+            entries.retain(|entry| {
+                entry.valid(crate::now())
+                    && tasks
+                        .iter()
+                        .find(|task| task.id == entry.task_id)
+                        .is_none_or(|task| {
+                            !task.state.terminal()
+                                && !task.cancel_requested
+                                && task.reason.as_deref() != Some("model_reply_ready")
+                                && task.revision.to_string() == entry.revision
+                                && entry.selection.scope().as_deref() == Some(&task.scope)
+                        })
+            });
+        }
+    }
+    pub async fn probe_selected(&self, selection: &pulse_core::ComputerSelection) -> Result<()> {
+        ensure(
+            *self.activity.borrow(),
+            "local computer executor is not live",
+        )?;
+        ensure(
+            selection.valid()
+                && self
+                    .target
+                    .as_ref()
+                    .is_none_or(|target| *target == selection.target),
+            "outside local operator scope",
+        )?;
+        let args = self.arguments(&selection.target, &self.directory)?;
+        let request = serde_json::to_vec(
+            &serde_json::json!({"kind":"probe","expected_process_launched_at":selection.process_launched_at.to_string()}),
+        )?;
+        let mut activity = self.activity.subscribe();
+        let response = tokio::select! {
+            response=self.call(&args,Some(request),self.timeout)=>response?,
+            _=activity.wait_for(|live| !*live)=>return Err(crate::Error::Rejected("local executor stopped during probe".into())),
+        };
+        ensure(
+            response.error.is_none()
+                && response.observation.is_none()
+                && response.permissions.can_observe()
+                && response.selection.as_ref() == Some(selection),
+            "selected window or native permissions unavailable",
+        )
+    }
+    fn arguments(&self, target: &ComputerTarget, cache: &Path) -> Result<Vec<String>> {
+        Ok(vec![
+            "--bundle-id".into(),
+            target.bundle_id.clone(),
+            "--pid".into(),
+            target.pid.to_string(),
+            "--window-id".into(),
+            target.window_id.to_string(),
+            "--cache".into(),
+            cache
+                .to_str()
+                .ok_or_else(|| crate::Error::Rejected("computer cache encoding".into()))?
+                .into(),
+        ])
     }
     async fn observe_inner(
         &self,
         binding: &ComputerBinding,
         selection: Option<&pulse_core::ComputerSelection>,
+        target: &ComputerTarget,
     ) -> Result<ComputerEvidence> {
         ensure(binding.valid(), "invalid computer work binding")?;
-        let target = self.target.as_ref().ok_or_else(|| {
-            crate::Error::Rejected("no Human-selected local computer target".into())
-        })?;
         private_dir(&self.directory)?;
         let directory = self.directory.canonicalize()?;
         let cache = directory.join("artifacts");
@@ -255,23 +401,13 @@ impl ComputerRuntime {
         }
         let request = serde_json::to_vec(&request)?;
         ensure(request.len() <= 16_384, "computer request limit")?;
-        let args = vec![
-            "--bundle-id".into(),
-            target.bundle_id.clone(),
-            "--pid".into(),
-            target.pid.to_string(),
-            "--window-id".into(),
-            target.window_id.to_string(),
-            "--cache".into(),
-            cache
-                .to_str()
-                .ok_or_else(|| crate::Error::Rejected("computer cache encoding".into()))?
-                .into(),
-        ];
+        let args = self.arguments(target, &cache)?;
         let started = crate::now();
         let response = self.call(&args, Some(request), self.timeout).await?;
         ensure(
-            response.error.is_none() && response.permissions.can_observe(),
+            response.error.is_none()
+                && response.selection.is_none()
+                && response.permissions.can_observe(),
             "native observation unavailable; check permission and selected window",
         )?;
         let raw = response
@@ -449,4 +585,4 @@ fn read_image(path: &Path, image: &ComputerImageRef) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 #[path = "computer_runtime_tests.rs"]
-mod tests;
+pub(crate) mod tests;

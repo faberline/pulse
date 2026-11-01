@@ -96,10 +96,6 @@ impl Hub {
             .tool
             .as_ref()
             .ok_or_else(|| crate::Error::Rejected("missing tool proposal".into()))?;
-        ensure(
-            !matches!(call.operation, ReadOp::ComputerInspect { .. }),
-            "computer model dispatch is not connected",
-        )?;
         if matches!(call.operation, ReadOp::BrowserAction { .. }) {
             return self.propose_browser_action(token, call, time).await;
         }
@@ -185,7 +181,17 @@ impl Hub {
             for worker in &workers {
                 let device: String = worker.get("id");
                 let epoch: i64 = worker.get("epoch");
-                if Self::browser_capable(&mut tx, &device, epoch, &read.call.operation).await? {
+                if Self::local_capable(
+                    &mut tx,
+                    &device,
+                    epoch,
+                    &task.id,
+                    &task.revision.to_string(),
+                    &read.call.operation,
+                    time,
+                )
+                .await?
+                {
                     selected = Some((device, epoch));
                     break;
                 }
