@@ -15,6 +15,9 @@ use tokio::sync::{Mutex, MutexGuard};
 const EVENT_LIMIT: i64 = 10_000;
 const MANIFEST_LIMIT: u64 = 2 * 1024 * 1024;
 
+mod backup;
+pub use backup::{BackupCheck, Maintenance};
+
 /// This file is deliberately outside the database backup. It is restriction
 /// evidence, not another task or knowledge store. Never put source text in it.
 #[derive(Serialize, Deserialize)]
@@ -27,15 +30,25 @@ struct Restrictions {
 }
 
 pub(super) struct MemoryGuard {
+    database: PathBuf,
     manifest: PathBuf,
     lock: PathBuf,
     owner: u32,
     serial: Mutex<()>,
+    changed: tokio::sync::Notify,
 }
 
 struct Lease<'a> {
-    _serial: MutexGuard<'a, ()>,
     _file: File,
+    _serial: MutexGuard<'a, ()>,
+}
+
+impl Drop for Lease<'_> {
+    fn drop(&mut self) {
+        // Closing only this descriptor can leave the lock held by a descriptor
+        // inherited during a concurrent process spawn. Release the lock itself.
+        let _ = self._file.unlock();
+    }
 }
 
 impl MemoryGuard {
@@ -49,10 +62,12 @@ impl MemoryGuard {
             let mut lock = absolute.as_os_str().to_owned();
             lock.push(".memory-lock");
             Ok(Self {
+                database: absolute,
                 manifest: manifest.into(),
                 lock: lock.into(),
                 owner: std::fs::metadata(database)?.uid(),
                 serial: Mutex::new(()),
+                changed: tokio::sync::Notify::new(),
             })
         }
         #[cfg(not(unix))]
@@ -67,8 +82,25 @@ impl MemoryGuard {
     async fn lease(&self) -> Result<Lease<'_>> {
         let serial = self.serial.lock().await;
         let file = self.open_private(&self.lock, true, false)?;
-        file.try_lock()
-            .map_err(|_| Error::Rejected("memory storage is busy".into()))?;
+        let started = std::time::Instant::now();
+        loop {
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::Error(e))
+                    if e.kind() == std::io::ErrorKind::Interrupted
+                        && started.elapsed() < std::time::Duration::from_millis(250) =>
+                {
+                    continue;
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    if started.elapsed() >= std::time::Duration::from_millis(250) {
+                        return Err(Error::Rejected("memory storage is busy".into()));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+            }
+        }
         Ok(Lease {
             _serial: serial,
             _file: file,
@@ -379,6 +411,7 @@ impl Store {
             .bind(&request.source_id).bind(&id).bind(revision as i64).bind(digest(request)?)
             .bind(outcome).execute(&mut *tx).await?;
         tx.commit().await?;
+        self.memory_guard.changed.notify_one();
         self.checkpoint_memory_redaction().await?;
         Ok(reply)
     }
@@ -494,4 +527,20 @@ async fn reconcile(db: &mut SqliteConnection, manifest: &Restrictions) -> Result
         .execute(&mut *db)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn lease_releases_lock_despite_an_inherited_file_description() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("db"), "owner").await.unwrap();
+        let lease = store.memory_guard.lease().await.unwrap();
+        let inherited = lease._file.try_clone().unwrap();
+        drop(lease);
+        let next = store.memory_guard.lease().await.unwrap();
+        drop(next);
+        drop(inherited);
+    }
 }

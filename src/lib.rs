@@ -16,7 +16,7 @@ pub use memory::*;
 pub use model::*;
 pub use read::*;
 pub use scope::*;
-pub use store::Store;
+pub use store::{BackupCheck, Maintenance, Store};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

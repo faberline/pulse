@@ -5,6 +5,9 @@
 *.memory-restrictions.json
 *.memory-restrictions.*.tmp
 *.memory-lock
+*.backup-key
+*.backups/
+*.pulsebak
 /coverage/
 /apps/pulse-desktop/.build/
 /apps/pulse-desktop/.swiftpm/

@@ -21,11 +21,36 @@ async fn run() -> Result<()> {
     let mode = args.next().unwrap_or_default();
     let database = PathBuf::from(args.next().ok_or_else(|| {
         pulse_link::Error::Rejected(
-            "use pulse-server serve|pair-chat|pair-local|revoke PRIVATE_DB [PORT|PRIVATE_CODE_FILE|DEVICE_ID]"
+            "use pulse-server serve|pair-chat|pair-local|revoke PRIVATE_DB [VALUE], or check-backup PRIVATE_DB BACKUP NEW_DIRECTORY"
                 .into(),
         )
     })?);
     let value = args.next();
+    if mode == "check-backup" {
+        let backup =
+            value.ok_or_else(|| pulse_link::Error::Rejected("encrypted backup required".into()))?;
+        let destination = args.next().ok_or_else(|| {
+            pulse_link::Error::Rejected("new candidate directory required".into())
+        })?;
+        if args.next().is_some() {
+            return Err(pulse_link::Error::Rejected("too many arguments".into()));
+        }
+        let core = pulse_core::Store::open(database, "pulse-owner").await?;
+        let check = core
+            .check_backup(
+                std::path::Path::new(&backup),
+                std::path::Path::new(&destination),
+                &pulse_link::remote::versions(),
+                now(),
+            )
+            .await?;
+        eprintln!(
+            "Backup checked in quarantine: {} tasks, {} unknown tasks, {} live memories. No tasks started.",
+            check.tasks, check.unknown_tasks, check.memories
+        );
+        core.close().await;
+        return Ok(());
+    }
     if args.next().is_some() {
         return Err(pulse_link::Error::Rejected("too many arguments".into()));
     }
@@ -49,6 +74,7 @@ async fn run() -> Result<()> {
     match mode.as_str() {
         "serve" => {
             hub.recover().await?;
+            hub.core.maintain(now()).await?;
             let port: u16 = value
                 .as_deref()
                 .unwrap_or("8721")
@@ -61,11 +87,13 @@ async fn run() -> Result<()> {
                 listener.local_addr()?
             );
             let remote = pulse_link::remote::run(hub.clone());
+            let maintenance = pulse_link::maintenance::run(hub.core.clone());
             let server = axum::serve(listener, router(hub)).with_graceful_shutdown(async {
                 let _ = tokio::signal::ctrl_c().await;
             });
             tokio::select! {
                 result = remote => result?,
+                result = maintenance => result?,
                 result = server => result?,
             }
         }

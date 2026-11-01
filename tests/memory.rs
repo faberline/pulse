@@ -365,6 +365,28 @@ async fn live_store_checks_restrictions_and_other_store_cannot_lose_updates() {
 }
 
 #[tokio::test]
+async fn busy_file_lock_is_not_stolen_and_release_allows_a_fresh_check() {
+    let (dir, store) = setup().await;
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.path().join("db.memory-lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+    let started = std::time::Instant::now();
+    assert!(store.list_memories(NOW).await.is_err());
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    let other = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.path().join("db.memory-lock"))
+        .unwrap();
+    assert!(other.try_lock().is_err());
+    drop(lock);
+    assert!(store.list_memories(NOW).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn capacity_limits_new_knowledge_but_never_prevents_deletion() {
     let (_dir, store) = setup().await;
     let mut first = None;

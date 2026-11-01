@@ -1112,6 +1112,8 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "libc",
+ "ring",
+ "rustix",
  "serde",
  "serde_jcs",
  "serde_json",

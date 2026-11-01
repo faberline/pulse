@@ -17,6 +17,7 @@ const DEADLINE_MS: i64 = 15 * 60 * 1_000;
 
 mod approvals;
 mod memory;
+pub use memory::{BackupCheck, Maintenance};
 
 #[derive(Clone)]
 pub struct Store {
