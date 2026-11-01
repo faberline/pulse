@@ -1,9 +1,11 @@
 //! In-process durable task core. No network listener, model client or tool executor.
 //! Callers are trusted application code; transport authentication belongs to v0.3.
 mod model;
+mod read;
 mod store;
 
 pub use model::*;
+pub use read::*;
 pub use store::Store;
 
 #[derive(Debug, thiserror::Error)]

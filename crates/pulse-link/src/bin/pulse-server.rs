@@ -60,11 +60,14 @@ async fn run() -> Result<()> {
                 "Pulse listener: http://{} (loopback; production requires a TLS reverse proxy)",
                 listener.local_addr()?
             );
-            axum::serve(listener, router(hub))
-                .with_graceful_shutdown(async {
-                    let _ = tokio::signal::ctrl_c().await;
-                })
-                .await?;
+            let remote = pulse_link::remote::run(hub.clone());
+            let server = axum::serve(listener, router(hub)).with_graceful_shutdown(async {
+                let _ = tokio::signal::ctrl_c().await;
+            });
+            tokio::select! {
+                result = remote => result?,
+                result = server => result?,
+            }
         }
         "pair-chat" | "pair-local" => {
             let file = value.ok_or_else(|| {

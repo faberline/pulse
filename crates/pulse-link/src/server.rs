@@ -17,8 +17,9 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct Hub {
     pub core: Store,
-    db: SqlitePool,
+    pub(crate) db: SqlitePool,
     changes: tokio::sync::watch::Sender<u64>,
+    human: Arc<tokio::sync::Mutex<()>>,
 }
 impl Hub {
     pub fn new(core: Store) -> Self {
@@ -27,11 +28,83 @@ impl Hub {
             core,
             db,
             changes: tokio::sync::watch::channel(0).0,
+            human: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
     fn changed(&self) {
         self.changes
             .send_modify(|version| *version = version.wrapping_add(1));
+    }
+    pub(crate) fn notify_change(&self) {
+        self.changed();
+    }
+    pub async fn model_reply(
+        &self,
+        token: &pulse_core::Token,
+        reply: &crate::provider::Reply,
+        model: &str,
+        time: i64,
+    ) -> Result<()> {
+        ensure(
+            reply.tool.is_none(),
+            "tool proposal cannot be a final reply",
+        )?;
+        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+        let data: String = sqlx::query_scalar("SELECT data FROM tasks WHERE id=?")
+            .bind(&token.task_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let mut task: pulse_core::Task = serde_json::from_str(&data)?;
+        let data: String = sqlx::query_scalar("SELECT data FROM runs WHERE id=?")
+            .bind(&token.run_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let mut run: pulse_core::Run = serde_json::from_str(&data)?;
+        ensure(
+            task.revision == token.revision
+                && !task.cancel_requested
+                && task.deadline > time
+                && task.state == pulse_core::State::Planning
+                && task.active_run.as_deref() == Some(&token.run_id)
+                && run.token == *token,
+            "stale model reply",
+        )?;
+        let id = format!(
+            "model:{}:{}:{}",
+            token.run_id,
+            token.revision,
+            run.checkpoint["round"].as_u64().unwrap_or(0)
+        );
+        run.checkpoint["phase"] = json!("reply_saved");
+        run.checkpoint["model"] = json!(model);
+        run.checkpoint["reply"] = json!(reply.text);
+        run.checkpoint["usage"] = reply.usage.clone();
+        task.state = pulse_core::State::Blocked;
+        task.reason = Some("model_reply_ready".into());
+        task.evidence.push(id.clone());
+        sqlx::query("UPDATE tasks SET data=? WHERE id=?")
+            .bind(serde_json::to_string(&task)?)
+            .bind(&task.id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE runs SET data=? WHERE id=?")
+            .bind(serde_json::to_string(&run)?)
+            .bind(&token.run_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT OR IGNORE INTO link_chat VALUES(?,?,?)")
+            .bind(id)
+            .bind(format!(
+                "模型回覆（{model} · {}）：\n\n{}\n\n分析已保存，任務待確認。",
+                crate::conversation::label(&task),
+                reply.text
+            ))
+            .bind(time)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        self.changed();
+        Ok(())
     }
     pub async fn pairing(&self, role: ClientRole, time: i64) -> Result<String> {
         let code = secret()?;
@@ -181,7 +254,7 @@ impl Hub {
         let n=sqlx::query("UPDATE link_device SET lease_until=? WHERE id=? AND epoch=? AND revoked=0 AND lease_until>?").bind(time+LEASE_MS).bind(device).bind(epoch as i64).bind(time).execute(&self.db).await?.rows_affected();
         ensure(n == 1, "lease expired or fenced")
     }
-    async fn enqueue(
+    pub(crate) async fn enqueue(
         db: &mut sqlx::SqliteConnection,
         device: &str,
         epoch: u64,
@@ -445,6 +518,7 @@ impl Hub {
     ) -> Result<()> {
         match &envelope.payload {
             DevicePayload::Human { source_id, action } => {
+                let _human = self.human.lock().await;
                 ensure(
                     !source_id.is_empty() && source_id.len() <= 128,
                     "source ID limit",
@@ -455,15 +529,18 @@ impl Hub {
                             id.len() <= 128 && !goal.trim().is_empty() && goal.len() <= 4096,
                             "task size",
                         )?;
-                        vec![Command::Create {
-                            id: id.clone(),
-                            goal: goal.clone(),
-                            scope: "pulse:read".into(),
-                            priority: 0,
-                            requires_device: false,
-                            parent: None,
-                            dependencies: vec![],
-                        }]
+                        // Replays use the durable original plan, not newer task revisions.
+                        let prior:Option<String>=sqlx::query_scalar("SELECT payload FROM events WHERE source=? AND source_id=? AND origin='human'").bind(format!("device:{device}")).bind(source_id).fetch_optional(&self.db).await?;
+                        if let Some(prior) = prior {
+                            let payload: serde_json::Value = serde_json::from_str(&prior)?;
+                            ensure(
+                                payload["native_action"] == serde_json::to_value(action)?,
+                                "source identity conflict",
+                            )?;
+                            serde_json::from_value(payload["commands"].clone())?
+                        } else {
+                            crate::conversation::plan(id, goal, &self.core.list_tasks(100).await?)
+                        }
                     }
                     HumanAction::Cancel { task_id, revision } => vec![Command::Cancel {
                         id: task_id.clone(),
@@ -485,20 +562,51 @@ impl Hub {
                     )
                     .await?;
                 let outcome = self.core.route(&event.event_id).await?;
+                if let (
+                    pulse_core::Outcome::Rejected { reason },
+                    HumanAction::Submit { goal, .. },
+                ) = (&outcome, action)
+                {
+                    let notice = match reason.as_str() {
+                        "read outcome is still unknown" | "missing read receipt" => {
+                            "結果仍未知。請等待本機回報；目前不會重新執行。"
+                        }
+                        "model cost is still unknown; keep reservations" => {
+                            "模型費用仍待核對。已保留預算，未重新呼叫。"
+                        }
+                        "read evidence must be reviewed first" => {
+                            "請先核對已保存的工具證據，再要求繼續。"
+                        }
+                        "no local outcome to review" => "沒有待核對的本機結果。任務保持原狀。",
+                        _ => "要求未執行。請查詢目前任務狀態，核對對象與限制。",
+                    };
+                    self.chat(source_id, &format!("已保存訊息：{goal}"), time)
+                        .await?;
+                    self.chat(&format!("reply:{source_id}"), notice, time)
+                        .await?;
+                }
                 ensure(
                     !matches!(outcome, pulse_core::Outcome::Rejected { .. }),
                     "task control rejected",
                 )?;
                 match action {
                     HumanAction::Submit { goal, .. } => {
-                        self.chat(
-                            source_id,
-                            &format!(
-                                "已保存任務：{goal}\n\n模型尚未接入。可選任務後使用只讀工具。"
-                            ),
-                            time,
-                        )
-                        .await?
+                        let body = match &outcome {
+                            pulse_core::Outcome::Clarification { question } => question.clone(),
+                            pulse_core::Outcome::Applied { task_ids } => {
+                                let mut lines = vec!["訊息已保存。".to_owned()];
+                                for id in task_ids {
+                                    let task = self.core.task(id).await?;
+                                    lines.push(crate::conversation::status(&task));
+                                }
+                                lines.join("\n")
+                            }
+                            pulse_core::Outcome::Rejected { .. } => unreachable!("rejected above"),
+                        };
+                        self.chat(source_id, &format!("已保存訊息：{goal}"), time)
+                            .await?;
+                        self.chat(&format!("reply:{source_id}"), &body, time)
+                            .await?
                     }
                     HumanAction::Read {
                         task_id,
@@ -594,7 +702,7 @@ impl Hub {
             } => {
                 ensure(outcome.valid(), "invalid device result")?;
                 let row = sqlx::query(
-                    "SELECT device,epoch,task_id,task_revision,result FROM link_reads WHERE id=?",
+                    "SELECT device,epoch,task_id,task_revision,request,result FROM link_reads WHERE id=?",
                 )
                 .bind(operation_id)
                 .fetch_optional(&self.db)
@@ -619,26 +727,53 @@ impl Hub {
                     ReadOutcome::Rejected { .. } => "rejected",
                 };
                 let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
-                let changed=sqlx::query("UPDATE link_reads SET state=?,result=? WHERE id=? AND (result IS NULL OR result=?)")
-                    .bind(state)
-                    .bind(&encoded)
-                    .bind(operation_id)
-                    .bind(&encoded).execute(&mut *tx).await?.rows_affected();
-                ensure(changed == 1, "result conflict")?;
-                Store::device_observation_in(
-                    &mut tx,
-                    task_id,
-                    number(revision)?,
-                    operation_id,
-                    matches!(outcome, ReadOutcome::Unknown { .. }),
+                let before_data: String = sqlx::query_scalar("SELECT data FROM tasks WHERE id=?")
+                    .bind(task_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                let before: pulse_core::Task = serde_json::from_str(&before_data)?;
+                let changed = sqlx::query(
+                    "UPDATE link_reads SET state=?,result=? WHERE id=? AND result IS NULL",
                 )
-                .await?;
+                .bind(state)
+                .bind(&encoded)
+                .bind(operation_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+                if changed == 1 {
+                    Store::device_observation_in(
+                        &mut tx,
+                        task_id,
+                        number(revision)?,
+                        operation_id,
+                        matches!(outcome, ReadOutcome::Unknown { .. }),
+                    )
+                    .await?;
+                    Self::continue_model_read(&mut tx, &before, operation_id, outcome, time)
+                        .await?;
+                } else {
+                    let stored: String =
+                        sqlx::query_scalar("SELECT result FROM link_reads WHERE id=?")
+                            .bind(operation_id)
+                            .fetch_one(&mut *tx)
+                            .await?;
+                    ensure(stored == encoded, "result conflict")?;
+                }
                 tx.commit().await?;
+                let operation: ReadOp = serde_json::from_str(&row.get::<String, _>("request"))?;
+                let read_label = match operation {
+                    ReadOp::List { path } => format!("目錄 {path}"),
+                    ReadOp::Text { path } | ReadOp::GitDiff { path } => path,
+                    ReadOp::GitStatus => "Git 狀態".into(),
+                };
                 let body = match outcome {
                     ReadOutcome::Completed {
                         text, truncated, ..
                     } => format!(
-                        "只讀工具結果{}\n\n```text\n{}\n```\n\n這是工具證據，不是模型分析或任務成功。",
+                        "只讀工具結果 · {} · {}{}\n\n```text\n{}\n```\n\n這是工具證據，任務尚待確認。",
+                        crate::conversation::label(&before),
+                        read_label,
                         if *truncated { "（已截斷）" } else { "" },
                         short(text, 7000)
                     ),

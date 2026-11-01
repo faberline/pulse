@@ -176,6 +176,11 @@ pub enum Command {
         #[serde(with = "decimal")]
         expected_revision: u64,
     },
+    ReconcileRead {
+        id: String,
+        #[serde(with = "decimal")]
+        expected_revision: u64,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

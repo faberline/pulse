@@ -115,6 +115,28 @@ impl Store {
         put(db, "tasks", id, &task).await
     }
 
+    /// Trusted remote dispatch shares the transport transaction and requires a live run token.
+    pub async fn authorize_remote_read(
+        db: &mut SqliteConnection,
+        token: &Token,
+        operation: &str,
+        now: i64,
+    ) -> Result<()> {
+        let (mut task, _) = current(db, token, now).await?;
+        require(
+            task.state == State::WaitingDevice
+                && task.scope == "pulse:read"
+                && task.tool_calls < 16
+                && !unresolved(db, &task.id).await?,
+            "remote read policy or limit",
+        )?;
+        task.tool_calls += 1;
+        task.state = State::Dispatched;
+        task.reason = Some("model_read_dispatched".into());
+        task.evidence.push(format!("dispatch:{operation}"));
+        put(db, "tasks", &task.id, &task).await
+    }
+
     /// Trusted transport observer. Records device evidence, never verifies the goal.
     pub async fn device_observation(
         &self,
@@ -294,27 +316,42 @@ impl Store {
     }
 
     pub async fn claim_next(&self, versions: &Versions, now: i64) -> Result<Option<Run>> {
+        Ok(self.claim_next_with_changes(versions, now).await?.0)
+    }
+
+    /// Returns committed task changes even when no work can be claimed.
+    pub async fn claim_next_with_changes(
+        &self,
+        versions: &Versions,
+        now: i64,
+    ) -> Result<(Option<Run>, bool)> {
         require(versions.valid(), "invalid version manifest")?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut tasks = tasks(&mut tx).await?;
+        let mut changed = false;
         for task in &mut tasks {
             if !task.state.terminal() && task.deadline <= now {
-                task.state = if unresolved(&mut tx, &task.id).await? {
+                let state = if unresolved(&mut tx, &task.id).await? {
                     State::OutcomeUnknown
                 } else {
                     State::Blocked
                 };
-                task.reason = Some("deadline_exhausted".into());
-                put(&mut tx, "tasks", &task.id, task).await?;
+                if task.state != state || task.reason.as_deref() != Some("deadline_exhausted") {
+                    task.state = state;
+                    task.reason = Some("deadline_exhausted".into());
+                    put(&mut tx, "tasks", &task.id, task).await?;
+                    changed = true;
+                }
             } else if task.state == State::RetryWait && task.wake_at.is_some_and(|t| t <= now) {
                 task.state = State::Queued;
                 task.wake_at = None;
                 put(&mut tx, "tasks", &task.id, task).await?;
+                changed = true;
             }
         }
         if tasks.iter().filter(|t| t.state.active()).count() >= 2 {
             tx.commit().await?;
-            return Ok(None);
+            return Ok((None, changed));
         }
         tasks.sort_by_key(|t| (std::cmp::Reverse(t.priority), t.created_at, t.id.clone()));
         for mut task in tasks {
@@ -336,6 +373,7 @@ impl Store {
             if task.requires_device {
                 task.state = State::WaitingDevice;
                 put(&mut tx, "tasks", &task.id, &task).await?;
+                changed = true;
                 continue;
             }
             let mut run = if let Some(run_id) = &task.active_run {
@@ -344,6 +382,7 @@ impl Store {
                     task.state = State::Blocked;
                     task.reason = Some("version_incompatible".into());
                     put(&mut tx, "tasks", &task.id, &task).await?;
+                    changed = true;
                     continue;
                 }
                 run
@@ -366,10 +405,10 @@ impl Store {
             put(&mut tx, "runs", &run.token.run_id, &run).await?;
             put(&mut tx, "tasks", &task.id, &task).await?;
             tx.commit().await?;
-            return Ok(Some(run));
+            return Ok((Some(run), true));
         }
         tx.commit().await?;
-        Ok(None)
+        Ok((None, changed))
     }
 
     pub async fn advance(
@@ -944,6 +983,13 @@ async fn apply(
                 put(db, "tasks", &id, &task).await?;
                 id
             }
+            Command::ReconcileRead {
+                id,
+                expected_revision,
+            } => {
+                reconcile_read(db, &id, expected_revision, event_id, now).await?;
+                id
+            }
             Command::Resume {
                 id,
                 expected_revision,
@@ -961,6 +1007,10 @@ async fn apply(
                 require(
                     task.reason.as_deref() != Some("version_incompatible"),
                     "version migration is required",
+                )?;
+                require(
+                    task.reason.as_deref() != Some("device_result_ready_model_not_connected"),
+                    "read evidence must be reviewed first",
                 )?;
                 task.state = State::Queued;
                 task.reason = None;
@@ -1072,6 +1122,107 @@ async fn receipt_in(db: &mut SqliteConnection, receipt: &Receipt) -> Result<Rece
     } else {
         ReceiptEffect::Late
     })
+}
+
+/// Human review of transport-validated read receipts. Never invents a missing outcome.
+async fn reconcile_read(
+    db: &mut SqliteConnection,
+    id: &str,
+    revision: u64,
+    event: &str,
+    now: i64,
+) -> Result<()> {
+    let mut task: Task = load(db, "tasks", id).await?;
+    require(
+        task.revision == revision
+            && !task.cancel_requested
+            && task.scope == "pulse:read"
+            && task.deadline > now,
+        "read review revision, scope or deadline",
+    )?;
+    if task.state == State::Blocked && task.reason.as_deref() == Some("read_receipts_verified") {
+        return Ok(());
+    }
+    require(
+        task.state == State::OutcomeUnknown
+            || (task.state == State::Blocked
+                && task.reason.as_deref() == Some("device_result_ready_model_not_connected")),
+        "no local outcome to review",
+    )?;
+    require(!unresolved(db, id).await?, "read outcome is still unknown")?;
+    let unsettled: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM budget WHERE task_id=? AND state!='settled'")
+            .bind(id)
+            .fetch_one(&mut *db)
+            .await?;
+    require(
+        unsettled == 0,
+        "model cost is still unknown; keep reservations",
+    )?;
+    // A failed proof rolls this intermediate state back in the same transaction.
+    task.state = State::Reconciling;
+    put(db, "tasks", id, &task).await?;
+    let rows = sqlx::query(
+        "SELECT id,task_revision,state,result FROM link_reads WHERE task_id=? ORDER BY rowid",
+    )
+    .bind(id)
+    .fetch_all(&mut *db)
+    .await?;
+    require(!rows.is_empty(), "no durable local receipt")?;
+    for row in &rows {
+        let encoded: String = row
+            .try_get("result")
+            .map_err(|_| Error::Rejected("missing read receipt".into()))?;
+        let receipt: ReadOutcome = serde_json::from_str(&encoded)?;
+        let state: String = row.get("state");
+        require(
+            receipt.valid()
+                && matches!(
+                    (state.as_str(), &receipt),
+                    ("completed", ReadOutcome::Completed { .. })
+                        | ("rejected", ReadOutcome::Rejected { .. })
+                ),
+            "read evidence is not a known validated outcome",
+        )?;
+    }
+    task.active_run = None;
+    if let Some(latest) = rows
+        .iter()
+        .rev()
+        .find(|row| row.get::<String, _>("task_revision") == revision.to_string())
+    {
+        let data:Option<String>=sqlx::query_scalar("SELECT data FROM runs WHERE json_extract(data,'$.token.task_id')=? AND json_extract(data,'$.token.revision')=? AND json_extract(data,'$.checkpoint.operation_id')=? AND json_extract(data,'$.checkpoint.phase')='sent_tool'").bind(id).bind(revision.to_string()).bind(latest.get::<String,_>("id")).fetch_optional(&mut *db).await?;
+        if let Some(data) = data {
+            let mut run: Run = serde_json::from_str(&data)?;
+            let round = run.checkpoint["round"]
+                .as_u64()
+                .ok_or_else(|| Error::Rejected("missing model round".into()))?;
+            require(
+                round < 8 && run.token.task_id == id && run.token.revision == revision,
+                "read run binding",
+            )?;
+            // Restore the same logical run, advance exactly one round, and retain its calls.
+            // claim_next will mint a new epoch before any model invocation.
+            run.checkpoint["phase"] = json!("ready");
+            run.checkpoint["round"] = json!(round + 1);
+            task.active_run = Some(run.token.run_id.clone());
+            put(db, "runs", &run.token.run_id, &run).await?;
+        }
+    }
+    task.state = State::Blocked;
+    task.reason = Some("read_receipts_verified".into());
+    task.evidence.push(format!("read-review:{event}"));
+    for row in rows {
+        let evidence = format!(
+            "verified-read:{}:revision:{}",
+            row.get::<String, _>("id"),
+            row.get::<String, _>("task_revision")
+        );
+        if !task.evidence.contains(&evidence) {
+            task.evidence.push(evidence);
+        }
+    }
+    put(db, "tasks", id, &task).await
 }
 
 async fn unresolved(db: &mut SqliteConnection, task_id: &str) -> Result<bool> {

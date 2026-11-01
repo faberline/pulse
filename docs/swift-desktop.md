@@ -46,8 +46,8 @@ Rust 產品 source LCOV 為 2,977/3,424 行（86.95%）、281/367 functions（76
 
 本機已核對原生控制項、中文多行及 code 輸入、保存後清空、重啟後待送保留、設定返回與 PNG 選取／預覽。SQLite 中的換行原樣保存。修正短 pipe 訊息等待滿緩衝區的問題，並以保持運行的子程序驗證即時交付。
 
-本次真實配對已在 server 兌換，但 Keychain 保存未完成，兩個身分沒有建立 lease。SwiftUI 的 authenticated 端到端、進度／取消／只讀操作及 Keychain 重啟讀回保持未接受。沒有改 Keychain 權限，也沒有明文 fallback。Rust 的 MemoryVault 整合測試不能代替此項。
+先前候選曾在 Keychain 保存停住。2026-11-01 以一般系統程序權限啟動，chat 與 local 都保存配對並建立 lease。SwiftUI 送 A 讀 README、B 讀 Cargo.toml，各完成 Luna／local／模型回答迴圈。app 與 executor 重啟後都從 Keychain 讀回並重新連線，不重跑已完成讀檔。沒有改 Keychain 權限，也沒有明文 fallback。這項實機證據另見 [v0.4](v0.4-remote.md)；完整故障與互動接受仍未完成。
 
-完整中文 IME、全部滑鼠／鍵盤、正式遠端 WSS、效能／soak、provider 與 remote 執行閉環仍未接受。GitHub Actions 也須核對當前 SHA。既有帳務阻擋不會被本機通過取代。
+完整中文 IME、全部滑鼠／鍵盤、正式遠端 WSS、效能／soak、完整多任務 provider／remote 閉環仍未接受。GitHub Actions 也須核對當前 SHA。先前候選的 CI 帳務阻擋已解除；每個新 head 仍須重查。
 
 原生元件依據：[NSViewRepresentable](https://developer.apple.com/documentation/SwiftUI/NSViewRepresentable)。套件與測試依據：[Swift Package targets](https://docs.swift.org/latest/documentation/packagedescription/target/)。這些文件不是本案驗收證據。

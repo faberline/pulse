@@ -50,7 +50,7 @@ struct ChatView: View {
                 if model.state.messages.isEmpty {
                   VStack(alignment: .leading, spacing: 8) {
                     Text("從一句話開始。").font(.title)
-                    Text("模型尚未接入。訊息會先保存。").foregroundStyle(.secondary)
+                    Text("訊息與回覆會顯示在這裡。").foregroundStyle(.secondary)
                   }.padding(.vertical, 90).frame(maxWidth: .infinity, alignment: .center)
                 }
                 ForEach(model.state.messages) { message in
@@ -58,7 +58,13 @@ struct ChatView: View {
                     if message.isUser { Spacer(minLength: 40) }
                     VStack(alignment: .leading, spacing: 8) {
                       Text(message.label).font(.caption).foregroundStyle(.secondary)
-                      RichContent(source: message.displayBody)
+                      if message.isEvidence {
+                        DisclosureGroup(String(message.body.split(separator: "\n").first ?? "工具證據")) {
+                          RichContent(source: message.displayBody)
+                        }
+                      } else {
+                        RichContent(source: message.displayBody)
+                      }
                     }
                     .padding(14).frame(maxWidth: .infinity, alignment: .leading)
                     .background(
@@ -99,7 +105,7 @@ struct ChatView: View {
                 !model.canSend)
             }
             HStack {
-              Text(model.notice.isEmpty ? "模型尚未接入，訊息會先保存。" : model.notice).font(.caption)
+              Text(model.notice.isEmpty ? "訊息會先保存，回覆與進度會自動同步。" : model.notice).font(.caption)
                 .foregroundStyle(.secondary)
               Spacer()
             }

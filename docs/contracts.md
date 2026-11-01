@@ -57,6 +57,10 @@ DB commit 前 crash，來源可重送。commit 後回覆遺失，重送取得原
 
 任務每次控制變更增加 revision。以 `expected_revision` 做條件更新。新 revision 使舊 run 的下一步無效，但不刪除舊 run 的證據。晚到結果只能追加歷史或核對既有操作，不倒退終態或恢復舊決策。
 
+v0.4 的只讀接續細化：改需求或取消會增加 revision。查詢、核對同一需求的既有 receipt，以及在已核對後續推，不改 goal/scope，保留 task revision。重新領取時更換 run epoch，拒絕原執行的下一步。這不重置費用、次數或 deadline。
+
+模型只讀提議可在保存後由 planning 進 waiting_device；local 可用時以同一交易保存 intent/outbox 並進 dispatched。已知 receipt 只有在當前 run/revision/epoch 仍有效時，才可排入同一 run 的下一模型 round。其他晚到結果只作證據，停在 blocked/outcome_unknown。人類「核對」在單一 DB 交易內經 reconciling 驗證憑證，通過後停在 blocked；失敗回滾並保留未知。之後還需人類「繼續」，才可領取下一 round。此路徑不宣告任務成功。
+
 ## K04：context 與決策
 
 每次推理只取該任務的目標、scope、有效決策、授權、必要工具契約與證據引用。保留各內容的 actor、來源時間與信任層級。
