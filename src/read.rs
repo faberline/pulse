@@ -14,6 +14,8 @@ pub enum ReadOutcome {
         text: String,
         digest: String,
         truncated: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observation: Option<crate::BrowserObservation>,
     },
     Rejected {
         reason: String,
@@ -30,12 +32,22 @@ impl ReadOutcome {
             text,
             digest,
             truncated,
+            observation: None,
         }
     }
     pub fn valid(&self) -> bool {
         match self {
-            Self::Completed { text, digest, .. } => {
-                text.len() <= MAX_READ_RESULT && *digest == hash_read_bytes(text.as_bytes())
+            Self::Completed {
+                text,
+                digest,
+                observation,
+                ..
+            } => {
+                text.len() <= MAX_READ_RESULT
+                    && *digest == hash_read_bytes(text.as_bytes())
+                    && observation
+                        .as_ref()
+                        .is_none_or(crate::BrowserObservation::valid)
             }
             Self::Rejected { reason } | Self::Unknown { reason } => {
                 !reason.is_empty() && reason.len() <= 1024

@@ -24,7 +24,13 @@ pub fn browser_url(scope: &str) -> Option<Url> {
     .then_some(url)
 }
 pub fn read_scope(scope: &str) -> bool {
-    scope == "pulse:read" || browser_url(scope).is_some()
+    scope == "pulse:read" || browser_url(scope).is_some() || interaction_url(scope).is_some()
+}
+pub fn interaction_url(scope: &str) -> Option<Url> {
+    browser_url(&format!(
+        "browser:{}",
+        scope.strip_prefix("browser-interact:")?
+    ))
 }
 
 #[cfg(test)]

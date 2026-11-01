@@ -3,7 +3,7 @@ use crate::{Result, ensure, protocol::hash_bytes};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 
-pub const MAX_PNG: usize = 4 * 1024 * 1024;
+pub const MAX_PNG: usize = pulse_core::BROWSER_MAX_PNG;
 pub const CHUNK: usize = 64 * 1024;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -40,24 +40,8 @@ pub fn digest_id(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 pub fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
-    ensure(
-        bytes.len() >= 33
-            && bytes.len() <= MAX_PNG
-            && bytes.starts_with(b"\x89PNG\r\n\x1a\n")
-            && &bytes[12..16] == b"IHDR",
-        "invalid artifact PNG",
-    )?;
-    let width = u32::from_be_bytes(bytes[16..20].try_into().expect("checked header"));
-    let height = u32::from_be_bytes(bytes[20..24].try_into().expect("checked header"));
-    ensure(
-        width > 0
-            && height > 0
-            && width <= 8192
-            && height <= 8192
-            && u64::from(width) * u64::from(height) <= 16_777_216,
-        "artifact dimensions exceed limit",
-    )?;
-    Ok((width, height))
+    pulse_core::browser_png_dimensions(bytes)
+        .ok_or_else(|| crate::Error::Rejected("invalid artifact PNG or dimensions".into()))
 }
 impl ArtifactRef {
     pub fn validate(&self) -> Result<()> {

@@ -15,23 +15,37 @@ impl Store {
         proposal: OperationProposal,
         now: i64,
     ) -> Result<OperationRequest> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let result = Self::propose_operation_in(&mut tx, source_event, proposal, now).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+    /// Caller owns the transaction, including its checkpoint and outbox updates.
+    pub async fn propose_operation_in(
+        db: &mut SqliteConnection,
+        source_event: &str,
+        proposal: OperationProposal,
+        now: i64,
+    ) -> Result<OperationRequest> {
         require(
             !proposal.id.is_empty()
                 && proposal.id.len() <= 128
-                && proposal.target.starts_with("fixture:")
+                && (proposal.target.starts_with("fixture:")
+                    || serde_json::from_value::<BrowserIntent>(proposal.intent.clone()).is_ok_and(
+                        |intent| intent.target() == proposal.target && intent.observation.valid(),
+                    ))
                 && proposal.target.len() > 8
                 && proposal.target.len() <= 512
                 && proposal.intent.is_object()
                 && serde_jcs::to_vec(&proposal)?.len() <= 64 * 1024,
-            "invalid or non-fixture operation proposal",
+            "invalid or unsupported operation proposal",
         )?;
         let hash = digest(&json!({"source_event":source_event,"proposal":proposal}))?;
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        verify_source(&mut tx, source_event, &proposal, now).await?;
+        verify_source(&mut *db, source_event, &proposal, now).await?;
         if let Some(data) =
             sqlx::query_scalar::<_, String>("SELECT data FROM operation_requests WHERE id=?")
                 .bind(&proposal.id)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut *db)
                 .await?
         {
             let old: OperationRequest = serde_json::from_str(&data)?;
@@ -39,23 +53,22 @@ impl Store {
                 old.intent_digest == hash,
                 "operation proposal identity conflict",
             )?;
-            tx.commit().await?;
             return Ok(old);
         }
-        let (mut task, _) = current(&mut tx, &proposal.token, now).await?;
+        let (mut task, _) = current(&mut *db, &proposal.token, now).await?;
         require(
             task.state == State::Planning
-                && task.scope == "pulse:read"
+                && target_policy(&task, &proposal, now)
                 && task.tool_calls < 16
                 && proposal.expires_at > now
                 && proposal.expires_at <= task.deadline
-                && !unresolved(&mut tx, &task.id).await?,
+                && !unresolved(&mut *db, &task.id).await?,
             "operation proposal policy, expiry or state",
         )?;
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM operation_requests WHERE task_id=?")
                 .bind(&task.id)
-                .fetch_one(&mut *tx)
+                .fetch_one(&mut *db)
                 .await?;
         require(count < 32, "operation proposal limit")?;
         let result = OperationRequest {
@@ -69,17 +82,16 @@ impl Store {
             reason: None,
             operation_id: None,
         };
-        save(&mut tx, &result).await?;
+        save(&mut *db, &result).await?;
         task.state = State::WaitingApproval;
         task.reason = Some("operation_approval_required".into());
-        put(&mut tx, "tasks", &task.id, &task).await?;
+        put(&mut *db, "tasks", &task.id, &task).await?;
         notify(
-            &mut tx,
+            &mut *db,
             &format!("operation-request:{}", result.proposal.id),
             &json!({"task_id":task.id,"request_id":result.proposal.id,"state":"waiting_approval"}),
         )
         .await?;
-        tx.commit().await?;
         Ok(result)
     }
 
@@ -91,19 +103,34 @@ impl Store {
         now: i64,
     ) -> Result<Operation> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let mut request = request(&mut tx, request_id).await?;
-        let (mut task, _) = current(&mut tx, token, now).await?;
+        let result = Self::prepare_approved_operation_in(&mut tx, token, request_id, now).await;
+        // Preserve the existing committed stop at the tool limit. Other failures roll back.
+        if result.is_ok()
+            || matches!(&result, Err(Error::Rejected(reason)) if reason == "tool call limit reached")
+        {
+            tx.commit().await?;
+        }
+        result
+    }
+    /// Approval consumption and transport dispatch must share the caller's transaction.
+    pub async fn prepare_approved_operation_in(
+        db: &mut SqliteConnection,
+        token: &Token,
+        request_id: &str,
+        now: i64,
+    ) -> Result<Operation> {
+        let mut request = request(&mut *db, request_id).await?;
+        let (mut task, _) = current(&mut *db, token, now).await?;
         require(
             request.proposal.token == *token
                 && request.state == ApprovalState::Approved
                 && request.proposal.expires_at > now
                 && task.state == State::Ready
-                && request.proposal.target.starts_with("fixture:")
-                && task.scope == "pulse:read"
-                && !unresolved(&mut tx, &task.id).await?,
+                && target_policy(&task, &request.proposal, now)
+                && !unresolved(&mut *db, &task.id).await?,
             "operation approval is stale, consumed or unavailable",
         )?;
-        verify_source(&mut tx, &request.source_event, &request.proposal, now).await?;
+        verify_source(&mut *db, &request.source_event, &request.proposal, now).await?;
         require(
             request.intent_digest
                 == digest(
@@ -117,7 +144,7 @@ impl Store {
             .ok_or_else(|| Error::Rejected("missing human approval".into()))?;
         let event = sqlx::query("SELECT origin,payload,outcome,received_at FROM events WHERE id=?")
             .bind(event_id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut *db)
             .await?
             .ok_or_else(|| Error::Missing("human approval event".into()))?;
         let payload: Value = serde_json::from_str(&event.get::<String, _>("payload"))?;
@@ -133,7 +160,7 @@ impl Store {
             |command| matches!(command,Command::ApproveOperation { binding } if binding==&expected),
         );
         let owner: String = sqlx::query_scalar("SELECT value FROM settings WHERE key='owner'")
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut *db)
             .await?;
         require(
             event.get::<String, _>("origin") == "human"
@@ -148,9 +175,8 @@ impl Store {
             "missing or invalid human approval source and binding",
         )?;
         if task.tool_calls >= 16 {
-            invalidate(&mut tx, &task.id, "tool_calls_exhausted").await?;
-            block(&mut tx, &mut task, "tool_calls_exhausted").await?;
-            tx.commit().await?;
+            invalidate(&mut *db, &task.id, "tool_calls_exhausted").await?;
+            block(&mut *db, &mut task, "tool_calls_exhausted").await?;
             return Err(Error::Rejected("tool call limit reached".into()));
         }
         let operation_id = format!("approved:{}", request.proposal.id);
@@ -165,19 +191,18 @@ impl Store {
         };
         request.state = ApprovalState::Dispatched;
         request.operation_id = Some(operation_id);
-        save(&mut tx, &request).await?;
-        put(&mut tx, "operations", &operation.id, &operation).await?;
+        save(&mut *db, &request).await?;
+        put(&mut *db, "operations", &operation.id, &operation).await?;
         task.state = State::Dispatched;
         task.tool_calls += 1;
         task.reason = Some("approved_operation_dispatched".into());
-        put(&mut tx, "tasks", &task.id, &task).await?;
+        put(&mut *db, "tasks", &task.id, &task).await?;
         notify(
-            &mut tx,
+            &mut *db,
             &format!("approved-operation:{}", operation.id),
             &json!({"task_id":task.id,"operation_id":operation.id,"state":"dispatched"}),
         )
         .await?;
-        tx.commit().await?;
         Ok(operation)
     }
 }
@@ -201,7 +226,7 @@ async fn verify_source(
         sqlx::query_scalar("SELECT COUNT(*) FROM event_tasks WHERE event_id=? AND task_id=?")
             .bind(event_id)
             .bind(&proposal.token.task_id)
-            .fetch_one(db)
+            .fetch_one(&mut *db)
             .await?;
     require(
         source.get::<String, _>("origin") == "tool"
@@ -213,6 +238,77 @@ async fn verify_source(
                 &proposal.token.task_id,
             ),
         "proposal source is not a linked, applied Tool event",
+    )?;
+    if proposal.target.starts_with("browser:") {
+        verify_browser_evidence(db, proposal).await?;
+    }
+    Ok(())
+}
+
+fn target_policy(task: &Task, proposal: &OperationProposal, now: i64) -> bool {
+    if proposal.target.starts_with("fixture:") {
+        return task.scope == "pulse:read";
+    }
+    serde_json::from_value::<BrowserIntent>(proposal.intent.clone()).is_ok_and(|intent| {
+        proposal.target == intent.target()
+            && intent.valid(&task.scope, now)
+            && proposal.expires_at <= intent.observation.expires_at
+    })
+}
+
+async fn verify_browser_evidence(
+    db: &mut SqliteConnection,
+    proposal: &OperationProposal,
+) -> Result<()> {
+    let intent: BrowserIntent = serde_json::from_value(proposal.intent.clone())?;
+    let row=sqlx::query("SELECT r.device,r.epoch,r.task_id,r.task_revision,r.result,a.metadata,a.png FROM link_reads r JOIN link_artifacts a ON a.operation_id=r.id WHERE r.id=? AND r.state='completed' AND json_extract(r.request,'$.kind') IN ('browser_inspect','browser_action') AND a.png IS NOT NULL")
+        .bind(&intent.source_operation_id).fetch_optional(&mut *db).await?
+        .ok_or_else(||Error::Rejected("browser proposal lacks original image and receipt".into()))?;
+    let outcome: ReadOutcome = serde_json::from_str(&row.get::<String, _>("result"))?;
+    let image: Value = serde_json::from_str(&row.get::<String, _>("metadata"))?;
+    let png: Vec<u8> = row.get("png");
+    let (width, height) =
+        browser_png_dimensions(&png).ok_or_else(|| Error::Rejected("invalid source PNG".into()))?;
+    let png_digest = format!("{:x}", Sha256::digest(&png));
+    let revision = proposal.token.revision.to_string();
+    require(
+        png_digest == intent.observation.png_digest
+            && image["width"] == width
+            && image["height"] == height
+            && row.get::<String, _>("device") == intent.local_device
+            && row.get::<i64, _>("epoch").to_string() == intent.local_epoch
+            && row.get::<String, _>("task_id") == proposal.token.task_id
+            && row.get::<String, _>("task_revision") == proposal.token.revision.to_string()
+            && image["digest"] == intent.observation.png_digest
+            && image["task_id"] == proposal.token.task_id
+            && image["revision"].as_str() == Some(revision.as_str())
+            && outcome.valid()
+            && matches!(&outcome,ReadOutcome::Completed{observation:Some(observation),..} if observation==&intent.observation),
+        "browser source receipt or image binding mismatch",
+    )?;
+    let source = sqlx::query(
+        "SELECT id,payload,outcome FROM events WHERE source=? AND source_id=? AND origin='tool'",
+    )
+    .bind(format!("device-result:{}", intent.local_device))
+    .bind(&intent.source_operation_id)
+    .fetch_optional(&mut *db)
+    .await?
+    .ok_or_else(|| Error::Rejected("browser receipt source missing".into()))?;
+    let payload: Value = serde_json::from_str(&source.get::<String, _>("payload"))?;
+    let linked: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM event_tasks WHERE event_id=? AND task_id=?")
+            .bind(source.get::<String, _>("id"))
+            .bind(&proposal.token.task_id)
+            .fetch_one(db)
+            .await?;
+    require(
+        payload["result"] == serde_json::to_value(outcome)?
+            && linked == 1
+            && applied_to(
+                source.get::<Option<String>, _>("outcome").as_deref(),
+                &proposal.token.task_id,
+            ),
+        "browser receipt must retain its linked Tool source",
     )
 }
 

@@ -715,6 +715,13 @@ impl Store {
         tx.commit().await?;
         Ok(effect)
     }
+    /// Adapter receipt and transport acknowledgement can share one transaction.
+    pub async fn record_receipt_in(
+        db: &mut SqliteConnection,
+        receipt: &Receipt,
+    ) -> Result<ReceiptEffect> {
+        receipt_in(db, receipt).await
+    }
 
     pub async fn reconcile(
         &self,
