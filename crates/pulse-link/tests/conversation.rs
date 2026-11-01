@@ -73,6 +73,18 @@ async fn unselected_computer_requests_ask_for_a_window_instead_of_reading_the_re
         .await
         .unwrap();
     assert_eq!(budget, 0);
+    say(
+        &hub,
+        &credential,
+        epoch,
+        "source-code",
+        "讀取程式碼 README.md 並摘要",
+    )
+    .await;
+    assert_eq!(
+        hub.core.task("task-source-code").await.unwrap().scope,
+        "pulse:read"
+    );
 }
 
 #[tokio::test]

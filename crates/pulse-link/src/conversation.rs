@@ -126,6 +126,9 @@ fn create(id: String, goal: String) -> Command {
     ]
     .iter()
     .any(|prefix| request_text(request).starts_with(prefix))
+        && !["讀取程式碼", "觀察程式碼", "操作程式碼"]
+            .iter()
+            .any(|prefix| request_text(request).starts_with(prefix))
     {
         return Command::Clarify { question:"請先按對話框的「程式視窗」選擇要讀取的視窗，再傳送需求。目前只支援觀察；點擊與輸入尚未接上。".into() };
     }
