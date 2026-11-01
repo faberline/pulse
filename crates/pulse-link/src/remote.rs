@@ -9,13 +9,13 @@ pub fn versions() -> Versions {
 }
 fn manifest(provider: Option<&Provider>) -> Versions {
     Versions {
-        workflow: "pulse-remote-4".into(),
+        workflow: "pulse-remote-5".into(),
         schema: "1".into(),
-        prompt: "effective-read-1".into(),
+        prompt: "effective-read-2".into(),
         tools: "pulse-read-1".into(),
         model: provider.map(|p| p.model).unwrap_or("unconfigured").into(),
         provider_api: "function-call-1".into(),
-        policy: "read-only-1".into(),
+        policy: "read-only-2".into(),
     }
 }
 pub async fn step(hub: &Hub, time: i64) -> Result<bool> {
@@ -49,7 +49,7 @@ pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Res
                     &run.token,
                     &call,
                     20_000,
-                    "luna-haiku-short-2026-11-01",
+                    "luna-haiku-short-ceiling-2026-11-01",
                     now(),
                 )
                 .await
@@ -78,8 +78,7 @@ pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Res
                 },
                 Ok(false) => reason = "previous_call_not_retried",
                 Err(pulse_core::Error::Rejected(_)) => {
-                    hub.notify_change();
-                    return Ok(true);
+                    reason = "model_reservation_rejected";
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -96,11 +95,10 @@ pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Res
             now(),
         )
         .await;
-    if let Err(error) = result {
-        let task = hub.core.task(&run.token.task_id).await?;
-        if task.revision == run.token.revision && task.state == State::Planning {
-            return Err(error.into());
-        }
+    if let Err(error) = result
+        && !matches!(error, pulse_core::Error::Rejected(_))
+    {
+        return Err(error.into());
     }
     hub.notify_change();
     Ok(true)

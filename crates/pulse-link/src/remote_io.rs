@@ -65,10 +65,23 @@ impl Hub {
             task
         };
         let history = self.model_history(run).await?;
+        let mut prior_evidence = Vec::new();
+        if history.is_empty() {
+            // A manually requested read has no provider tool-call ID. Keep it as data.
+            let rows=sqlx::query("SELECT id,request,result FROM link_reads WHERE task_id=? AND task_revision=? AND state IN ('completed','rejected') ORDER BY rowid DESC LIMIT 4").bind(&task.id).bind(task.revision.to_string()).fetch_all(&self.db).await?;
+            for row in rows {
+                let mut outcome: ReadOutcome =
+                    serde_json::from_str(&row.get::<String, _>("result"))?;
+                ensure(outcome.valid(), "invalid prior evidence")?;
+                trim_evidence(&mut outcome);
+                let operation: ReadOp = serde_json::from_str(&row.get::<String, _>("request"))?;
+                prior_evidence.push(json!({"operation_id":row.get::<String,_>("id"),"operation":operation,"outcome":outcome}));
+            }
+        }
         let prompt = serde_json::to_string(&json!({
             "goal":task.goal,"effective_decision":task.decisions.last(),
             "task_id":task.id,"revision":task.revision.to_string(),
-            "authorization_event":task.authorization_event,"scope":task.scope
+            "authorization_event":task.authorization_event,"scope":task.scope,"prior_read_evidence":prior_evidence
         }))?;
         Ok((prompt, history))
     }
@@ -84,6 +97,11 @@ impl Hub {
         ensure(
             task.state == State::Planning && task.scope == "pulse:read" && task.tool_calls < 16,
             "model proposal policy",
+        )?;
+        let repeated:i64=sqlx::query_scalar("SELECT COUNT(*) FROM link_reads WHERE task_id=? AND task_revision=? AND request=? AND state='completed'").bind(&task.id).bind(task.revision.to_string()).bind(serde_json::to_string(&call.operation)?).fetch_one(&mut *tx).await?;
+        ensure(
+            repeated == 0,
+            "completed read evidence already exists; review or revise the request",
         )?;
         let round = run.checkpoint["round"].as_u64().unwrap_or(0);
         let mut calls: Vec<ProposedRead> =
@@ -233,20 +251,23 @@ impl Hub {
         for read in calls {
             let encoded:String=sqlx::query_scalar("SELECT result FROM link_reads WHERE id=? AND task_id=? AND task_revision=? AND state IN ('completed','rejected')").bind(&read.operation_id).bind(&run.token.task_id).bind(run.token.revision.to_string()).fetch_one(&self.db).await?;
             let mut outcome: ReadOutcome = serde_json::from_str(&encoded)?;
-            if let ReadOutcome::Completed {
-                text, truncated, ..
-            } = &mut outcome
-                && text.len() > 2500
-            {
-                let end = text.floor_char_boundary(2500);
-                text.truncate(end);
-                *truncated = true;
-            }
+            trim_evidence(&mut outcome);
             history.push(Exchange {
                 call: read.call,
                 outcome,
             });
         }
         Ok(history)
+    }
+}
+
+fn trim_evidence(outcome: &mut ReadOutcome) {
+    if let ReadOutcome::Completed {
+        text, truncated, ..
+    } = outcome
+        && text.len() > 2500
+    {
+        text.truncate(text.floor_char_boundary(2500));
+        *truncated = true;
     }
 }

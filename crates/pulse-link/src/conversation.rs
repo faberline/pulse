@@ -16,6 +16,21 @@ pub(crate) fn status(task: &Task) -> String {
         Succeeded => "已完成驗收",
         Failed => "未完成",
         Blocked if task.reason.as_deref() == Some("model_reply_ready") => "分析已保存，待確認",
+        Blocked if task.reason.as_deref() == Some("budget_exhausted") => "已達費用上限",
+        Blocked if task.reason.as_deref() == Some("model_calls_exhausted") => "已達模型呼叫上限",
+        Blocked if task.reason.as_deref() == Some("deadline_exhausted") => "已達任務時間上限",
+        Blocked
+            if matches!(
+                task.reason.as_deref(),
+                Some("provider_call_failed_cost_reserved" | "previous_call_not_retried")
+            ) =>
+        {
+            "模型結果或費用待核對，暫不重送"
+        }
+        Blocked if task.reason.as_deref() == Some("read_receipts_verified") => "證據已核對，可繼續",
+        Blocked if task.reason.as_deref() == Some("device_result_ready_model_not_connected") => {
+            "結果已保存，請先核對"
+        }
         Blocked => "已停止，需確認原因",
     };
     format!("{} · {state} · 修訂 {}", label(task), task.revision)
@@ -117,7 +132,7 @@ fn line(id: &str, text: &str, tasks: &[Task]) -> Vec<Command> {
             })
             .unwrap_or_else(clarify);
     }
-    let action = ["取消", "停止", "繼續", "修改", "補充", "查詢"]
+    let action = ["取消", "停止", "繼續", "修改", "補充", "查詢", "核對"]
         .into_iter()
         .find_map(|verb| text.strip_prefix(verb).map(|rest| (verb, rest.trim())));
     if let Some((verb, rest)) = action {
@@ -163,7 +178,12 @@ fn line(id: &str, text: &str, tasks: &[Task]) -> Vec<Command> {
         return targets
             .into_iter()
             .map(|task| {
-                if verb == "繼續" {
+                if verb == "核對" {
+                    Command::ReconcileRead {
+                        id: task.id.clone(),
+                        expected_revision: task.revision,
+                    }
+                } else if verb == "繼續" {
                     Command::Resume {
                         id: task.id.clone(),
                         expected_revision: task.revision,
@@ -179,7 +199,7 @@ fn line(id: &str, text: &str, tasks: &[Task]) -> Vec<Command> {
     }
     // Detect control without a supported, unambiguous target. Do not guess the latest task.
     if [
-        "取消", "停止", "繼續", "修改", "改成", "查詢", "刪除", "刪掉",
+        "取消", "停止", "繼續", "修改", "改成", "查詢", "核對", "刪除", "刪掉",
     ]
     .iter()
     .any(|word| text.contains(word))
@@ -204,9 +224,11 @@ pub(crate) fn plan(id: &str, text: &str, tasks: &[Task]) -> Vec<Command> {
     // Multi-action input needs explicit lines. Ordinary multiline prose stays one goal.
     let explicit = |s: &str| {
         name(s).is_some()
-            || ["取消 ", "停止 ", "繼續 ", "修改 ", "補充 ", "查詢 "]
-                .iter()
-                .any(|v| s.starts_with(v))
+            || [
+                "取消 ", "停止 ", "繼續 ", "修改 ", "補充 ", "查詢 ", "核對 ",
+            ]
+            .iter()
+            .any(|v| s.starts_with(v))
     };
     let pieces = if lines.len() > 1 && lines.iter().all(|s| explicit(s)) {
         lines
@@ -244,7 +266,8 @@ pub(crate) fn plan(id: &str, text: &str, tasks: &[Task]) -> Vec<Command> {
             let target = match command {
                 Command::Revise { id, .. }
                 | Command::Cancel { id, .. }
-                | Command::Resume { id, .. } => Some(id),
+                | Command::Resume { id, .. }
+                | Command::ReconcileRead { id, .. } => Some(id),
                 _ => None,
             };
             if let Some(target) = target

@@ -562,6 +562,29 @@ impl Hub {
                     )
                     .await?;
                 let outcome = self.core.route(&event.event_id).await?;
+                if let (
+                    pulse_core::Outcome::Rejected { reason },
+                    HumanAction::Submit { goal, .. },
+                ) = (&outcome, action)
+                {
+                    let notice = match reason.as_str() {
+                        "read outcome is still unknown" | "missing read receipt" => {
+                            "結果仍未知。請等待本機回報；目前不會重新執行。"
+                        }
+                        "model cost is still unknown; keep reservations" => {
+                            "模型費用仍待核對。已保留預算，未重新呼叫。"
+                        }
+                        "read evidence must be reviewed first" => {
+                            "請先核對已保存的工具證據，再要求繼續。"
+                        }
+                        "no local outcome to review" => "沒有待核對的本機結果。任務保持原狀。",
+                        _ => "要求未執行。請查詢目前任務狀態，核對對象與限制。",
+                    };
+                    self.chat(source_id, &format!("已保存訊息：{goal}"), time)
+                        .await?;
+                    self.chat(&format!("reply:{source_id}"), notice, time)
+                        .await?;
+                }
                 ensure(
                     !matches!(outcome, pulse_core::Outcome::Rejected { .. }),
                     "task control rejected",

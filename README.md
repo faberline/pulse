@@ -8,7 +8,7 @@ Pulse 是單人使用的事件驅動助理。它有三個元件：server、對�
 
 remote executor 由 Pulse 自己實作。它沿用現有 `pulse-core` 的持久任務、派工、checkpoint 與恢復機制。它不需要對應一台 VM，也不依賴 AW。實際模型與工具執行迴圈接續 v0.4。
 
-v0.4 候選已接上自有 remote、Luna／Haiku 原生工具提議及 local 只讀證據迴圈。預設使用 Luna，可用 `PULSE_PROVIDER=anthropic` 選 Haiku。回覆及用量持久保存，模型不能自行驗收任務。兩家 API 的原生桌面 A/B 交錯、有效決策修訂、查詢、歧義澄清與重啟已實測。晚到結果的核對／安全續推仍待完成，見 [對話候選](docs/v0.4-conversation.md)。詳見 [v0.4 remote](docs/v0.4-remote.md)。
+v0.4 候選已接上自有 remote、Luna／Haiku 原生工具提議及 local 只讀證據迴圈。預設使用 Luna，可用 `PULSE_PROVIDER=anthropic` 選 Haiku。回覆及用量持久保存，模型不能自行驗收任務。兩家 API 的原生桌面 A/B 交錯、有效決策修訂、查詢、歧義澄清與重啟已實測。晚到結果已加入人類核對與安全續推，並通過真正斷線／server 重啟實測，見 [對話候選](docs/v0.4-conversation.md) 與 [核對候選](docs/v0.4-recovery.md)。詳見 [v0.4 remote](docs/v0.4-remote.md)。
 
 主畫面只有一個可換行的對話輸入框。連線與配對在「設定」；任務與工具操作在可收起的「進度」。圖片以系統選取視窗開啟，不必輸入路徑。
 

@@ -89,6 +89,56 @@ async fn real_providers_save_reply_and_settle_budget() {
 }
 
 #[tokio::test]
+async fn late_model_text_and_proposals_cannot_override_revision_or_deadline() {
+    for revised in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = Hub::new(Store::open(dir.path().join("db"), "owner").await.unwrap());
+        task(&hub, "target").await;
+        let run = hub
+            .core
+            .claim_next(&remote::versions(), pulse_link::now())
+            .await
+            .unwrap()
+            .unwrap();
+        let time = if revised {
+            let event=hub.core.ingest(Origin::Human,"test","revise",json!({"commands":[{"kind":"revise","id":"target","expected_revision":"1","goal":"NEW_GOAL"}]}),pulse_link::now()).await.unwrap();
+            hub.core.route(&event.event_id).await.unwrap();
+            pulse_link::now()
+        } else {
+            hub.core.task("target").await.unwrap().deadline
+        };
+        let reply = pulse_link::provider::Reply {
+            text: "old answer".into(),
+            tool: None,
+            usage: json!({}),
+            cost: 1,
+        };
+        assert!(
+            hub.model_reply(&run.token, &reply, "fixture", time)
+                .await
+                .is_err()
+        );
+        assert!(
+            hub.model_proposal(&run.token, &proposal(), time)
+                .await
+                .is_err()
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM link_chat")
+            .fetch_one(&hub.core.application_pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        if !revised {
+            assert!(!remote::step(&hub, time).await.unwrap());
+            assert_eq!(
+                hub.core.task("target").await.unwrap().reason.as_deref(),
+                Some("deadline_exhausted")
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn remote_scheduling_is_durable_and_never_claims_missing_provider_succeeded() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("server.db");
@@ -427,7 +477,7 @@ async fn real_providers_read_local_evidence_and_continue_same_run() {
                 &cut.token,
                 &call,
                 20000,
-                "luna-haiku-short-2026-11-01",
+                "luna-haiku-short-ceiling-2026-11-01",
                 pulse_link::now(),
             )
             .await

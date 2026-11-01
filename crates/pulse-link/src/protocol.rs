@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 pub const MAX_FRAME: usize = 256 * 1024;
 pub const MAX_IPC: usize = 1024 * 1024;
 // Reserve room for worst-case JSON escaping within a 256 KiB frame.
-pub const MAX_RESULT: usize = 32 * 1024;
+pub const MAX_RESULT: usize = pulse_core::MAX_READ_RESULT;
 pub const LEASE_MS: i64 = 60_000;
 
 /// The server binds this role when it creates a one-use pairing code.
@@ -77,42 +77,7 @@ pub enum DevicePayload {
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ReadOutcome {
-    Completed {
-        text: String,
-        digest: String,
-        truncated: bool,
-    },
-    Rejected {
-        reason: String,
-    },
-    Unknown {
-        reason: String,
-    },
-}
-
-impl ReadOutcome {
-    pub fn text(text: String, truncated: bool) -> Self {
-        let digest = hash_bytes(text.as_bytes());
-        Self::Completed {
-            text,
-            digest,
-            truncated,
-        }
-    }
-    pub fn valid(&self) -> bool {
-        match self {
-            Self::Completed { text, digest, .. } => {
-                text.len() <= MAX_RESULT && *digest == hash_bytes(text.as_bytes())
-            }
-            Self::Rejected { reason } | Self::Unknown { reason } => {
-                !reason.is_empty() && reason.len() <= 1024
-            }
-        }
-    }
-}
+pub use pulse_core::ReadOutcome;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
