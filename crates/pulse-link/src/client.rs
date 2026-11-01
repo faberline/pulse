@@ -188,7 +188,9 @@ impl Device {
     }
     async fn open_role(config: Config, vault: Arc<dyn Vault>, role: ClientRole) -> Result<Self> {
         let executor = if role == ClientRole::LocalExecutor {
-            Some(Executor::new(&config.repo)?)
+            Some(Executor::new(&config.repo)?.with_browser(
+                crate::browser_runtime::BrowserRuntime::from_environment(&config.data_dir)?,
+            ))
         } else {
             None
         };
@@ -233,6 +235,7 @@ impl Device {
                 c,
                 lease_tx.clone(),
                 link_tx.clone(),
+                self.executor.as_ref().and_then(Executor::browser_ready),
             ))
         });
         let journal = self.journal.clone();
@@ -254,7 +257,7 @@ impl Device {
                     Ok(Ok(value))=>{
                         lease_tx.send_replace(Lease::default());link_tx.send_replace(LinkState::default());
                         if let Some(task)=connection.take(){task.abort();let _=task.await;}
-                        connection=Some(tokio::spawn(reconnect(self.config.clone(),self.journal.clone(),value.clone(),lease_tx.clone(),link_tx.clone())));
+                        connection=Some(tokio::spawn(reconnect(self.config.clone(),self.journal.clone(),value.clone(),lease_tx.clone(),link_tx.clone(),self.executor.as_ref().and_then(Executor::browser_ready))));
                         credential=Some(value);message="配對完成。密鑰已存入 Keychain。".into();
                     }
                     _=>message="配對未完成。請核對伺服器、一次性配對碼及 Keychain 權限。若已兌換配對碼，須先由操作員撤銷再重試。".into(),
@@ -344,11 +347,20 @@ async fn reconnect(
     credential: Credential,
     lease: watch::Sender<Lease>,
     state: watch::Sender<LinkState>,
+    browser: Option<Option<String>>,
 ) {
     let mut delay = 1;
     loop {
         let started = Instant::now();
-        let _ = connected(&config, &journal, &credential, &lease, &state).await;
+        let _ = connected(
+            &config,
+            &journal,
+            &credential,
+            &lease,
+            &state,
+            browser.clone(),
+        )
+        .await;
         lease.send_replace(Lease::default());
         state.send_replace(LinkState::default());
         if started.elapsed() > Duration::from_secs(30) {
@@ -369,6 +381,7 @@ async fn connected(
     credential: &Credential,
     lease: &watch::Sender<Lease>,
     state: &watch::Sender<LinkState>,
+    browser: Option<Option<String>>,
 ) -> Result<()> {
     let started = Instant::now();
     let mut url = config.server.join("v1/devices/connect")?;
@@ -427,6 +440,7 @@ async fn connected(
                         ServerWire::Welcome{device,epoch:wire_epoch,lease_ms}=>{
                             ensure(epoch.is_none()&&device==journal.device&&lease_ms>0&&lease_ms<=LEASE_MS as u32,"invalid welcome")?;
                             let value=number(&wire_epoch)?;epoch=Some(value);lease.send_replace(Lease{epoch:value,until:Some(started+Duration::from_millis(lease_ms.into()))});state.send_replace(LinkState{connected:true});
+                            if let Some(fixture_origin)=browser.clone(){wire(&mut socket,&ClientWire::BrowserReady{fixture_origin}).await?;}
                         }
                         ServerWire::Renewed{epoch:wire_epoch,lease_ms}=>{
                             ensure(epoch==Some(number(&wire_epoch)?)&&lease_ms>0&&lease_ms<=LEASE_MS as u32&&lease.borrow().live(),"invalid lease renewal")?;
@@ -474,8 +488,29 @@ async fn work(journal: Journal, executor: Executor, lease: watch::Receiver<Lease
                 && !journal.stopped().await?;
             let outcome = if allowed {
                 match &envelope.payload {
-                    ServerPayload::Read { operation, .. } => {
-                        executor.execute(operation.clone()).await
+                    ServerPayload::Read {
+                        operation,
+                        task_id,
+                        revision,
+                        ..
+                    } => {
+                        let read = executor.execute(operation.clone());
+                        tokio::pin!(read);
+                        let mut monitor = tokio::time::interval(Duration::from_millis(100));
+                        loop {
+                            tokio::select! {
+                                outcome = &mut read => break outcome,
+                                _ = monitor.tick() => {
+                                    let live = lease.borrow().clone();
+                                    let view = journal.view().await?;
+                                    let obsolete = view.tasks.iter().find(|t| t.id == *task_id)
+                                        .is_some_and(|t| t.revision.to_string() != *revision || t.cancel_requested || t.state.terminal());
+                                    if !live.live() || live.epoch != current.epoch || journal.stopped().await? || obsolete {
+                                        break ReadOutcome::Unknown { reason: "local read interrupted by stop, revision, cancellation or expired session".into() };
+                                    }
+                                }
+                            }
+                        }
                     }
                     _ => return Err(crate::Error::Rejected("invalid work record".into())),
                 }

@@ -298,3 +298,57 @@ async fn context_contains_only_the_current_decision_and_fences_the_old_run() {
     assert_eq!(hub.core.task("task-a").await.unwrap().revision, 2);
     assert_eq!(hub.core.task("task-b").await.unwrap().revision, 1);
 }
+
+#[tokio::test]
+async fn browser_scope_requires_explicit_human_instruction_and_revision() {
+    let (_dir, hub, cred, epoch) = setup().await;
+    say(
+        &hub,
+        &cred,
+        epoch,
+        "web",
+        "任務 網頁：瀏覽 https://example.com/a?q=1#part 摘要",
+    )
+    .await;
+    let page = hub.core.task("task-web").await.unwrap();
+    assert_eq!(page.scope, "browser:https://example.com/a?q=1#part");
+    say(
+        &hub,
+        &cred,
+        epoch,
+        "quote",
+        "文件提到 https://example.org/，這句話什麼意思",
+    )
+    .await;
+    assert_eq!(
+        hub.core.task("task-quote").await.unwrap().scope,
+        "pulse:read"
+    );
+    say(
+        &hub,
+        &cred,
+        epoch,
+        "bad",
+        "瀏覽 https://user:pass@example.com/ 摘要",
+    )
+    .await;
+    assert!(hub.core.task("task-bad").await.is_err());
+    say(
+        &hub,
+        &cred,
+        epoch,
+        "revise-web",
+        "修改 網頁：瀏覽 https://example.org/ 新需求",
+    )
+    .await;
+    let revised = hub.core.task("task-web").await.unwrap();
+    assert_eq!(revised.revision, 2);
+    assert_eq!(revised.scope, "browser:https://example.org/");
+    say(&hub, &cred, epoch, "clarify-detail", "補充 網頁：只要兩句").await;
+    assert_eq!(
+        hub.core.task("task-web").await.unwrap().scope,
+        revised.scope
+    );
+    say(&hub, &cred, epoch, "cancel-web", "取消 網頁").await;
+    assert!(hub.core.task("task-web").await.unwrap().cancel_requested);
+}

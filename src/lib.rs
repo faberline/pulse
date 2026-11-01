@@ -2,10 +2,12 @@
 //! Callers are trusted application code; transport authentication belongs to v0.3.
 mod model;
 mod read;
+mod scope;
 mod store;
 
 pub use model::*;
 pub use read::*;
+pub use scope::*;
 pub use store::Store;
 
 #[derive(Debug, thiserror::Error)]

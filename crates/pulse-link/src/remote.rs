@@ -9,13 +9,13 @@ pub fn versions() -> Versions {
 }
 fn manifest(provider: Option<&Provider>) -> Versions {
     Versions {
-        workflow: "pulse-remote-7".into(),
+        workflow: "pulse-remote-8".into(),
         schema: "1".into(),
-        prompt: "effective-read-2".into(),
-        tools: "pulse-read-2".into(),
+        prompt: "effective-read-3".into(),
+        tools: "pulse-read-3".into(),
         model: provider.map(|p| p.model).unwrap_or("unconfigured").into(),
         provider_api: "function-call-1".into(),
-        policy: "read-only-2".into(),
+        policy: "read-only-3".into(),
     }
 }
 pub async fn step(hub: &Hub, time: i64) -> Result<bool> {
@@ -34,6 +34,7 @@ pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Res
         }
         return Ok(true);
     }
+    hub.gate_browser_tasks(time).await?;
     match hub.dispatch_model_read(&manifest(provider), time).await {
         Ok(true) => return Ok(true),
         Ok(false) | Err(crate::Error::Capacity) => {}
@@ -52,7 +53,7 @@ pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Res
     let mut reason = "provider_not_configured";
     if let Some(provider) = provider {
         let task = hub.core.task(&run.token.task_id).await?;
-        if task.scope != "pulse:read" {
+        if !pulse_core::read_scope(&task.scope) {
             reason = "scope_not_supported";
         } else {
             let (prompt, history) = match hub.model_context(&run).await {
@@ -60,7 +61,7 @@ pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Res
                 Err(crate::Error::Rejected(_)) => return Ok(true),
                 Err(error) => return Err(error),
             };
-            match provider.prepare(&prompt, &history) {
+            match provider.prepare_for_scope(&prompt, &history, &task.scope) {
                 Err(_) => reason = "provider_request_invalid",
                 Ok(request) => {
                     let round = run.checkpoint["round"].as_u64().unwrap_or(0);

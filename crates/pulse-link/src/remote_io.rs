@@ -95,7 +95,9 @@ impl Hub {
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
         let (mut task, mut run) = current(&mut tx, token, time).await?;
         ensure(
-            task.state == State::Planning && task.scope == "pulse:read" && task.tool_calls < 16,
+            task.state == State::Planning
+                && call.operation.permitted_by(&task.scope)
+                && task.tool_calls < 16,
             "model proposal policy",
         )?;
         let canonical = call.operation.canonical()?;
@@ -133,10 +135,10 @@ impl Hub {
     /// Wait without model calls while no live worker is free. Dispatch once in one transaction.
     pub async fn dispatch_model_read(&self, versions: &Versions, time: i64) -> Result<bool> {
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
-        let worker=sqlx::query("SELECT id,epoch FROM link_device WHERE role='local_executor' AND revoked=0 AND stopped=0 AND lease_until>? AND NOT EXISTS(SELECT 1 FROM link_reads WHERE device=link_device.id AND state IN ('sent','accepted','unknown'))").bind(time).fetch_optional(&mut *tx).await?;
-        let Some(worker) = worker else {
+        let workers=sqlx::query("SELECT id,epoch FROM link_device WHERE role='local_executor' AND revoked=0 AND stopped=0 AND lease_until>? AND NOT EXISTS(SELECT 1 FROM link_reads WHERE device=link_device.id AND state IN ('sent','accepted','unknown')) ORDER BY id").bind(time).fetch_all(&mut *tx).await?;
+        if workers.is_empty() {
             return Ok(false);
-        };
+        }
         let rows:Vec<String>=sqlx::query_scalar("SELECT data FROM tasks WHERE json_extract(data,'$.state')='waiting_device' ORDER BY json_extract(data,'$.created_at'),id").fetch_all(&mut *tx).await?;
         for data in rows {
             let task: Task = serde_json::from_str(&data)?;
@@ -164,8 +166,22 @@ impl Hub {
             let read = calls
                 .last()
                 .ok_or_else(|| crate::Error::Rejected("missing durable proposal".into()))?;
-            let device: String = worker.get("id");
-            let epoch: i64 = worker.get("epoch");
+            ensure(
+                read.call.operation.permitted_by(&task.scope),
+                "dispatch outside Human scope",
+            )?;
+            let mut selected = None;
+            for worker in &workers {
+                let device: String = worker.get("id");
+                let epoch: i64 = worker.get("epoch");
+                if Self::browser_capable(&mut tx, &device, epoch, &read.call.operation).await? {
+                    selected = Some((device, epoch));
+                    break;
+                }
+            }
+            let Some((device, epoch)) = selected else {
+                continue;
+            };
             pulse_core::Store::authorize_remote_read(&mut tx, &run.token, &read.operation_id, time)
                 .await?;
             sqlx::query("INSERT INTO link_reads VALUES(?,?,?,?,?,?,'sent',NULL)")

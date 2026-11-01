@@ -159,6 +159,8 @@ pub enum Command {
         #[serde(with = "decimal")]
         expected_revision: u64,
         goal: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
     },
     Cancel {
         id: String,

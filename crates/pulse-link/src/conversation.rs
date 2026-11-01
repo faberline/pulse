@@ -7,6 +7,9 @@ pub(crate) fn status(task: &Task) -> String {
         Queued => "等待處理",
         Planning | Ready | Running => "分析中",
         Dispatched => "本機讀取中",
+        WaitingDevice if task.reason.as_deref() == Some("browser_capability_wait") => {
+            "等待本機瀏覽器；請核對安裝與網址範圍"
+        }
         WaitingDevice => "等待本機連線",
         WaitingApproval => "等待確認",
         RetryWait => "等待重試",
@@ -94,15 +97,40 @@ fn selected<'a>(text: &str, tasks: &'a [Task]) -> Option<Vec<&'a Task>> {
     Some(result)
 }
 fn create(id: String, goal: String) -> Command {
+    let request = name(request_text(&goal))
+        .map(|(_, goal)| goal)
+        .unwrap_or(&goal);
+    let scope =
+        match browser_scope(request) {
+            Ok(scope) => scope.unwrap_or_else(|| "pulse:read".into()),
+            Err(()) => return Command::Clarify {
+                question:
+                    "請用「瀏覽 https://網址 需求」指定一個網址。不能使用登入憑證或私密網址參數。"
+                        .into(),
+            },
+        };
     Command::Create {
         id,
         goal,
-        scope: "pulse:read".into(),
+        scope,
         priority: 0,
         requires_device: false,
         parent: None,
         dependencies: vec![],
     }
+}
+// Only an explicit Human browser instruction selects the resource. Incidental URLs do not.
+fn browser_scope(text: &str) -> std::result::Result<Option<String>, ()> {
+    let text = request_text(text);
+    let Some(rest) = ["用瀏覽器讀取", "用瀏覽器開啟", "瀏覽", "browser "]
+        .iter()
+        .find_map(|prefix| text.strip_prefix(prefix))
+    else {
+        return Ok(None);
+    };
+    let url = rest.split_whitespace().next().ok_or(())?;
+    let url = pulse_core::browser_url(&format!("browser:{url}")).ok_or(())?;
+    Ok(Some(format!("browser:{url}")))
 }
 fn request_text(text: &str) -> &str {
     let mut text = text.trim().trim_end_matches(['。', '？', '?']).trim();
@@ -188,6 +216,10 @@ fn line(id: &str, text: &str, tasks: &[Task]) -> Vec<Command> {
                 return clarify();
             }
             let task = targets[0];
+            let scope = match browser_scope(goal) {
+                Ok(scope) => scope,
+                Err(()) => return clarify(),
+            };
             let goal = if verb == "補充" {
                 format!("{}\n補充要求：{goal}", task.goal)
             } else if task
@@ -206,6 +238,7 @@ fn line(id: &str, text: &str, tasks: &[Task]) -> Vec<Command> {
                 id: task.id.clone(),
                 expected_revision: task.revision,
                 goal,
+                scope,
             }];
         }
         let Some(targets) = selected(rest, tasks) else {

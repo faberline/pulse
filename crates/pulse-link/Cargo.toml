@@ -21,6 +21,7 @@ serde_jcs = "0.2"
 sha2 = "0.10"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite"] }
 thiserror = "2"
+tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 url = "2"
@@ -30,7 +31,6 @@ uuid = { version = "1", features = ["v4"] }
 security-framework = "3"
 
 [dev-dependencies]
-tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 
 [lints.rust]

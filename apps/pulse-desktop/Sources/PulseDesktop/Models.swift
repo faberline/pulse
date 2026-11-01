@@ -16,17 +16,20 @@ struct ChatMessage: Decodable, Identifiable, Sendable {
 }
 struct PulseTask: Decodable, Identifiable, Sendable {
   enum CodingKeys: String, CodingKey {
-    case id, goal, revision, state
+    case id, goal, revision, state, scope, reason
     case cancelRequested = "cancel_requested"
   }
   let id: String
   let goal: String
   let revision: String
   let state: String
+  let scope: String?
+  let reason: String?
   let cancelRequested: Bool
   var terminal: Bool { ["succeeded", "failed", "cancelled"].contains(state) }
   var status: String {
-    [
+    if reason == "browser_capability_wait" { return "等待本機瀏覽器；請核對安裝與網址範圍" }
+    return [
       "queued": "排隊中", "planning": "規劃中", "dispatched": "已派工", "running": "執行中",
       "blocked": "等待下一步", "waiting_device": "等待本機", "cancelled": "已取消",
       "succeeded": "已完成", "failed": "未完成", "outcome_unknown": "結果待核對",
