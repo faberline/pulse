@@ -14,6 +14,8 @@ final class ChatModel: ObservableObject {
   @Published var image: NSImage?
   @Published var imageName = ""
   @Published var browserImages: [String: NSImage] = [:]
+  @Published var browserImageDigests: [String: String] = [:]
+  @Published var browserDecisionPending: [String: String] = [:]
   private var loadingBrowserImages = Set<String>()
   private var requestedBrowserImages = Set<String>()
   private var failedBrowserImages = Set<String>()
@@ -56,7 +58,7 @@ final class ChatModel: ObservableObject {
       pending = nil
       state = NativeState()
       selectedTask = nil
-      browserImages = [:]; loadingBrowserImages = []; requestedBrowserImages = []; failedBrowserImages = []; imageRequestInFlight = nil
+      browserImages = [:]; browserImageDigests = [:]; loadingBrowserImages = []; requestedBrowserImages = []; failedBrowserImages = []; imageRequestInFlight = nil
     }
     activeBinding = settings.binding
     generation = UUID()
@@ -86,8 +88,13 @@ final class ChatModel: ObservableObject {
   func receive(_ value: NativeState, generation id: UUID) {
     guard generation == id else { return }
     state = value
-    let liveImages = Set(value.messages.filter { $0.artifact != nil }.map(\.id))
+    browserDecisionPending = value.connected ? browserDecisionPending.filter { id, previous in value.messages.first(where: { $0.approval?.proposal.id == id })?.approval?.state == previous } : [:]
+    let liveImages = Set(value.messages.filter { $0.artifact != nil }.map(\.artifactID))
     browserImages = browserImages.filter { liveImages.contains($0.key) }
+    browserImageDigests = browserImageDigests.filter { liveImages.contains($0.key) }
+    for message in value.messages where message.artifact != nil && browserImageDigests[message.artifactID] != nil && browserImageDigests[message.artifactID] != message.artifact?.digest {
+      browserImages.removeValue(forKey: message.artifactID); browserImageDigests.removeValue(forKey: message.artifactID); requestedBrowserImages.remove(message.artifactID)
+    }
     let cachedArtifacts = value.artifacts ?? []
     if let id = imageRequestInFlight, cachedArtifacts.contains(where: { $0.operation_id == id }) || value.artifact_failure == id {
       imageRequestInFlight = nil
@@ -100,12 +107,14 @@ final class ChatModel: ObservableObject {
         let data = await Task.detached { verifiedBrowserImageData(cached, directory: directory) }.value
         guard self.generation == generation else { return }
         self.loadingBrowserImages.remove(cached.operation_id)
-        if let data, let image = NSImage(data: data) { self.browserImages[cached.operation_id] = image }
+        if let data, let image = NSImage(data: data), self.state.messages.contains(where: { $0.artifactID == cached.operation_id && $0.artifact?.digest == cached.artifact.digest }) {
+          self.browserImages[cached.operation_id] = image; self.browserImageDigests[cached.operation_id] = cached.artifact.digest
+        }
         else { self.failedBrowserImages.insert(cached.operation_id) }
       }
     }
     if value.connected, imageRequestInFlight == nil, value.artifact_loading == nil,
-      let message = value.messages.first(where: { message in message.artifact != nil && !requestedBrowserImages.contains(message.id) && !cachedArtifacts.contains(where: { $0.operation_id == message.id }) }) {
+      let message = value.messages.first(where: { message in message.artifact != nil && !requestedBrowserImages.contains(message.artifactID) && !cachedArtifacts.contains(where: { $0.operation_id == message.artifactID }) }) {
       loadBrowserArtifact(message)
     }
     if let pending {
@@ -147,10 +156,16 @@ final class ChatModel: ObservableObject {
   }
   func loadBrowserArtifact(_ message: ChatMessage) {
     guard let artifact = message.artifact, imageRequestInFlight == nil else { return }
-    failedBrowserImages.remove(message.id)
-    if send(["kind": "load_artifact", "operation_id": message.id, "digest": artifact.digest]) {
-      requestedBrowserImages.insert(message.id); imageRequestInFlight = message.id
+    failedBrowserImages.remove(message.artifactID)
+    if send(["kind": "load_artifact", "operation_id": message.artifactID, "digest": artifact.digest]) {
+      requestedBrowserImages.insert(message.artifactID); imageRequestInFlight = message.artifactID
     }
+  }
+  func decideBrowserOperation(_ request: BrowserApproval, approve: Bool) {
+    guard browserDecisionPending[request.proposal.id] == nil else { return }
+    let decision: [String: Any] = ["kind": "decide_operation", "binding": ["task_id": request.proposal.token.task_id, "expected_revision": request.proposal.token.revision, "request_id": request.proposal.id, "intent_digest": request.intent_digest], "approve": approve]
+    if send(["kind": "action", "source_id": UUID().uuidString, "action": decision]) { browserDecisionPending[request.proposal.id] = request.state }
+    else { notice = "操作決定尚未保存。請重新連線後再試。" }
   }
   func toggleLocal() { send(["kind": "kill_switch", "stopped": !state.stopped]) }
   func pickDataDirectory() {

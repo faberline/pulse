@@ -236,6 +236,9 @@ impl Device {
                 lease_tx.clone(),
                 link_tx.clone(),
                 self.executor.as_ref().and_then(Executor::browser_ready),
+                self.executor
+                    .as_ref()
+                    .is_some_and(Executor::browser_interactions),
             ))
         });
         let journal = self.journal.clone();
@@ -262,7 +265,7 @@ impl Device {
                 match completed {
                     Ok(Ok(image))=>{match self.journal.save_artifact(&image).await {
                         Ok(())=>message="截圖已核對並保存。".into(),
-                        Err(crate::Error::Rejected(_))=>message="截圖來源已更新。請重新選取。".into(),
+                        Err(crate::Error::Rejected(_))=>{artifact_failure=loaded_id;message="截圖來源已更新。請重新選取。".into();},
                         Err(error)=>return Err(error),
                     }}
                     _=>{artifact_failure=loaded_id;message="截圖尚未取得。可按截圖重試；不會重新瀏覽。".into();},
@@ -274,7 +277,7 @@ impl Device {
                     Ok(Ok(value))=>{
                         lease_tx.send_replace(Lease::default());link_tx.send_replace(LinkState::default());
                         if let Some(task)=connection.take(){task.abort();let _=task.await;}
-                        connection=Some(tokio::spawn(reconnect(self.config.clone(),self.journal.clone(),value.clone(),lease_tx.clone(),link_tx.clone(),self.executor.as_ref().and_then(Executor::browser_ready))));
+                        connection=Some(tokio::spawn(reconnect(self.config.clone(),self.journal.clone(),value.clone(),lease_tx.clone(),link_tx.clone(),self.executor.as_ref().and_then(Executor::browser_ready),self.executor.as_ref().is_some_and(Executor::browser_interactions))));
                         credential=Some(value);message="配對完成。密鑰已存入 Keychain。".into();
                     }
                     _=>message="配對未完成。請核對伺服器、一次性配對碼及 Keychain 權限。若已兌換配對碼，須先由操作員撤銷再重試。".into(),
@@ -293,7 +296,7 @@ impl Device {
                         if let Some(credential)=credential.clone() {
                             match self.journal.artifact_request(&operation_id,&digest).await {
                                 Ok(artifact)=>{artifact_loading=Some(operation_id.clone());artifact_failure=None;message="正在載入截圖…".into();let config=self.config.clone();artifact_download=Some(tokio::spawn(async move{crate::artifact_client::download(&config,&credential,&operation_id,&artifact).await}));}
-                                Err(_)=>message="截圖要求已拒絕。請核對來源。".into(),
+                                Err(_)=>{artifact_failure=Some(operation_id);message="截圖要求已拒絕。請核對來源。".into();},
                             }
                         }
                     }
@@ -379,6 +382,7 @@ async fn reconnect(
     lease: watch::Sender<Lease>,
     state: watch::Sender<LinkState>,
     browser: Option<Option<String>>,
+    interactions: bool,
 ) {
     let mut delay = 1;
     loop {
@@ -390,6 +394,7 @@ async fn reconnect(
             &lease,
             &state,
             browser.clone(),
+            interactions,
         )
         .await;
         lease.send_replace(Lease::default());
@@ -413,6 +418,7 @@ async fn connected(
     lease: &watch::Sender<Lease>,
     state: &watch::Sender<LinkState>,
     browser: Option<Option<String>>,
+    interactions: bool,
 ) -> Result<()> {
     let started = Instant::now();
     let mut url = config.server.join("v1/devices/connect")?;
@@ -472,6 +478,7 @@ async fn connected(
                             ensure(epoch.is_none()&&device==journal.device&&lease_ms>0&&lease_ms<=LEASE_MS as u32,"invalid welcome")?;
                             let value=number(&wire_epoch)?;epoch=Some(value);lease.send_replace(Lease{epoch:value,until:Some(started+Duration::from_millis(lease_ms.into()))});state.send_replace(LinkState{connected:true});
                             if let Some(fixture_origin)=browser.clone(){wire(&mut socket,&ClientWire::BrowserReady{fixture_origin}).await?;}
+                            if interactions && let Some(fixture_origin)=browser.clone(){wire(&mut socket,&ClientWire::BrowserInteractionReady{fixture_origin}).await?;}
                         }
                         ServerWire::Renewed{epoch:wire_epoch,lease_ms}=>{
                             ensure(epoch==Some(number(&wire_epoch)?)&&lease_ms>0&&lease_ms<=LEASE_MS as u32&&lease.borrow().live(),"invalid lease renewal")?;
@@ -512,6 +519,14 @@ where
 }
 async fn work(journal: Journal, executor: Executor, lease: watch::Receiver<Lease>) -> Result<()> {
     loop {
+        let active = lease.borrow().clone();
+        let view = journal.view().await?;
+        executor
+            .maintain_browser(
+                (active.live() && !journal.stopped().await?).then_some(active.epoch),
+                &view.tasks,
+            )
+            .await;
         if let Some(envelope) = journal.take_work().await? {
             let current = lease.borrow().clone();
             let allowed = current.live()
@@ -525,7 +540,17 @@ async fn work(journal: Journal, executor: Executor, lease: watch::Receiver<Lease
                         revision,
                         ..
                     } => {
-                        let read = executor.execute_work(operation.clone());
+                        let binding = crate::browser_session::WorkBinding {
+                            operation_id: match &envelope.payload {
+                                ServerPayload::Read { operation_id, .. } => operation_id.clone(),
+                                _ => unreachable!(),
+                            },
+                            task_id: task_id.clone(),
+                            revision: revision.clone(),
+                            device: journal.device.clone(),
+                            epoch: current.epoch,
+                        };
+                        let read = executor.execute_bound(operation.clone(), &binding);
                         tokio::pin!(read);
                         let mut monitor = tokio::time::interval(Duration::from_millis(100));
                         loop {

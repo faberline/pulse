@@ -34,25 +34,78 @@ pub struct LocalStatus {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReadOp {
-    List { path: String },
-    Text { path: String },
+    List {
+        path: String,
+    },
+    Text {
+        path: String,
+    },
     GitStatus,
-    GitDiff { path: String },
-    Browser { url: String },
+    GitDiff {
+        path: String,
+    },
+    Browser {
+        url: String,
+    },
+    BrowserInspect {
+        url: String,
+    },
+    BrowserAction {
+        session_id: String,
+        nonce: String,
+        element_id: String,
+        effect: pulse_core::BrowserEffect,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grant: Option<Box<crate::browser_session::BrowserGrant>>,
+    },
 }
 impl ReadOp {
     /// Stable lexical identity only. Executor scope, secret and symlink checks remain separate.
     pub(crate) fn canonical(&self) -> Result<Self> {
-        if let Self::Browser { url } = self {
+        if let Self::BrowserAction {
+            session_id,
+            nonce,
+            element_id,
+            effect,
+            ..
+        } = self
+        {
+            ensure(
+                uuid::Uuid::parse_str(session_id).is_ok()
+                    && uuid::Uuid::parse_str(nonce).is_ok()
+                    && pulse_core::browser_identifier(element_id)
+                    && match effect {
+                        pulse_core::BrowserEffect::SetText { text } => {
+                            pulse_core::browser_input_text(text)
+                        }
+                        _ => true,
+                    },
+                "invalid browser action",
+            )?;
+            return Ok(Self::BrowserAction {
+                session_id: session_id.clone(),
+                nonce: nonce.clone(),
+                element_id: element_id.clone(),
+                effect: effect.clone(),
+                grant: None,
+            });
+        }
+        if let Self::Browser { url } | Self::BrowserInspect { url } = self {
             let url = pulse_core::browser_url(&format!("browser:{url}"))
                 .ok_or_else(|| crate::Error::Rejected("invalid browser URL".into()))?;
-            return Ok(Self::Browser { url: url.into() });
+            return Ok(if matches!(self, Self::Browser { .. }) {
+                Self::Browser { url: url.into() }
+            } else {
+                Self::BrowserInspect { url: url.into() }
+            });
         }
         let path = match self {
             Self::List { path } if path.is_empty() => return Ok(self.clone()),
             Self::List { path } | Self::Text { path } | Self::GitDiff { path } => path,
             Self::GitStatus => return Ok(self.clone()),
-            Self::Browser { .. } => unreachable!(),
+            Self::Browser { .. } | Self::BrowserInspect { .. } | Self::BrowserAction { .. } => {
+                unreachable!()
+            }
         };
         let parts = std::path::Path::new(path)
             .components()
@@ -70,7 +123,9 @@ impl ReadOp {
             Self::Text { .. } => Self::Text { path },
             Self::GitDiff { .. } => Self::GitDiff { path },
             Self::GitStatus => unreachable!(),
-            Self::Browser { .. } => unreachable!(),
+            Self::Browser { .. } | Self::BrowserInspect { .. } | Self::BrowserAction { .. } => {
+                unreachable!()
+            }
         })
     }
     pub fn permitted_by(&self, scope: &str) -> bool {
@@ -78,6 +133,10 @@ impl ReadOp {
             Self::Browser { url } => {
                 pulse_core::browser_url(scope).is_some_and(|allowed| allowed.as_str() == url)
             }
+            Self::BrowserInspect { url } => {
+                pulse_core::interaction_url(scope).is_some_and(|allowed| allowed.as_str() == url)
+            }
+            Self::BrowserAction { .. } => pulse_core::interaction_url(scope).is_some(),
             _ => scope == "pulse:read",
         }
     }
@@ -86,6 +145,10 @@ impl ReadOp {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HumanAction {
+    DecideOperation {
+        binding: pulse_core::OperationBinding,
+        approve: bool,
+    },
     Submit {
         id: String,
         goal: String,
@@ -212,11 +275,18 @@ pub struct ChatMessage {
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact: Option<crate::artifact::ArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<pulse_core::OperationRequest>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientWire {
+    BrowserInteractionReady {
+        fixture_origin: Option<String>,
+    },
     BrowserReady {
         fixture_origin: Option<String>,
     },

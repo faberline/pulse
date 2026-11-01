@@ -23,6 +23,12 @@ pub struct BrowserRuntime {
     driver: PathBuf,
     pub policy: NetworkPolicy,
     directory: PathBuf,
+    pub(crate) sessions: std::sync::Arc<
+        tokio::sync::Mutex<
+            std::collections::BTreeMap<String, crate::browser_session::InteractiveSession>,
+        >,
+    >,
+    pub interactions: bool,
 }
 impl BrowserRuntime {
     pub fn from_environment(directory: &Path) -> Result<Option<Self>> {
@@ -42,6 +48,8 @@ impl BrowserRuntime {
             driver,
             policy,
             directory,
+            sessions: Default::default(),
+            interactions: std::env::var("PULSE_BROWSER_INTERACTION").as_deref() == Ok("1"),
         }))
     }
     pub fn new(driver: PathBuf, policy: NetworkPolicy, directory: PathBuf) -> Result<Self> {
@@ -55,22 +63,46 @@ impl BrowserRuntime {
             driver,
             policy,
             directory,
+            sessions: Default::default(),
+            interactions: false,
         })
     }
     pub async fn read(&self, url: &Url) -> Result<BrowserSnapshot> {
         self.policy.validate_url(url)?;
+        self.artifact_room()?;
+        tokio::time::timeout(Duration::from_secs(35), self.read_inner(url))
+            .await
+            .map_err(|_| crate::Error::Rejected("browser read timed out".into()))?
+    }
+    pub(crate) fn artifact_room(&self) -> Result<()> {
         ensure(
             std::fs::read_dir(self.directory.join("artifacts"))?
                 .take(128)
                 .count()
                 < 128,
             "browser artifact limit reached",
-        )?;
-        tokio::time::timeout(Duration::from_secs(35), self.read_inner(url))
-            .await
-            .map_err(|_| crate::Error::Rejected("browser read timed out".into()))?
+        )
+    }
+    pub fn with_interactions(mut self, enabled: bool) -> Self {
+        self.interactions = enabled;
+        self
     }
     async fn read_inner(&self, url: &Url) -> Result<BrowserSnapshot> {
+        let mut session = self.start(url).await?;
+        let result = async {
+            session.browser.navigate(url).await?;
+            session.browser.observe().await
+        }
+        .await;
+        let closed = session.browser.close().await;
+        session.owner.stop().await?;
+        let snapshot = result?;
+        closed?;
+        self.store_snapshot(&snapshot)?;
+        Ok(snapshot)
+    }
+    pub(crate) async fn start(&self, url: &Url) -> Result<OwnedBrowser> {
+        self.policy.validate_url(url)?;
         let profile = tempfile::Builder::new()
             .prefix("session-")
             .tempdir_in(&self.directory)?;
@@ -99,7 +131,7 @@ impl BrowserRuntime {
             .stdout
             .take()
             .ok_or_else(|| crate::Error::Rejected("browser startup output missing".into()))?;
-        let mut owner = Driver {
+        let owner = Driver {
             child,
             group: Some(group),
             _profile: profile,
@@ -124,7 +156,7 @@ impl BrowserRuntime {
         })
         .await
         .map_err(|_| crate::Error::Rejected("browser driver startup timed out".into()))??;
-        let mut browser = FixtureBrowser::open_guarded(
+        let browser = FixtureBrowser::open_guarded(
             endpoint,
             url.clone(),
             self.policy.clone(),
@@ -132,15 +164,13 @@ impl BrowserRuntime {
             &owner._profile.path().join("profile"),
         )
         .await?;
-        let result = async {
-            browser.navigate(url).await?;
-            browser.observe().await
-        }
-        .await;
-        let closed = browser.close().await;
-        owner.stop().await?;
-        let snapshot = result?;
-        closed?;
+        Ok(OwnedBrowser {
+            browser,
+            owner,
+            proxy,
+        })
+    }
+    pub(crate) fn store_snapshot(&self, snapshot: &BrowserSnapshot) -> Result<()> {
         let artifact = self
             .directory
             .join("artifacts")
@@ -165,10 +195,16 @@ impl BrowserRuntime {
                 "browser artifact conflict",
             )?;
         } else {
+            self.artifact_room()?;
             private_write(&artifact, &snapshot.png)?;
         }
-        Ok(snapshot)
+        Ok(())
     }
+}
+pub(crate) struct OwnedBrowser {
+    pub browser: FixtureBrowser,
+    owner: Driver,
+    pub proxy: BrowserProxy,
 }
 struct Driver {
     child: Child,

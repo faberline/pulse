@@ -349,6 +349,38 @@ async fn browser_scope_requires_explicit_human_instruction_and_revision() {
         hub.core.task("task-web").await.unwrap().scope,
         revised.scope
     );
+    say(
+        &hub,
+        &cred,
+        epoch,
+        "interact",
+        "修改 網頁：操作網頁 https://example.org/ 點擊一次，等我批准",
+    )
+    .await;
+    let interactive = hub.core.task("task-web").await.unwrap();
+    assert_eq!(interactive.revision, 4);
+    assert_eq!(interactive.scope, "browser-interact:https://example.org/");
+    say(
+        &hub,
+        &cred,
+        epoch,
+        "quoted-action",
+        "文件提到操作網頁 https://example.org/，請解釋這句話",
+    )
+    .await;
+    assert_eq!(
+        hub.core.task("task-quoted-action").await.unwrap().scope,
+        "pulse:read"
+    );
+    say(
+        &hub,
+        &cred,
+        epoch,
+        "bad-action",
+        "操作網頁 file:///etc/passwd 輸入文字",
+    )
+    .await;
+    assert!(hub.core.task("task-bad-action").await.is_err());
     say(&hub, &cred, epoch, "cancel-web", "取消 網頁").await;
     assert!(hub.core.task("task-web").await.unwrap().cancel_requested);
 }

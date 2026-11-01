@@ -4,10 +4,13 @@ struct ChatMessage: Decodable, Identifiable, Sendable {
   let id: String
   let body: String
   let artifact: BrowserArtifact?
-  init(id: String, body: String, artifact: BrowserArtifact? = nil) {
-    self.id = id; self.body = body; self.artifact = artifact
+  let artifact_operation_id: String?
+  let approval: BrowserApproval?
+  var artifactID: String { artifact_operation_id ?? id }
+  init(id: String, body: String, artifact: BrowserArtifact? = nil, artifact_operation_id: String? = nil, approval: BrowserApproval? = nil) {
+    self.id = id; self.body = body; self.artifact = artifact; self.artifact_operation_id = artifact_operation_id; self.approval = approval
   }
-  var isEvidence: Bool { body.hasPrefix("只讀工具結果") }
+  var isEvidence: Bool { body.hasPrefix("只讀工具結果") || body.hasPrefix("操作工具結果") }
   var isUser: Bool { ["已保存任務：", "已保存訊息：", "本機待送：", "雲端已收件："].contains { body.hasPrefix($0) } }
   var displayBody: String {
     var value = body
@@ -35,6 +38,7 @@ struct PulseTask: Decodable, Identifiable, Sendable {
     if reason == "browser_capability_wait" { return "等待本機瀏覽器；請核對安裝與網址範圍" }
     return [
       "queued": "排隊中", "planning": "規劃中", "dispatched": "已派工", "running": "執行中",
+      "waiting_approval": "等待操作批准", "ready": "已批准，等待執行",
       "blocked": "等待下一步", "waiting_device": "等待本機", "cancelled": "已取消",
       "succeeded": "已完成", "failed": "未完成", "outcome_unknown": "結果待核對",
     ][state] ?? "等待處理"

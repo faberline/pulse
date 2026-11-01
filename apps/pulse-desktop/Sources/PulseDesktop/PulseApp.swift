@@ -65,7 +65,9 @@ struct ChatView: View {
                       } else {
                         RichContent(source: message.displayBody)
                       }
-                      if let artifact = message.artifact {
+                      if let approval = message.approval {
+                        BrowserApprovalCard(model: model, message: message, request: approval)
+                      } else if let artifact = message.artifact {
                         BrowserScreenshot(model: model, message: message, artifact: artifact)
                       }
                     }

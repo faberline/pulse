@@ -9,6 +9,8 @@ use sqlx::{Row, SqliteConnection};
 struct Capability {
     epoch: i64,
     fixture_origin: Option<String>,
+    #[serde(default)]
+    interactions: bool,
 }
 
 impl Hub {
@@ -19,6 +21,27 @@ impl Hub {
         fixture: Option<&str>,
         time: i64,
     ) -> Result<()> {
+        self.set_browser_capability(device, epoch, fixture, false, time)
+            .await
+    }
+    pub async fn browser_interactive_ready(
+        &self,
+        device: &str,
+        epoch: u64,
+        fixture: Option<&str>,
+        time: i64,
+    ) -> Result<()> {
+        self.set_browser_capability(device, epoch, fixture, true, time)
+            .await
+    }
+    async fn set_browser_capability(
+        &self,
+        device: &str,
+        epoch: u64,
+        fixture: Option<&str>,
+        interactions: bool,
+        time: i64,
+    ) -> Result<()> {
         let policy = NetworkPolicy::new(fixture)?;
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
         let allowed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM link_device WHERE id=? AND epoch=? AND role='local_executor' AND revoked=0 AND stopped=0 AND lease_until>?")
@@ -26,6 +49,7 @@ impl Hub {
         ensure(allowed == 1, "browser capability requires live local role")?;
         let capability = Capability {
             epoch: epoch as i64,
+            interactions,
             fixture_origin: policy.fixture_origin.map(Into::into),
         };
         sqlx::query("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
@@ -41,8 +65,18 @@ impl Hub {
         epoch: i64,
         operation: &ReadOp,
     ) -> Result<bool> {
-        let ReadOp::Browser { url } = operation else {
-            return Ok(true);
+        let (url, interactive) = match operation {
+            ReadOp::Browser { url } => (url.clone(), false),
+            ReadOp::BrowserInspect { url } => (url.clone(), true),
+            ReadOp::BrowserAction {
+                grant: Some(grant), ..
+            } => {
+                let intent: pulse_core::BrowserIntent =
+                    serde_json::from_value(grant.operation.intent.clone())?;
+                (intent.observation.url, true)
+            }
+            ReadOp::BrowserAction { .. } => return Ok(false),
+            _ => return Ok(true),
         };
         let data: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key=?")
             .bind(format!("browser:{device}"))
@@ -54,6 +88,7 @@ impl Hub {
             return Ok(false);
         };
         Ok(capability.epoch == epoch
+            && (!interactive || capability.interactions)
             && NetworkPolicy::new(capability.fixture_origin.as_deref())?
                 .validate_url(&url)
                 .is_ok())
@@ -69,7 +104,9 @@ impl Hub {
         let mut changed = false;
         for data in rows {
             let mut task: Task = serde_json::from_str(&data)?;
-            let Some(url) = pulse_core::browser_url(&task.scope) else {
+            let Some(url) = pulse_core::browser_url(&task.scope)
+                .or_else(|| pulse_core::interaction_url(&task.scope))
+            else {
                 continue;
             };
             if task.active_run.is_some() || task.cancel_requested || task.deadline <= time {
@@ -80,7 +117,11 @@ impl Hub {
             {
                 continue;
             }
-            let operation = ReadOp::Browser { url: url.into() };
+            let operation = if pulse_core::interaction_url(&task.scope).is_some() {
+                ReadOp::BrowserInspect { url: url.into() }
+            } else {
+                ReadOp::Browser { url: url.into() }
+            };
             let mut available = false;
             for worker in &workers {
                 if Self::browser_capable(

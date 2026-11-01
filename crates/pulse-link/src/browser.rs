@@ -25,11 +25,11 @@ pub struct FixtureBrowser {
     client: Client,
     endpoint: Url,
     origin: Url,
-    session: String,
+    pub(crate) session: String,
     browser_version: String,
     usable: bool,
     closed: bool,
-    policy: Option<crate::browser_network::NetworkPolicy>,
+    pub(crate) policy: Option<crate::browser_network::NetworkPolicy>,
 }
 
 fn loopback_root(url: &Url) -> bool {
@@ -137,7 +137,12 @@ impl FixtureBrowser {
             && url.password().is_none()
             && url.as_str().len() <= 2048
     }
-    async fn command(&self, method: Method, path: &str, body: Option<Value>) -> Result<Value> {
+    pub(crate) async fn command(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Value> {
         let mut request = self.client.request(method, self.endpoint.join(path)?);
         if let Some(body) = body {
             request = request.json(&body);
@@ -166,7 +171,7 @@ impl FixtureBrowser {
         )?;
         Ok(value["value"].clone())
     }
-    async fn get(&self, suffix: &str) -> Result<Value> {
+    pub(crate) async fn get(&self, suffix: &str) -> Result<Value> {
         self.command(
             Method::GET,
             &format!("session/{}/{suffix}", self.session),

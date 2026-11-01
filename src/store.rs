@@ -722,6 +722,35 @@ impl Store {
     ) -> Result<ReceiptEffect> {
         receipt_in(db, receipt).await
     }
+    /// A trusted local adapter rejected this grant before issuing any effect command.
+    pub async fn browser_not_executed_in(
+        db: &mut SqliteConnection,
+        token: &Token,
+        operation_id: &str,
+        evidence: &str,
+    ) -> Result<()> {
+        let mut operation: Operation = load(db, "operations", operation_id).await?;
+        require(
+            operation.token == *token
+                && operation.state == OperationState::Unknown
+                && !evidence.is_empty()
+                && evidence.len() <= 1024,
+            "invalid not-executed proof",
+        )?;
+        operation.state = OperationState::NotExecuted;
+        put(db, "operations", operation_id, &operation).await?;
+        let mut task: Task = load(db, "tasks", &token.task_id).await?;
+        task.evidence.push(evidence.into());
+        if !task.state.terminal()
+            && task.revision == token.revision
+            && task.active_run.as_deref() == Some(&token.run_id)
+        {
+            task.state = State::Blocked;
+            task.reason = Some("browser_action_not_executed".into());
+            task.active_run = None;
+        }
+        put(db, "tasks", &task.id, &task).await
+    }
 
     pub async fn reconcile(
         &self,
@@ -1053,6 +1082,20 @@ async fn apply(
                 require(
                     task.reason.as_deref() != Some("device_result_ready_model_not_connected"),
                     "read evidence must be reviewed first",
+                )?;
+                require(
+                    crate::interaction_url(&task.scope).is_none()
+                        || !matches!(
+                            task.reason.as_deref(),
+                            Some(
+                                "operation_rejected"
+                                    | "operation_approval_expired"
+                                    | "browser_action_not_executed"
+                                    | "browser_approval_invalid"
+                                    | "approval_restart_review_required"
+                            )
+                        ),
+                    "browser observation requires a fresh Human revision",
                 )?;
                 task.state = State::Queued;
                 task.reason = None;

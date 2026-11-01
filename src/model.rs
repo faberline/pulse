@@ -192,7 +192,7 @@ pub enum Command {
 }
 
 /// Untrusted proposal data, bound to a persisted Tool event before it can wait for approval.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct OperationProposal {
     pub id: String,
@@ -214,7 +214,7 @@ pub enum ApprovalState {
     Dispatched,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct OperationRequest {
     pub proposal: OperationProposal,
@@ -279,7 +279,7 @@ pub enum OperationState {
     Ambiguous,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Operation {
     pub id: String,
     pub idempotency_key: String,

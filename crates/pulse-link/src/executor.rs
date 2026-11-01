@@ -38,6 +38,55 @@ impl Executor {
     pub fn root(&self) -> &Path {
         &self.root
     }
+    pub fn browser_interactions(&self) -> bool {
+        self.browser.as_ref().is_some_and(|b| b.interactions)
+    }
+    pub async fn maintain_browser(&self, epoch: Option<u64>, tasks: &[pulse_core::Task]) {
+        if let Some(browser) = &self.browser {
+            browser.maintain(epoch, tasks).await;
+        }
+    }
+    pub async fn execute_bound(
+        &self,
+        operation: ReadOp,
+        binding: &crate::browser_session::WorkBinding,
+    ) -> crate::artifact::ExecutedRead {
+        let rejected = |reason: &str| crate::artifact::ExecutedRead {
+            outcome: ReadOutcome::Rejected {
+                reason: reason.into(),
+            },
+            image: None,
+        };
+        match operation {
+            ReadOp::BrowserInspect { url } => {
+                let Some(browser) = &self.browser else {
+                    return rejected("browser unavailable");
+                };
+                let Some(url) = pulse_core::browser_url(&format!("browser:{url}")) else {
+                    return rejected("browser URL rejected");
+                };
+                browser
+                    .inspect(&url, binding)
+                    .await
+                    .unwrap_or_else(|_| rejected("browser inspection failed or exceeds limits"))
+            }
+            ReadOp::BrowserAction {
+                session_id,
+                nonce,
+                element_id,
+                effect,
+                grant,
+            } => {
+                let (Some(browser), Some(grant)) = (&self.browser, grant) else {
+                    return rejected("browser action lacks configured executor or approval grant");
+                };
+                browser
+                    .act(binding, &session_id, &nonce, &element_id, &effect, &grant)
+                    .await
+            }
+            operation => self.execute_work(operation).await,
+        }
+    }
     fn parts(path: &str) -> Result<Vec<&str>> {
         ensure(
             !path.is_empty() && path.len() <= 4096 && !Path::new(path).is_absolute(),
@@ -265,6 +314,9 @@ impl Executor {
         }
         let executor = self.clone();
         let result = match operation {
+            ReadOp::BrowserInspect { .. } | ReadOp::BrowserAction { .. } => {
+                Err(crate::Error::Rejected("bound work required".into()))
+            }
             ReadOp::Browser { .. } => unreachable!(),
             ReadOp::Text { path } => tokio::task::spawn_blocking(move || executor.read_text(&path))
                 .await

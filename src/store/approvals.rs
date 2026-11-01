@@ -2,6 +2,45 @@
 use super::*;
 
 impl Store {
+    pub async fn invalidate_browser_request_in(
+        db: &mut SqliteConnection,
+        token: &Token,
+        request_id: &str,
+        reason: &str,
+        now: i64,
+    ) -> Result<()> {
+        let (mut task, _) = current(db, token, now).await?;
+        let mut request = request(db, request_id).await?;
+        require(
+            request.proposal.token == *token
+                && request.proposal.target.starts_with("browser:")
+                && !reason.is_empty()
+                && reason.len() <= 256,
+            "browser request invalidation binding",
+        )?;
+        if request.state == ApprovalState::Invalidated {
+            return Ok(());
+        }
+        require(
+            matches!(
+                request.state,
+                ApprovalState::Pending | ApprovalState::Approved
+            ),
+            "browser request already consumed",
+        )?;
+        request.state = ApprovalState::Invalidated;
+        request.reason = Some(reason.into());
+        save(db, &request).await?;
+        task.state = State::Blocked;
+        task.reason = Some(reason.into());
+        put(db, "tasks", &task.id, &task).await?;
+        notify(
+            db,
+            &format!("browser-invalid:{request_id}"),
+            &json!({"task_id":task.id,"request_id":request_id,"state":"invalidated"}),
+        )
+        .await
+    }
     pub async fn operation_request(&self, request_id: &str) -> Result<OperationRequest> {
         let mut db = self.pool.acquire().await?;
         request(&mut db, request_id).await

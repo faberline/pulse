@@ -1,7 +1,10 @@
 pub mod browser;
 mod browser_admission;
+mod browser_controls;
 pub mod browser_network;
+mod browser_orchestration;
 pub mod browser_runtime;
+pub mod browser_session;
 pub mod client;
 mod conversation;
 pub mod executor;

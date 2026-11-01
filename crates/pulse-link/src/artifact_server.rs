@@ -27,7 +27,12 @@ impl Hub {
                 && row.get::<i64, _>("epoch") as u64 == epoch
                 && row.get::<String, _>("task_id") == artifact.task_id
                 && row.get::<String, _>("task_revision") == artifact.revision
-                && matches!(operation, ReadOp::Browser { .. }),
+                && matches!(
+                    operation,
+                    ReadOp::Browser { .. }
+                        | ReadOp::BrowserInspect { .. }
+                        | ReadOp::BrowserAction { .. }
+                ),
             "artifact source binding mismatch",
         )?;
         if let Some(row) =

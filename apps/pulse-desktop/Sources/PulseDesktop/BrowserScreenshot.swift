@@ -14,7 +14,7 @@ struct BrowserScreenshot: View {
       if model.state.tasks.first(where: { $0.id == artifact.task_id })?.revision != artifact.revision {
         Text("這是舊修訂的證據，不能批准目前操作。").font(.caption)
       }
-      if let image = model.browserImages[message.id] {
+      if let image = model.browserImages[message.artifactID] {
         Button { showImage = true } label: {
           Image(nsImage: image).resizable().scaledToFit().frame(maxHeight: 320)
         }.buttonStyle(.plain).accessibilityLabel("放大瀏覽器截圖")
@@ -26,7 +26,7 @@ struct BrowserScreenshot: View {
       }
     }.sheet(isPresented: $showImage) {
       VStack {
-        if let image = model.browserImages[message.id] {
+        if let image = model.browserImages[message.artifactID] {
           ScrollView([.horizontal, .vertical]) { Image(nsImage: image) }
         }
         Button("關閉") { showImage = false }

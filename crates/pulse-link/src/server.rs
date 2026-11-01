@@ -337,9 +337,28 @@ impl Hub {
         let mut messages = Vec::new();
         for row in rows {
             let id: String = row.get("id");
-            let metadata: Option<String> = sqlx::query_scalar("SELECT a.metadata FROM link_artifacts a JOIN link_reads r ON a.operation_id=r.id WHERE a.operation_id=? AND r.state='completed' AND a.png IS NOT NULL")
-                .bind(&id).fetch_optional(&mut *tx).await?;
+            let approval: Option<String> =
+                sqlx::query_scalar("SELECT data FROM operation_requests WHERE id=?")
+                    .bind(&id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            let approval: Option<pulse_core::OperationRequest> = approval
+                .map(|data| serde_json::from_str(&data))
+                .transpose()?;
+            let source_id = if let Some(request) = approval
+                .as_ref()
+                .filter(|r| r.proposal.target.starts_with("browser:"))
+            {
+                let intent: pulse_core::BrowserIntent =
+                    serde_json::from_value(request.proposal.intent.clone())?;
+                intent.source_operation_id
+            } else {
+                id.clone()
+            };
+            let metadata:Option<String>=sqlx::query_scalar("SELECT a.metadata FROM link_artifacts a JOIN link_reads r ON a.operation_id=r.id WHERE a.operation_id=? AND r.state='completed' AND a.png IS NOT NULL").bind(&source_id).fetch_optional(&mut *tx).await?;
             messages.push(ChatMessage {
+                approval,
+                artifact_operation_id: (source_id != id).then_some(source_id),
                 id,
                 body: row.get("body"),
                 artifact: metadata.map(|s| serde_json::from_str(&s)).transpose()?,
@@ -589,6 +608,15 @@ impl Hub {
                     "source ID limit",
                 )?;
                 let commands = match action {
+                    HumanAction::DecideOperation { binding, approve } => vec![if *approve {
+                        Command::ApproveOperation {
+                            binding: binding.clone(),
+                        }
+                    } else {
+                        Command::RejectOperation {
+                            binding: binding.clone(),
+                        }
+                    }],
                     HumanAction::Submit { id, goal } => {
                         ensure(
                             id.len() <= 128 && !goal.trim().is_empty() && goal.len() <= 4096,
@@ -655,6 +683,24 @@ impl Hub {
                     "task control rejected",
                 )?;
                 match action {
+                    HumanAction::DecideOperation { binding, approve } => {
+                        let applied = matches!(&outcome,pulse_core::Outcome::Applied{task_ids} if task_ids.contains(&binding.task_id));
+                        self.chat(
+                            source_id,
+                            &format!(
+                                "{}：{} · {}",
+                                if applied {
+                                    "操作決定已保存"
+                                } else {
+                                    "操作決定未套用，請更新畫面"
+                                },
+                                binding.request_id,
+                                if *approve { "批准" } else { "拒絕" }
+                            ),
+                            time,
+                        )
+                        .await?;
+                    }
                     HumanAction::Submit { goal, .. } => {
                         let body = match &outcome {
                             pulse_core::Outcome::Clarification { question } => question.clone(),
@@ -782,6 +828,7 @@ impl Hub {
                     "result binding mismatch",
                 )?;
                 let encoded = serde_json::to_string(outcome)?;
+                let operation: ReadOp = serde_json::from_str(&row.get::<String, _>("request"))?;
                 if let Some(old) = row.get::<Option<String>, _>("result") {
                     ensure(old == encoded, "result conflict")?;
                 }
@@ -808,6 +855,14 @@ impl Hub {
                 .await?
                 .rows_affected();
                 if changed == 1 {
+                    let continue_run = Self::browser_action_receipt(
+                        &mut tx,
+                        operation_id,
+                        &operation,
+                        &before,
+                        outcome,
+                    )
+                    .await?;
                     Store::device_observation_in(
                         &mut tx,
                         task_id,
@@ -816,8 +871,30 @@ impl Hub {
                         matches!(outcome, ReadOutcome::Unknown { .. }),
                     )
                     .await?;
-                    Self::continue_model_read(&mut tx, &before, operation_id, outcome, time)
-                        .await?;
+                    if continue_run {
+                        Self::continue_model_read(&mut tx, &before, operation_id, outcome, time)
+                            .await?;
+                    }
+                    if matches!(operation, ReadOp::BrowserAction { .. })
+                        && matches!(outcome, ReadOutcome::Rejected { .. })
+                    {
+                        let data: String = sqlx::query_scalar("SELECT data FROM tasks WHERE id=?")
+                            .bind(task_id)
+                            .fetch_one(&mut *tx)
+                            .await?;
+                        let mut task: pulse_core::Task = serde_json::from_str(&data)?;
+                        if task.revision == number(revision)?
+                            && !task.cancel_requested
+                            && !task.state.terminal()
+                        {
+                            task.reason = Some("browser_action_not_executed".into());
+                            sqlx::query("UPDATE tasks SET data=? WHERE id=?")
+                                .bind(serde_json::to_string(&task)?)
+                                .bind(task_id)
+                                .execute(&mut *tx)
+                                .await?;
+                        }
+                    }
                 } else {
                     let stored: String =
                         sqlx::query_scalar("SELECT result FROM link_reads WHERE id=?")
@@ -827,18 +904,25 @@ impl Hub {
                     ensure(stored == encoded, "result conflict")?;
                 }
                 tx.commit().await?;
-                let operation: ReadOp = serde_json::from_str(&row.get::<String, _>("request"))?;
+                let evidence_label = if matches!(operation, ReadOp::BrowserAction { .. }) {
+                    "操作工具結果"
+                } else {
+                    "只讀工具結果"
+                };
                 let read_label = match operation {
                     ReadOp::List { path } => format!("目錄 {path}"),
                     ReadOp::Text { path } | ReadOp::GitDiff { path } => path,
                     ReadOp::GitStatus => "Git 狀態".into(),
                     ReadOp::Browser { url } => format!("網頁 {url}"),
+                    ReadOp::BrowserInspect { url } => format!("觀察網頁 {url}"),
+                    ReadOp::BrowserAction { .. } => "已批准的瀏覽器操作".into(),
                 };
                 let body = match outcome {
                     ReadOutcome::Completed {
                         text, truncated, ..
                     } => format!(
-                        "只讀工具結果 · {} · {}{}\n\n```text\n{}\n```\n\n這是工具證據，任務尚待確認。",
+                        "{} · {} · {}{}\n\n```text\n{}\n```\n\n這是工具證據，任務尚待確認。",
+                        evidence_label,
                         crate::conversation::label(&before),
                         read_label,
                         if *truncated { "（已截斷）" } else { "" },
@@ -979,6 +1063,7 @@ async fn session(hub: Arc<Hub>, device: String, mut socket: WebSocket) {
                         ClientWire::Heartbeat{epoch:claimed}=>{ensure(number(&claimed)?==epoch,"heartbeat epoch")?;hub.renew(&device,epoch,now()).await?;send(&mut socket,&ServerWire::Renewed{epoch:epoch.to_string(),lease_ms:LEASE_MS as u32}).await?;}
                         ClientWire::Hello{..}=>return Err(crate::Error::Rejected("duplicate hello".into())),
                         ClientWire::BrowserReady{fixture_origin}=>hub.browser_ready(&device,epoch,fixture_origin.as_deref(),now()).await?,
+                        ClientWire::BrowserInteractionReady{fixture_origin}=>hub.browser_interactive_ready(&device,epoch,fixture_origin.as_deref(),now()).await?,
                     }}
                     Message::Close(_)=>break,
                     Message::Ping(data)=>{socket.send(Message::Pong(data)).await.map_err(|_|crate::Error::Rejected("socket closed".into()))?;}

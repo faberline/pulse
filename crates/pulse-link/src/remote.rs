@@ -9,13 +9,13 @@ pub fn versions() -> Versions {
 }
 fn manifest(provider: Option<&Provider>) -> Versions {
     Versions {
-        workflow: "pulse-remote-8".into(),
+        workflow: "pulse-remote-9".into(),
         schema: "1".into(),
-        prompt: "effective-read-3".into(),
-        tools: "pulse-read-3".into(),
+        prompt: "effective-read-4".into(),
+        tools: "pulse-read-4".into(),
         model: provider.map(|p| p.model).unwrap_or("unconfigured").into(),
         provider_api: "function-call-1".into(),
-        policy: "read-only-3".into(),
+        policy: "human-browser-actions-1".into(),
     }
 }
 pub async fn step(hub: &Hub, time: i64) -> Result<bool> {
@@ -34,7 +34,17 @@ pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Res
         }
         return Ok(true);
     }
+    hub.project_browser_approvals(time).await?;
     hub.gate_browser_tasks(time).await?;
+    match hub
+        .dispatch_approved_browser(&manifest(provider), time)
+        .await
+    {
+        Ok(true) => return Ok(true),
+        Ok(false)
+        | Err(crate::Error::Capacity | crate::Error::Core(pulse_core::Error::Capacity)) => {}
+        Err(error) => return Err(error),
+    }
     match hub.dispatch_model_read(&manifest(provider), time).await {
         Ok(true) => return Ok(true),
         Ok(false) | Err(crate::Error::Capacity) => {}
@@ -87,7 +97,15 @@ pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Res
                                     )
                                     .await?;
                                 let saved = if reply.tool.is_some() {
-                                    hub.model_proposal(&run.token, &reply, now()).await
+                                    loop {
+                                        match hub.model_proposal(&run.token, &reply, now()).await {
+                                            Err(
+                                                crate::Error::Capacity
+                                                | crate::Error::Core(pulse_core::Error::Capacity),
+                                            ) => tokio::time::sleep(Duration::from_secs(1)).await,
+                                            result => break result,
+                                        }
+                                    }
                                 } else {
                                     hub.model_reply(&run.token, &reply, provider.model, now())
                                         .await

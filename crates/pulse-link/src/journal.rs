@@ -373,7 +373,12 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                     sqlx::query_scalar("SELECT COALESCE(SUM(length(data)),0) FROM local_outbox")
                         .fetch_one(&mut *tx)
                         .await?;
-                let browser = matches!(operation, ReadOp::Browser { .. });
+                let browser = matches!(
+                    operation,
+                    ReadOp::Browser { .. }
+                        | ReadOp::BrowserInspect { .. }
+                        | ReadOp::BrowserAction { .. }
+                );
                 ensure(
                     used < if browser { 934 } else { 998 }
                         && size
@@ -477,7 +482,9 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                     matches!(
                         &envelope.payload,
                         ServerPayload::Read {
-                            operation: ReadOp::Browser { .. },
+                            operation: ReadOp::Browser { .. }
+                                | ReadOp::BrowserInspect { .. }
+                                | ReadOp::BrowserAction { .. },
                             ..
                         }
                     ) && matches!(outcome, ReadOutcome::Completed { .. }),
@@ -559,9 +566,13 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
             .unwrap_or_default();
         for message in &state.messages {
             if let Some(artifact) = &message.artifact {
+                let operation_id = message
+                    .artifact_operation_id
+                    .as_ref()
+                    .unwrap_or(&message.id);
                 let data: Option<String> =
                     sqlx::query_scalar("SELECT value FROM local_meta WHERE key=?")
-                        .bind(format!("image:{}", message.id))
+                        .bind(format!("image:{operation_id}"))
                         .fetch_optional(&self.db)
                         .await?;
                 if let Some(data) = data {
@@ -589,6 +600,8 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                 body
             };
             state.messages.push(ChatMessage {
+                artifact_operation_id: None,
+                approval: None,
                 artifact: None,
                 id: row.get("id"),
                 body: format!(

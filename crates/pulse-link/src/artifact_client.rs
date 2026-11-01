@@ -17,7 +17,7 @@ impl Journal {
         let artifact = view
             .messages
             .iter()
-            .find(|m| m.id == operation_id)
+            .find(|m| m.artifact_operation_id.as_ref().unwrap_or(&m.id) == operation_id)
             .and_then(|m| m.artifact.clone())
             .ok_or_else(|| crate::Error::Rejected("artifact is not in current evidence".into()))?;
         ensure(

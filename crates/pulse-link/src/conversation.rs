@@ -5,8 +5,9 @@ pub(crate) fn status(task: &Task) -> String {
     use pulse_core::State::*;
     let state = match task.state {
         Queued => "等待處理",
-        Planning | Ready | Running => "分析中",
-        Dispatched => "本機讀取中",
+        Planning | Running => "分析中",
+        Ready => "已批准，等待執行",
+        Dispatched => "本機處理中",
         WaitingDevice if task.reason.as_deref() == Some("browser_capability_wait") => {
             "等待本機瀏覽器；請核對安裝與網址範圍"
         }
@@ -19,6 +20,12 @@ pub(crate) fn status(task: &Task) -> String {
         Succeeded => "已完成驗收",
         Failed => "未完成",
         Blocked if task.reason.as_deref() == Some("model_reply_ready") => "分析已保存，待確認",
+        Blocked if task.reason.as_deref() == Some("browser_action_not_executed") => {
+            "畫面或授權已變更，未執行操作；請重新提出任務"
+        }
+        Blocked if task.reason.as_deref() == Some("browser_approval_invalid") => {
+            "操作批准已失效；請重新提出任務"
+        }
         Blocked if task.reason.as_deref() == Some("budget_exhausted") => "已達費用上限",
         Blocked if task.reason.as_deref() == Some("model_calls_exhausted") => "已達模型呼叫上限",
         Blocked if task.reason.as_deref() == Some("deadline_exhausted") => "已達任務時間上限",
@@ -122,6 +129,14 @@ fn create(id: String, goal: String) -> Command {
 // Only an explicit Human browser instruction selects the resource. Incidental URLs do not.
 fn browser_scope(text: &str) -> std::result::Result<Option<String>, ()> {
     let text = request_text(text);
+    if let Some(rest) = ["操作網頁", "用瀏覽器操作"]
+        .iter()
+        .find_map(|prefix| text.strip_prefix(prefix))
+    {
+        let url = rest.split_whitespace().next().ok_or(())?;
+        let url = pulse_core::browser_url(&format!("browser:{url}")).ok_or(())?;
+        return Ok(Some(format!("browser-interact:{url}")));
+    }
     let Some(rest) = ["用瀏覽器讀取", "用瀏覽器開啟", "瀏覽", "browser "]
         .iter()
         .find_map(|prefix| text.strip_prefix(prefix))

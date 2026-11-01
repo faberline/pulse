@@ -11,9 +11,9 @@ use serde_json::json;
 use sqlx::{Row, SqliteConnection};
 
 #[derive(Clone, Serialize, Deserialize)]
-struct ProposedRead {
-    operation_id: String,
-    call: ToolCall,
+pub(crate) struct ProposedRead {
+    pub operation_id: String,
+    pub call: ToolCall,
 }
 
 async fn save(db: &mut SqliteConnection, task: &Task, run: &Run) -> Result<()> {
@@ -29,7 +29,11 @@ async fn save(db: &mut SqliteConnection, task: &Task, run: &Run) -> Result<()> {
         .await?;
     Ok(())
 }
-async fn current(db: &mut SqliteConnection, token: &Token, time: i64) -> Result<(Task, Run)> {
+pub(crate) async fn current(
+    db: &mut SqliteConnection,
+    token: &Token,
+    time: i64,
+) -> Result<(Task, Run)> {
     let data: String = sqlx::query_scalar("SELECT data FROM tasks WHERE id=?")
         .bind(&token.task_id)
         .fetch_one(&mut *db)
@@ -92,6 +96,9 @@ impl Hub {
             .tool
             .as_ref()
             .ok_or_else(|| crate::Error::Rejected("missing tool proposal".into()))?;
+        if matches!(call.operation, ReadOp::BrowserAction { .. }) {
+            return self.propose_browser_action(token, call, time).await;
+        }
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
         let (mut task, mut run) = current(&mut tx, token, time).await?;
         ensure(
