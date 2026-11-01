@@ -46,6 +46,8 @@ A known receipt resolves the operation and can continue the same model run. A pr
 
 Execution versions are `pulse-remote-9`, `effective-read-4`, `pulse-read-4` and `human-browser-actions-1`. Checkpoint schema is 1. Database schema is 5. Old migrations are unchanged.
 
+The later scoped computer-read candidate uses `pulse-remote-10` and `human-computer-read-1`. It preserves this browser path. The native browser evidence recorded here was produced at the earlier candidate, and still needs the real SwiftUI/provider approval acceptance.
+
 ## Candidate checks, 2026-11-02
 
 Four server integration tests cover approval cards and their source image, no dispatch before approval, one-use dispatch, duplicate results, expiry, rejection, revision, cancellation, restart, outbox rollback, known/unknown receipts and interruptions after dispatch. Provider tests reject forged grants, effects and special submit keys. A proxy test sends a delayed valid request once, then verifies replay, wrong URL/body, invalid framing, withdrawal and expiry. A Swift test verifies the approval button's task, image, connection, expiry and pending-decision gates. The Swift suite has 14 tests.

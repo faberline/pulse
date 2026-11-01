@@ -55,6 +55,7 @@ public struct ComputerBinding: Codable, Equatable, Sendable {
 public struct ComputerRequest: Sendable {
   public let kind: String
   public let binding: ComputerBinding?
+  public let expectedProcessLaunchedAt: Int64?
   public static func decode(_ data: Data) throws -> Self {
     do { return try decodeValue(data) }
     catch { throw ComputerError.invalidRequest }
@@ -63,14 +64,22 @@ public struct ComputerRequest: Sendable {
     guard data.count <= 16_384,
       let value = try JSONSerialization.jsonObject(with: data) as? [String: Any],
       let kind = value["kind"] as? String else { throw ComputerError.invalidRequest }
-    if kind == "status", Set(value.keys) == ["kind"] { return Self(kind: kind, binding: nil) }
-    guard kind == "observe", Set(value.keys) == ["kind", "binding"],
+    if kind == "status", Set(value.keys) == ["kind"] { return Self(kind: kind, binding: nil, expectedProcessLaunchedAt: nil) }
+    let keys = Set(value.keys)
+    guard kind == "observe", keys == ["kind", "binding"] || keys == ["kind", "binding", "expected_process_launched_at"],
       let binding = value["binding"] as? [String: Any],
       Set(binding.keys) == ["operation_id", "task_id", "revision", "device", "epoch"]
     else { throw ComputerError.invalidRequest }
     let decoded = try JSONDecoder().decode(ComputerBinding.self, from: JSONSerialization.data(withJSONObject: binding))
     try decoded.validate()
-    return Self(kind: kind, binding: decoded)
+    var launched: Int64? = nil
+    if keys.contains("expected_process_launched_at") {
+      guard let text = value["expected_process_launched_at"] as? String,
+        let number = Int64(text), number > 0, String(number) == text
+      else { throw ComputerError.invalidRequest }
+      launched = number
+    }
+    return Self(kind: kind, binding: decoded, expectedProcessLaunchedAt: launched)
   }
 }
 
@@ -125,7 +134,7 @@ public struct ComputerResponse: Codable, Sendable {
   public let observation: ComputerObservation?
   public let error: ComputerError?
   public init(permissions: ComputerPermissions, observation: ComputerObservation? = nil, error: ComputerError? = nil) {
-    version = "pulse-computer-observe-1"; self.permissions = permissions
+    version = "pulse-computer-observe-2"; self.permissions = permissions
     self.observation = observation; self.error = error
   }
 }

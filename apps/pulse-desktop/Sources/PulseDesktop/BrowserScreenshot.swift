@@ -7,8 +7,8 @@ struct BrowserScreenshot: View {
   @State private var showImage = false
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
-      Text("瀏覽器截圖 · \(artifact.title)").font(.headline)
-      Text(artifact.url).textSelection(.enabled).font(.caption)
+      Text("\(artifact.computer == nil ? "瀏覽器截圖" : "程式視窗") · \(artifact.title)").font(.headline)
+      Text(artifact.sourceLabel).textSelection(.enabled).font(.caption)
       Text("取得：\(Date(timeIntervalSince1970: Double(artifact.observed_at) / 1000).formatted())")
         .font(.caption).foregroundStyle(.secondary)
       if model.state.tasks.first(where: { $0.id == artifact.task_id })?.revision != artifact.revision {
@@ -17,7 +17,7 @@ struct BrowserScreenshot: View {
       if let image = model.browserImages[message.artifactID] {
         Button { showImage = true } label: {
           Image(nsImage: image).resizable().scaledToFit().frame(maxHeight: 320)
-        }.buttonStyle(.plain).accessibilityLabel("放大瀏覽器截圖")
+        }.buttonStyle(.plain).accessibilityLabel("放大截圖")
         Text("原始 PNG 已核對。點圖片放大。").font(.caption).foregroundStyle(.secondary)
       } else {
         Button("載入截圖") { model.loadBrowserArtifact(message) }

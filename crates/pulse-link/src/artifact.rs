@@ -12,11 +12,20 @@ pub struct ArtifactRef {
     pub revision: String,
     pub digest: String,
     pub length: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer: Option<ComputerArtifactSource>,
     pub title: String,
     pub observed_at: i64,
     pub width: u32,
     pub height: u32,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerArtifactSource {
+    pub binding: pulse_core::ComputerBinding,
+    pub selection: pulse_core::ComputerSelection,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,7 +60,19 @@ impl ArtifactRef {
                 && crate::protocol::number(&self.revision).is_ok_and(|n| n > 0)
                 && digest_id(&self.digest)
                 && (33..=MAX_PNG as u32).contains(&self.length)
-                && pulse_core::browser_url(&format!("browser:{}", self.url)).is_some()
+                && match &self.computer {
+                    Some(source) => {
+                        self.url.is_empty()
+                            && source.binding.valid()
+                            && source.binding.task_id == self.task_id
+                            && source.binding.revision.to_string() == self.revision
+                            && source.selection.valid()
+                            && source.selection.process_launched_at <= self.observed_at
+                            && !self.title.is_empty()
+                            && self.title.len() <= 512
+                    }
+                    None => pulse_core::browser_url(&format!("browser:{}", self.url)).is_some(),
+                }
                 && self.title.len() <= 4096
                 && self.observed_at > 0
                 && self.width > 0
@@ -61,6 +82,19 @@ impl ArtifactRef {
                 && u64::from(self.width) * u64::from(self.height) <= 16_777_216,
             "invalid artifact metadata",
         )
+    }
+    pub fn matches_computer(&self, observation: &pulse_core::ComputerObservation) -> bool {
+        self.computer.as_ref().is_some_and(|source| {
+            source.binding == observation.binding && source.selection == observation.selection()
+        }) && self.url.is_empty()
+            && self.task_id == observation.binding.task_id
+            && self.revision == observation.binding.revision.to_string()
+            && self.title == observation.title
+            && self.observed_at == observation.observed_at
+            && self.digest == observation.image.digest
+            && self.length == observation.image.length
+            && self.width == observation.image.width
+            && self.height == observation.image.height
     }
     pub fn verify(&self, png: &[u8]) -> Result<()> {
         self.validate()?;

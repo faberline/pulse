@@ -23,6 +23,45 @@ impl ComputerTarget {
     }
 }
 
+/// Exact Human-selected process instance and window. It is not a permission grant.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerSelection {
+    pub target: ComputerTarget,
+    pub process_launched_at: i64,
+}
+impl ComputerSelection {
+    pub fn valid(&self) -> bool {
+        self.target.valid() && self.process_launched_at > 0
+    }
+    pub fn scope(&self) -> Option<String> {
+        self.valid().then(|| {
+            format!(
+                "computer:{}:{}:{}:{}",
+                self.target.bundle_id,
+                self.target.pid,
+                self.target.window_id,
+                self.process_launched_at
+            )
+        })
+    }
+    pub fn from_scope(scope: &str) -> Option<Self> {
+        let parts: Vec<_> = scope.strip_prefix("computer:")?.split(':').collect();
+        if parts.len() != 4 {
+            return None;
+        }
+        let selection = Self {
+            target: ComputerTarget {
+                bundle_id: parts[0].into(),
+                pid: parts[1].parse().ok()?,
+                window_id: parts[2].parse().ok()?,
+            },
+            process_launched_at: parts[3].parse().ok()?,
+        };
+        (selection.scope().as_deref() == Some(scope)).then_some(selection)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ComputerBinding {
@@ -142,6 +181,16 @@ pub struct ComputerObservation {
     pub image: ComputerImageRef,
 }
 impl ComputerObservation {
+    /// Retained evidence may outlive its action lifetime. It still has to be well formed.
+    pub fn valid_evidence(&self) -> bool {
+        self.valid(self.observed_at)
+    }
+    pub fn selection(&self) -> ComputerSelection {
+        ComputerSelection {
+            target: self.target.clone(),
+            process_launched_at: self.process_launched_at,
+        }
+    }
     pub fn valid(&self, now: i64) -> bool {
         self.binding.valid()
             && self.target.valid()

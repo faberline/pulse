@@ -27,11 +27,12 @@ impl Hub {
                 && row.get::<i64, _>("epoch") as u64 == epoch
                 && row.get::<String, _>("task_id") == artifact.task_id
                 && row.get::<String, _>("task_revision") == artifact.revision
-                && matches!(
-                    operation,
-                    ReadOp::Browser { .. }
-                        | ReadOp::BrowserInspect { .. }
-                        | ReadOp::BrowserAction { .. }
+                && crate::computer_transport::valid_chunk_source(
+                    &operation,
+                    artifact,
+                    operation_id,
+                    device,
+                    epoch,
                 ),
             "artifact source binding mismatch",
         )?;

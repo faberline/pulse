@@ -16,7 +16,7 @@ def call(arguments, payload=None):
     )
     assert len(result.stdout) <= 65_536
     value = json.loads(result.stdout)
-    assert value["version"] == "pulse-computer-observe-1"
+    assert value["version"] == "pulse-computer-observe-2"
     assert type(value["permissions"]["accessibility"]) is bool
     assert type(value["permissions"]["screen_capture"]) is bool
     assert value.get("observation") is None
@@ -32,6 +32,9 @@ with tempfile.TemporaryDirectory(prefix="pulse-computer-check-") as directory:
     assert denied["error"] in ["permissions_required", "target_unavailable"]
     for payload in [b'{"kind":"click"}', b'{"kind":"type","text":"send"}', b'{"kind":"script"}', b" " * 16_385]:
         assert call(arguments, payload)["error"] == "invalid_request"
+    for launched in [0, True, "0", "01", "+1", "9223372036854775808"]:
+        payload = {"kind": "observe", "binding": binding, "expected_process_launched_at": launched}
+        assert call(arguments, json.dumps(payload).encode())["error"] == "invalid_request"
     assert list(pathlib.Path(directory).iterdir()) == []
 print("Computer helper: native preflight and rejection checks passed; no capture or permission request.")
 

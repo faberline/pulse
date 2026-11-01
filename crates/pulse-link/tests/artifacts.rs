@@ -23,6 +23,7 @@ fn image(multipart: bool) -> CapturedImage {
             digest: hash_bytes(&png),
             length: png.len() as u32,
             url: "https://example.com/".into(),
+            computer: None,
             title: "Native evidence".into(),
             observed_at: pulse_link::now(),
             width: 1,

@@ -87,6 +87,28 @@ impl Executor {
             image: None,
         };
         match operation {
+            ReadOp::ComputerInspect { selection } => {
+                let binding = pulse_core::ComputerBinding {
+                    operation_id: binding.operation_id.clone(),
+                    task_id: binding.task_id.clone(),
+                    revision: match number(&binding.revision) {
+                        Ok(value) => value,
+                        Err(_) => return rejected("invalid computer binding"),
+                    },
+                    device: binding.device.clone(),
+                    epoch: binding.epoch,
+                };
+                let Some(runtime) = &self.computer else {
+                    return rejected("computer helper unavailable");
+                };
+                match runtime.observe_selected(&binding, &selection).await {
+                    Ok(evidence) if evidence.observation.selection() == selection => {
+                        crate::computer_runtime::executed_observation(evidence)
+                            .unwrap_or_else(|_| rejected("computer evidence exceeds limits"))
+                    }
+                    _ => rejected("computer observation unavailable or selected process changed"),
+                }
+            }
             ReadOp::BrowserInspect { url } => {
                 let Some(browser) = &self.browser else {
                     return rejected("browser unavailable");
@@ -343,7 +365,9 @@ impl Executor {
         }
         let executor = self.clone();
         let result = match operation {
-            ReadOp::BrowserInspect { .. } | ReadOp::BrowserAction { .. } => {
+            ReadOp::BrowserInspect { .. }
+            | ReadOp::BrowserAction { .. }
+            | ReadOp::ComputerInspect { .. } => {
                 Err(crate::Error::Rejected("bound work required".into()))
             }
             ReadOp::Browser { .. } => unreachable!(),
@@ -397,6 +421,7 @@ impl Executor {
             digest: snapshot.screenshot_digest,
             length: snapshot.png.len() as u32,
             url: snapshot.url,
+            computer: None,
             title: snapshot.title,
             observed_at: snapshot.observed_at,
             width,

@@ -7,6 +7,7 @@ pub mod browser_runtime;
 pub mod browser_session;
 pub mod client;
 pub mod computer_runtime;
+mod computer_transport;
 mod conversation;
 pub mod executor;
 pub mod journal;

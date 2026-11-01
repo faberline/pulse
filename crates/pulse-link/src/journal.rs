@@ -378,6 +378,7 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                     ReadOp::Browser { .. }
                         | ReadOp::BrowserInspect { .. }
                         | ReadOp::BrowserAction { .. }
+                        | ReadOp::ComputerInspect { .. }
                 );
                 ensure(
                     used < if browser { 934 } else { 998 }
@@ -474,6 +475,13 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                 matches!(state.as_deref(), Some("accepted" | "running")),
                 "work already finished or missing",
             )?;
+            crate::computer_transport::validate_result(
+                &envelope.payload,
+                &self.device,
+                number(&envelope.epoch)?,
+                &outcome,
+                image.as_ref().map(|image| &image.artifact),
+            )?;
             if let Some(mut image) = image {
                 image.artifact.task_id = task_id.clone();
                 image.artifact.revision = revision.clone();
@@ -486,9 +494,12 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                                 | ReadOp::BrowserInspect { .. }
                                 | ReadOp::BrowserAction { .. },
                             ..
+                        } | ServerPayload::Read {
+                            operation: ReadOp::ComputerInspect { .. },
+                            ..
                         }
                     ) && matches!(outcome, ReadOutcome::Completed { .. }),
-                    "image requires completed browser work",
+                    "image requires completed image work",
                 )?;
                 image.artifact.verify(&image.png)?;
                 let used: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM local_outbox")

@@ -23,6 +23,12 @@ final class BrowserApprovalTests: XCTestCase {
     XCTAssertFalse(enabled(hasImage: false))
     XCTAssertFalse(enabled(pending: true))
     XCTAssertFalse(enabled(now: 90))
+    var appImage = artifact
+    appImage.computer = ComputerArtifactSource(
+      binding: .init(operation_id: "inspect", task_id: "task", revision: "2", device: UUID().uuidString, epoch: "1"),
+      selection: .init(target: .init(bundle_id: "com.faberline.PulseComputerFixture", pid: 42, window_id: 7), process_launched_at: 1))
+    XCTAssertFalse(enabled(image: appImage))
+    XCTAssertFalse(enabled(image: BrowserArtifact(task_id: "task", revision: "2", digest: "digest", length: 100, url: "https://other.example/", title: "Fixture", observed_at: 10, width: 1, height: 1)))
     var changed = try JSONSerialization.jsonObject(with: data) as! [String: Any]
     changed["state"] = "dispatched"
     let used = try JSONDecoder().decode(BrowserApproval.self, from: JSONSerialization.data(withJSONObject: changed))

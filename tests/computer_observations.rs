@@ -105,3 +105,41 @@ fn native_source_metadata_has_canonical_counters_and_no_private_path_field() {
     input["image"]["path"] = json!("/private/forged");
     assert!(serde_json::from_value::<ComputerObservation>(input).is_err());
 }
+
+#[test]
+fn computer_scope_has_one_canonical_process_instance_and_archived_evidence_cannot_mix_tools() {
+    let observation = observation();
+    let selection = observation.selection();
+    let scope = selection.scope().unwrap();
+    assert!(read_scope(&scope));
+    assert_eq!(ComputerSelection::from_scope(&scope), Some(selection));
+    for scope in [
+        "computer:com.app:01:2:3",
+        "computer:com.app:+1:2:3",
+        "computer:com.app:1:2:03",
+        "computer:com.app:0:2:3",
+        "computer:com.app:1:2:0",
+        "computer:com.app:2147483648:2:3",
+        "computer:com.*:1:2:3",
+        "computer:com.app:1:2:3:extra",
+        "computer:com.app:1:2:9223372036854775808",
+    ] {
+        assert!(!read_scope(scope), "{scope}");
+    }
+    let mut value = serde_json::to_value(ReadOutcome::text("fixture".into(), false)).unwrap();
+    value["computer"] = serde_json::to_value(observation).unwrap();
+    let outcome: ReadOutcome = serde_json::from_value(value.clone()).unwrap();
+    assert!(outcome.valid());
+    let browser = serde_json::json!({"session_id":uuid::Uuid::new_v4().to_string(),"nonce":uuid::Uuid::new_v4().to_string(),"url":"https://example.com/","title":"fixture","png_digest":"a".repeat(64),"elements":[],"observed_at":1000,"expires_at":121000});
+    assert!(
+        serde_json::from_value::<BrowserObservation>(browser.clone())
+            .unwrap()
+            .valid()
+    );
+    value["observation"] = browser;
+    assert!(
+        !serde_json::from_value::<ReadOutcome>(value)
+            .unwrap()
+            .valid()
+    );
+}

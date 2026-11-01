@@ -635,6 +635,30 @@ impl Hub {
                             crate::conversation::plan(id, goal, &self.core.list_tasks(100).await?)
                         }
                     }
+                    HumanAction::SubmitComputer {
+                        id,
+                        goal,
+                        selection,
+                    } => {
+                        ensure(
+                            !id.is_empty()
+                                && id.len() <= 128
+                                && !goal.trim().is_empty()
+                                && goal.len() <= 4096,
+                            "computer task size",
+                        )?;
+                        vec![Command::Create {
+                            id: id.clone(),
+                            goal: goal.clone(),
+                            scope: selection.scope().ok_or_else(|| {
+                                crate::Error::Rejected("invalid computer selection".into())
+                            })?,
+                            priority: 0,
+                            requires_device: false,
+                            parent: None,
+                            dependencies: vec![],
+                        }]
+                    }
                     HumanAction::Cancel { task_id, revision } => vec![Command::Cancel {
                         id: task_id.clone(),
                         expected_revision: number(revision)?,
@@ -657,7 +681,7 @@ impl Hub {
                 let outcome = self.core.route(&event.event_id).await?;
                 if let (
                     pulse_core::Outcome::Rejected { reason },
-                    HumanAction::Submit { goal, .. },
+                    HumanAction::Submit { goal, .. } | HumanAction::SubmitComputer { goal, .. },
                 ) = (&outcome, action)
                 {
                     let notice = match reason.as_str() {
@@ -701,7 +725,7 @@ impl Hub {
                         )
                         .await?;
                     }
-                    HumanAction::Submit { goal, .. } => {
+                    HumanAction::Submit { goal, .. } | HumanAction::SubmitComputer { goal, .. } => {
                         let body = match &outcome {
                             pulse_core::Outcome::Clarification { question } => question.clone(),
                             pulse_core::Outcome::Applied { task_ids } => {
@@ -738,7 +762,9 @@ impl Hub {
                             task.revision == number(revision)?
                                 && !task.state.terminal()
                                 && !task.cancel_requested
-                                && task.scope == "pulse:read"
+                                && (task.scope == "pulse:read"
+                                    || pulse_core::ComputerSelection::from_scope(&task.scope)
+                                        .is_some())
                                 && operation.permitted_by(&task.scope)
                                 && task.deadline > time,
                             "read authorization invalid",
@@ -829,6 +855,31 @@ impl Hub {
                 )?;
                 let encoded = serde_json::to_string(outcome)?;
                 let operation: ReadOp = serde_json::from_str(&row.get::<String, _>("request"))?;
+                let artifact = if matches!(&operation, ReadOp::ComputerInspect { .. })
+                    && matches!(outcome, ReadOutcome::Completed { .. })
+                {
+                    let row = sqlx::query("SELECT metadata,png FROM link_artifacts WHERE operation_id=? AND png IS NOT NULL")
+                        .bind(operation_id).fetch_optional(&self.db).await?
+                        .ok_or_else(|| crate::Error::Rejected("computer original image is incomplete".into()))?;
+                    let artifact: crate::artifact::ArtifactRef =
+                        serde_json::from_str(&row.get::<String, _>("metadata"))?;
+                    artifact.verify(&row.get::<Vec<u8>, _>("png"))?;
+                    Some(artifact)
+                } else {
+                    None
+                };
+                crate::computer_transport::validate_result(
+                    &ServerPayload::Read {
+                        operation_id: operation_id.clone(),
+                        task_id: task_id.clone(),
+                        revision: revision.clone(),
+                        operation: operation.clone(),
+                    },
+                    device,
+                    number(&envelope.epoch)?,
+                    outcome,
+                    artifact.as_ref(),
+                )?;
                 if let Some(old) = row.get::<Option<String>, _>("result") {
                     ensure(old == encoded, "result conflict")?;
                 }
@@ -915,6 +966,10 @@ impl Hub {
                     ReadOp::GitStatus => "Git 狀態".into(),
                     ReadOp::Browser { url } => format!("網頁 {url}"),
                     ReadOp::BrowserInspect { url } => format!("觀察網頁 {url}"),
+                    ReadOp::ComputerInspect { selection } => format!(
+                        "程式視窗 {} · {}",
+                        selection.target.bundle_id, selection.target.window_id
+                    ),
                     ReadOp::BrowserAction { .. } => "已批准的瀏覽器操作".into(),
                 };
                 let body = match outcome {

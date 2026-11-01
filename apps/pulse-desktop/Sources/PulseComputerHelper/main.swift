@@ -28,7 +28,7 @@ struct PulseComputerHelper {
         let request = try ComputerRequest.decode(input)
         if request.kind == "status" { response = ComputerResponse(permissions: permissions) }
         else if let binding = request.binding {
-          let observation = try await WindowObserver.observe(target: target, binding: binding, cache: URL(fileURLWithPath: arguments[7]))
+          let observation = try await WindowObserver.observe(target: target, binding: binding, cache: URL(fileURLWithPath: arguments[7]), expectedProcessLaunchedAt: request.expectedProcessLaunchedAt)
           response = ComputerResponse(permissions: computerPermissions(), observation: observation)
         } else { throw ComputerError.invalidRequest }
       }

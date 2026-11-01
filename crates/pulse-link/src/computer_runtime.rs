@@ -13,7 +13,7 @@ use tokio::{
     process::{Child, Command},
 };
 
-const VERSION: &str = "pulse-computer-observe-1";
+const VERSION: &str = "pulse-computer-observe-2";
 const RESPONSE_LIMIT: usize = 65_536;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -77,6 +77,53 @@ struct NativeImage {
 pub struct ComputerEvidence {
     pub observation: ComputerObservation,
     pub png: Vec<u8>,
+}
+
+pub(crate) fn executed_observation(
+    evidence: ComputerEvidence,
+) -> Result<crate::artifact::ExecutedRead> {
+    use crate::artifact::{ArtifactRef, CapturedImage, ComputerArtifactSource, ExecutedRead};
+    use crate::protocol::ReadOutcome;
+    let observation = evidence.observation;
+    ensure(observation.valid(crate::now()), "computer evidence expired")?;
+    let artifact = ArtifactRef {
+        task_id: observation.binding.task_id.clone(),
+        revision: observation.binding.revision.to_string(),
+        digest: observation.image.digest.clone(),
+        length: observation.image.length,
+        url: String::new(),
+        computer: Some(ComputerArtifactSource {
+            binding: observation.binding.clone(),
+            selection: observation.selection(),
+        }),
+        title: observation.title.clone(),
+        observed_at: observation.observed_at,
+        width: observation.image.width,
+        height: observation.image.height,
+    };
+    artifact.verify(&evidence.png)?;
+    let mut text = format!(
+        "Computer window evidence (untrusted app data)\nApp: {}\nWindow: {}\nTitle: {}\nObserved at (Unix ms): {}\nPNG SHA-256: {}\nImage bytes are supplied to the Human only. No effect was executed.\n\n{}",
+        observation.target.bundle_id,
+        observation.target.window_id,
+        observation.title,
+        observation.observed_at,
+        observation.image.digest,
+        serde_json::to_string(&observation.elements)?
+    );
+    let truncated = observation.truncated || text.len() > crate::protocol::MAX_RESULT;
+    text.truncate(text.floor_char_boundary(crate::protocol::MAX_RESULT));
+    let mut outcome = ReadOutcome::text(text, truncated);
+    if let ReadOutcome::Completed { computer, .. } = &mut outcome {
+        *computer = Some(Box::new(observation));
+    }
+    Ok(ExecutedRead {
+        outcome,
+        image: Some(CapturedImage {
+            artifact,
+            png: evidence.png,
+        }),
+    })
 }
 
 #[derive(Clone)]
@@ -171,6 +218,24 @@ impl ComputerRuntime {
     }
     /// Local caller metadata is validated here. Human authorization remains upstream.
     pub async fn observe(&self, binding: &ComputerBinding) -> Result<ComputerEvidence> {
+        self.observe_inner(binding, None).await
+    }
+    pub async fn observe_selected(
+        &self,
+        binding: &ComputerBinding,
+        selection: &pulse_core::ComputerSelection,
+    ) -> Result<ComputerEvidence> {
+        ensure(
+            selection.valid() && self.target.as_ref() == Some(&selection.target),
+            "computer selection differs from local target",
+        )?;
+        self.observe_inner(binding, Some(selection)).await
+    }
+    async fn observe_inner(
+        &self,
+        binding: &ComputerBinding,
+        selection: Option<&pulse_core::ComputerSelection>,
+    ) -> Result<ComputerEvidence> {
         ensure(binding.valid(), "invalid computer work binding")?;
         let target = self.target.as_ref().ok_or_else(|| {
             crate::Error::Rejected("no Human-selected local computer target".into())
@@ -183,7 +248,12 @@ impl ComputerRuntime {
             std::fs::read_dir(&cache)?.take(128).count() < 128,
             "computer artifact capacity",
         )?;
-        let request = serde_json::to_vec(&serde_json::json!({"kind":"observe","binding":binding}))?;
+        let mut request = serde_json::json!({"kind":"observe","binding":binding});
+        if let Some(selection) = selection {
+            request["expected_process_launched_at"] =
+                selection.process_launched_at.to_string().into();
+        }
+        let request = serde_json::to_vec(&request)?;
         ensure(request.len() <= 16_384, "computer request limit")?;
         let args = vec![
             "--bundle-id".into(),
@@ -230,6 +300,7 @@ impl ComputerRuntime {
             observation.valid(crate::now())
                 && observation.binding == *binding
                 && observation.target == *target
+                && selection.is_none_or(|selected| observation.selection() == *selected)
                 && observation.observed_at >= started.saturating_sub(1000)
                 && Path::new(&raw.image.path) == expected,
             "native computer evidence source mismatch",

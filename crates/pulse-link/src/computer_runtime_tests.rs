@@ -15,11 +15,12 @@ if mode=='oversize': print('x'*65537);sys.exit(0)
 if mode=='stderr': sys.stderr.write('x'*4097);sys.exit(0)
 if mode=='exit': sys.exit(74)
 if mode=='invalid': print('not-json');sys.exit(0)
-response={'version':'pulse-computer-observe-1','permissions':{'accessibility':True,'screen_capture':True}}
+response={'version':'pulse-computer-observe-2','permissions':{'accessibility':True,'screen_capture':True}}
 if mode=='version':response['version']='unknown-helper'
 if mode=='extra':response['grant']='forged'
 if sys.argv[1:]!=['--status']:
  request=json.load(sys.stdin)
+ if mode=='selected':assert request.get('expected_process_launched_at')=='1'
  args=dict(zip(sys.argv[1::2],sys.argv[2::2]))
  cache=pathlib.Path(args['--cache'])
  png=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=')
@@ -105,6 +106,71 @@ async fn fixed_native_bridge_validates_source_png_and_omits_local_paths() {
             .is_none()
     );
     assert_reaped(&runtime).await;
+}
+
+#[tokio::test]
+async fn bound_computer_dispatch_checks_selection_before_capture_and_returns_original_image() {
+    let (dir, runtime) = fixture("selected");
+    let binding = binding();
+    let selection = pulse_core::ComputerSelection {
+        target: runtime.configured_target().unwrap().clone(),
+        process_launched_at: 1,
+    };
+    let executor = crate::executor::Executor::new(dir.path())
+        .unwrap()
+        .with_computer(Some(runtime.clone()));
+    let work = crate::browser_session::WorkBinding {
+        operation_id: binding.operation_id.clone(),
+        task_id: binding.task_id.clone(),
+        revision: binding.revision.to_string(),
+        device: binding.device.clone(),
+        epoch: binding.epoch,
+    };
+    let mut other = selection.clone();
+    other.target.window_id += 1;
+    let result = executor
+        .execute_bound(
+            crate::protocol::ReadOp::ComputerInspect { selection: other },
+            &work,
+        )
+        .await;
+    assert!(matches!(
+        result.outcome,
+        crate::protocol::ReadOutcome::Rejected { .. }
+    ));
+    assert!(!runtime.helper.with_extension("stage").exists());
+    let result = executor
+        .execute_bound(
+            crate::protocol::ReadOp::ComputerInspect {
+                selection: selection.clone(),
+            },
+            &work,
+        )
+        .await;
+    let crate::protocol::ReadOutcome::Completed {
+        computer: Some(observation),
+        observation: None,
+        ..
+    } = result.outcome
+    else {
+        panic!("not completed")
+    };
+    assert_eq!(observation.selection(), selection);
+    let image = result.image.unwrap();
+    image.artifact.verify(&image.png).unwrap();
+    assert!(image.artifact.matches_computer(&observation));
+    let mut reused = selection;
+    reused.process_launched_at = 2;
+    let result = executor
+        .execute_bound(
+            crate::protocol::ReadOp::ComputerInspect { selection: reused },
+            &work,
+        )
+        .await;
+    assert!(matches!(
+        result.outcome,
+        crate::protocol::ReadOutcome::Rejected { .. }
+    ));
 }
 
 #[tokio::test]

@@ -66,6 +66,7 @@ impl Hub {
         operation: &ReadOp,
     ) -> Result<bool> {
         let (url, interactive) = match operation {
+            ReadOp::ComputerInspect { .. } => return Ok(false),
             ReadOp::Browser { url } => (url.clone(), false),
             ReadOp::BrowserInspect { url } => (url.clone(), true),
             ReadOp::BrowserAction {
@@ -104,6 +105,20 @@ impl Hub {
         let mut changed = false;
         for data in rows {
             let mut task: Task = serde_json::from_str(&data)?;
+            // Native app selection/capability UI is not connected yet. Wait before any paid call.
+            if pulse_core::ComputerSelection::from_scope(&task.scope).is_some() {
+                if task.state == State::Queued && !task.cancel_requested && task.deadline > time {
+                    task.state = State::WaitingDevice;
+                    task.reason = Some("computer_selection_wait".into());
+                    sqlx::query("UPDATE tasks SET data=? WHERE id=?")
+                        .bind(serde_json::to_string(&task)?)
+                        .bind(&task.id)
+                        .execute(&mut *tx)
+                        .await?;
+                    changed = true;
+                }
+                continue;
+            }
             let Some(url) = pulse_core::browser_url(&task.scope)
                 .or_else(|| pulse_core::interaction_url(&task.scope))
             else {

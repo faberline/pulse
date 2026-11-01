@@ -99,7 +99,8 @@ impl Store {
         let mut task: Task = load(db, "tasks", id).await?;
         require(
             task.revision == revision
-                && task.scope == "pulse:read"
+                && (task.scope == "pulse:read"
+                    || crate::ComputerSelection::from_scope(&task.scope).is_some())
                 && !task.cancel_requested
                 && matches!(
                     task.state,

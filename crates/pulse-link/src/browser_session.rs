@@ -133,6 +133,7 @@ pub(crate) fn evidence(
                 digest: snapshot.screenshot_digest,
                 length: snapshot.png.len() as u32,
                 url: snapshot.url,
+                computer: None,
                 title: snapshot.title,
                 observed_at: snapshot.observed_at,
                 width,

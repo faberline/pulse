@@ -11,6 +11,9 @@ pub(crate) fn status(task: &Task) -> String {
         WaitingDevice if task.reason.as_deref() == Some("browser_capability_wait") => {
             "等待本機瀏覽器；請核對安裝與網址範圍"
         }
+        WaitingDevice if task.reason.as_deref() == Some("computer_selection_wait") => {
+            "等待選定程式與電腦存取權限"
+        }
         WaitingDevice => "等待本機連線",
         WaitingApproval => "等待確認",
         RetryWait => "等待重試",

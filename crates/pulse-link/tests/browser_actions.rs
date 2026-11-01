@@ -123,6 +123,7 @@ async fn setup() -> Fixture {
         .await
         .unwrap();
     let artifact = ArtifactRef {
+        computer: None,
         task_id: "task".into(),
         revision: "1".into(),
         digest: hash_bytes(&png),

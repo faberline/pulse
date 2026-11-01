@@ -16,6 +16,8 @@ pub enum ReadOutcome {
         truncated: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         observation: Option<crate::BrowserObservation>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        computer: Option<Box<crate::ComputerObservation>>,
     },
     Rejected {
         reason: String,
@@ -33,6 +35,7 @@ impl ReadOutcome {
             digest,
             truncated,
             observation: None,
+            computer: None,
         }
     }
     pub fn valid(&self) -> bool {
@@ -41,6 +44,7 @@ impl ReadOutcome {
                 text,
                 digest,
                 observation,
+                computer,
                 ..
             } => {
                 text.len() <= MAX_READ_RESULT
@@ -48,6 +52,10 @@ impl ReadOutcome {
                     && observation
                         .as_ref()
                         .is_none_or(crate::BrowserObservation::valid)
+                    && computer
+                        .as_ref()
+                        .is_none_or(|observation| observation.valid_evidence())
+                    && !(observation.is_some() && computer.is_some())
             }
             Self::Rejected { reason } | Self::Unknown { reason } => {
                 !reason.is_empty() && reason.len() <= 1024

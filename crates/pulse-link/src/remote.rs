@@ -9,13 +9,13 @@ pub fn versions() -> Versions {
 }
 fn manifest(provider: Option<&Provider>) -> Versions {
     Versions {
-        workflow: "pulse-remote-9".into(),
+        workflow: "pulse-remote-10".into(),
         schema: "1".into(),
         prompt: "effective-read-4".into(),
         tools: "pulse-read-4".into(),
         model: provider.map(|p| p.model).unwrap_or("unconfigured").into(),
         provider_api: "function-call-1".into(),
-        policy: "human-browser-actions-1".into(),
+        policy: "human-computer-read-1".into(),
     }
 }
 pub async fn step(hub: &Hub, time: i64) -> Result<bool> {

@@ -25,6 +25,7 @@ struct BrowserApproval: Decodable, Sendable {
       && !task.cancelRequested && !task.terminal && task.state == "waiting_approval"
       && now < proposal.expires_at && now < proposal.intent.observation.expires_at
       && artifact?.task_id == task.id && artifact?.revision == task.revision
+      && artifact?.computer == nil && artifact?.url == proposal.intent.observation.url
       && artifact?.digest == proposal.intent.observation.png_digest
       && verifiedDigest == proposal.intent.observation.png_digest
   }

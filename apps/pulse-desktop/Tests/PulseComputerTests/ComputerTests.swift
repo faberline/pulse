@@ -38,6 +38,15 @@ final class ComputerTests: XCTestCase {
     XCTAssertEqual(boundedText("中文測試", bytes: 7), "中文")
     XCTAssertEqual(boundedText(String(repeating: "文", count: 100_000), bytes: 256).utf8.count, 255)
   }
+  func testExpectedProcessLaunchNeedsCanonicalPositiveString() throws {
+    var object = try JSONSerialization.jsonObject(with: request()) as! [String: Any]
+    object["expected_process_launched_at"] = "123"
+    XCTAssertEqual(try ComputerRequest.decode(JSONSerialization.data(withJSONObject: object)).expectedProcessLaunchedAt, 123)
+    for invalid: Any in ["0", "01", "-1", "+1", "9223372036854775808", 123, true, NSNull()] {
+      object["expected_process_launched_at"] = invalid
+      XCTAssertThrowsError(try ComputerRequest.decode(JSONSerialization.data(withJSONObject: object)))
+    }
+  }
   func testPrivatePNGCacheRefusesSymlinksBadModesTamperAndFIFO() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])

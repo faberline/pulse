@@ -50,6 +50,9 @@ pub enum ReadOp {
     BrowserInspect {
         url: String,
     },
+    ComputerInspect {
+        selection: pulse_core::ComputerSelection,
+    },
     BrowserAction {
         session_id: String,
         nonce: String,
@@ -62,6 +65,10 @@ pub enum ReadOp {
 impl ReadOp {
     /// Stable lexical identity only. Executor scope, secret and symlink checks remain separate.
     pub(crate) fn canonical(&self) -> Result<Self> {
+        if let Self::ComputerInspect { selection } = self {
+            ensure(selection.valid(), "invalid computer selection")?;
+            return Ok(self.clone());
+        }
         if let Self::BrowserAction {
             session_id,
             nonce,
@@ -103,7 +110,10 @@ impl ReadOp {
             Self::List { path } if path.is_empty() => return Ok(self.clone()),
             Self::List { path } | Self::Text { path } | Self::GitDiff { path } => path,
             Self::GitStatus => return Ok(self.clone()),
-            Self::Browser { .. } | Self::BrowserInspect { .. } | Self::BrowserAction { .. } => {
+            Self::Browser { .. }
+            | Self::BrowserInspect { .. }
+            | Self::BrowserAction { .. }
+            | Self::ComputerInspect { .. } => {
                 unreachable!()
             }
         };
@@ -123,13 +133,17 @@ impl ReadOp {
             Self::Text { .. } => Self::Text { path },
             Self::GitDiff { .. } => Self::GitDiff { path },
             Self::GitStatus => unreachable!(),
-            Self::Browser { .. } | Self::BrowserInspect { .. } | Self::BrowserAction { .. } => {
+            Self::Browser { .. }
+            | Self::BrowserInspect { .. }
+            | Self::BrowserAction { .. }
+            | Self::ComputerInspect { .. } => {
                 unreachable!()
             }
         })
     }
     pub fn permitted_by(&self, scope: &str) -> bool {
         match self {
+            Self::ComputerInspect { selection } => selection.scope().as_deref() == Some(scope),
             Self::Browser { url } => {
                 pulse_core::browser_url(scope).is_some_and(|allowed| allowed.as_str() == url)
             }
@@ -152,6 +166,11 @@ pub enum HumanAction {
     Submit {
         id: String,
         goal: String,
+    },
+    SubmitComputer {
+        id: String,
+        goal: String,
+        selection: pulse_core::ComputerSelection,
     },
     Cancel {
         task_id: String,

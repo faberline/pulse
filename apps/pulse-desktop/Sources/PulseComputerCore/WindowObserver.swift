@@ -25,12 +25,14 @@ public enum WindowObserver {
     else { throw ComputerError.targetUnavailable }
     return window
   }
-  public static func observe(target: ComputerTarget, binding: ComputerBinding, cache: URL) async throws -> ComputerObservation {
+  public static func observe(target: ComputerTarget, binding: ComputerBinding, cache: URL, expectedProcessLaunchedAt: Int64? = nil) async throws -> ComputerObservation {
     try binding.validate()
     guard computerPermissions().canObserve else { throw ComputerError.permissionsRequired }
     let deadline = ContinuousClock.now.advanced(by: .seconds(8))
     let app = try running(target)
     guard let start = app.launchDate else { throw ComputerError.targetUnavailable }
+    guard expectedProcessLaunchedAt == nil || expectedProcessLaunchedAt == Int64(start.timeIntervalSince1970 * 1000)
+    else { throw ComputerError.targetChanged }
     let selected = try await window(target)
     _ = try running(target, launched: start)
     guard let title = selected.title else { throw ComputerError.targetUnavailable }
