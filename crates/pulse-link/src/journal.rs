@@ -160,6 +160,7 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         sqlx::query("UPDATE local_schedule_delivery SET state='unknown' WHERE state='offered'")
             .execute(&mut *tx)
             .await?;
+        crate::derived_projection::clear(&mut tx).await?;
         tx.commit().await?;
         let journal = Self {
             core,
@@ -356,6 +357,49 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
     ) -> Result<bool> {
         let (sequence, message_epoch) = envelope.validate()?;
         ensure(envelope.device == self.device, "wrong device")?;
+        let _lifecycle = if matches!(&envelope.payload, ServerPayload::DerivedSnapshot { .. }) {
+            Some(self.memory_lifecycle.lock().await)
+        } else {
+            None
+        };
+        let _projection_lease =
+            if let ServerPayload::DerivedSnapshot { sources, .. } = &envelope.payload {
+                ensure(
+                    self.role == ClientRole::Chat,
+                    "derived snapshot requires chat",
+                )?;
+                let lease = if self.memory_access_allowed().await? {
+                    self.core
+                        .lease_local_projection_sources(
+                            &self.device,
+                            &hash(&self.server)?,
+                            sources,
+                            crate::now(),
+                        )
+                        .await
+                } else {
+                    Err(pulse_core::Error::Rejected("projection copy denied".into()))
+                };
+                match lease {
+                    Ok(lease) => Some(lease),
+                    Err(pulse_core::Error::Rejected(_)) => {
+                        return self
+                            .accept_erased_projection_locked(&pulse_core::ErasedProjection {
+                                version: envelope.version as u32,
+                                id: envelope.id.clone(),
+                                device: envelope.device.clone(),
+                                sequence: envelope.sequence.clone(),
+                                epoch: envelope.epoch.clone(),
+                                digest: envelope.digest.clone(),
+                                binding_digest: envelope.binding_digest.clone(),
+                            })
+                            .await;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            } else {
+                None
+            };
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
         let cursor: String = sqlx::query_scalar("SELECT value FROM local_meta WHERE key='cursor'")
             .fetch_one(&mut *tx)
@@ -422,11 +466,22 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                 messages,
                 synced_at,
                 local,
+            }
+            | ServerPayload::DerivedSnapshot {
+                tasks,
+                messages,
+                synced_at,
+                local,
+                ..
             } => {
                 if self.role == ClientRole::Chat {
                     crate::memory_chat::journal::dirty(&mut tx).await?;
                 }
                 let state = NativeState {
+                    memory_sources: match &envelope.payload {
+                        ServerPayload::DerivedSnapshot { sources, .. } => sources.clone(),
+                        _ => vec![],
+                    },
                     tasks: tasks.clone(),
                     messages: messages.clone(),
                     synced_at: Some(*synced_at),
@@ -435,6 +490,7 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                     ..Default::default()
                 };
                 sqlx::query("INSERT INTO local_meta VALUES('cache',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(serde_json::to_string(&state)?).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO local_meta VALUES('cache_sequence',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(&envelope.sequence).execute(&mut *tx).await?;
                 for message in messages {
                     sqlx::query("DELETE FROM local_pending WHERE id=?")
                         .bind(&message.id)
@@ -669,6 +725,14 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
             .map(|s| serde_json::from_str::<NativeState>(&s))
             .transpose()?
             .unwrap_or_default();
+        if !state.memory_sources.is_empty()
+            && !self
+                .projection_sources_allowed(&state.memory_sources, crate::now())
+                .await?
+        {
+            state.messages.clear();
+            state.artifacts.clear();
+        }
         for message in &state.messages {
             if let Some(artifact) = &message.artifact {
                 let operation_id = message

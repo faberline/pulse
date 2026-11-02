@@ -208,6 +208,7 @@ impl Store {
             self.memory_guard.write(&manifest)?; // Durable restriction precedes SQLite.
         }
         if clear || !allowed {
+            Store::prune_local_memory_projection_in(&mut tx, None, true).await?;
             sqlx::query("DELETE FROM local_memory_cache")
                 .execute(&mut *tx)
                 .await?;

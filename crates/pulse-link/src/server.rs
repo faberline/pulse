@@ -14,6 +14,11 @@ use serde_json::json;
 use sqlx::{Row, SqlitePool};
 use std::sync::Arc;
 
+pub enum Delivery {
+    Data(Box<Envelope<ServerPayload>>),
+    Erased(pulse_core::ErasedProjection),
+}
+
 #[derive(Clone)]
 pub struct Hub {
     pub core: Store,
@@ -22,6 +27,34 @@ pub struct Hub {
     pub(crate) human: Arc<tokio::sync::Mutex<()>>,
 }
 impl Hub {
+    pub async fn projection_erasure_ready(
+        &self,
+        device: &str,
+        epoch: u64,
+        time: i64,
+    ) -> Result<()> {
+        let count=sqlx::query("UPDATE link_device SET projection_erasure=1 WHERE id=? AND role='chat' AND epoch=? AND revoked=0 AND lease_until>?").bind(device).bind(epoch as i64).bind(time).execute(&self.db).await?.rows_affected();
+        ensure(
+            count == 1,
+            "projection erasure requires a current chat lease",
+        )?;
+        self.notify_change();
+        Ok(())
+    }
+    pub async fn erased_projection(
+        &self,
+        device: &str,
+        sequence: &str,
+    ) -> Result<Option<pulse_core::ErasedProjection>> {
+        let data: Option<String> =
+            sqlx::query_scalar("SELECT data FROM link_erased_frames WHERE device=? AND sequence=?")
+                .bind(device)
+                .bind(number(sequence)? as i64)
+                .fetch_optional(&self.db)
+                .await?;
+        data.map(|s| serde_json::from_str(&s).map_err(crate::Error::from))
+            .transpose()
+    }
     pub fn new(core: Store) -> Self {
         let db = core.application_pool();
         Self {
@@ -95,7 +128,7 @@ impl Hub {
             .execute(&mut *tx)
             .await?;
         sqlx::query("INSERT OR IGNORE INTO link_chat VALUES(?,?,?)")
-            .bind(id)
+            .bind(&id)
             .bind(format!(
                 "模型回覆（{model} · {}）：\n\n{}\n\n分析已保存，任務待確認。",
                 crate::conversation::label(&task),
@@ -104,6 +137,7 @@ impl Hub {
             .bind(time)
             .execute(&mut *tx)
             .await?;
+        Store::track_memory_message_in(&mut tx, &task.id, task.revision, &id, time).await?;
         tx.commit().await?;
         self.changed();
         Ok(())
@@ -157,7 +191,7 @@ impl Hub {
         Ok(())
     }
     pub async fn recover(&self) -> Result<()> {
-        sqlx::query("UPDATE link_device SET schedule_notices=0,lease_until=0,epoch=epoch+1")
+        sqlx::query("UPDATE link_device SET projection_erasure=0,schedule_notices=0,lease_until=0,epoch=epoch+1")
             .execute(&self.db)
             .await?;
         let devices: Vec<String> = sqlx::query_scalar("SELECT id FROM link_device")
@@ -171,7 +205,7 @@ impl Hub {
     }
     pub async fn end(&self, device: &str, epoch: u64) -> Result<()> {
         let changed = sqlx::query(
-            "UPDATE link_device SET schedule_notices=0,lease_until=0 WHERE id=? AND epoch=?",
+            "UPDATE link_device SET projection_erasure=0,schedule_notices=0,lease_until=0 WHERE id=? AND epoch=?",
         )
         .bind(device)
         .bind(epoch as i64)
@@ -192,7 +226,7 @@ impl Hub {
                 .fetch_one(&mut *tx)
                 .await?;
         ensure(cursor <= max as u64, "resume cursor exceeds sent data")?;
-        let row=sqlx::query("UPDATE link_device SET schedule_notices=0,epoch=epoch+1,lease_until=? WHERE id=? AND revoked=0 RETURNING epoch").bind(time+LEASE_MS).bind(device).fetch_optional(&mut *tx).await?.ok_or_else(||crate::Error::Rejected("device revoked".into()))?;
+        let row=sqlx::query("UPDATE link_device SET projection_erasure=0,schedule_notices=0,epoch=epoch+1,lease_until=? WHERE id=? AND revoked=0 RETURNING epoch").bind(time+LEASE_MS).bind(device).fetch_optional(&mut *tx).await?.ok_or_else(||crate::Error::Rejected("device revoked".into()))?;
         let epoch: i64 = row.get("epoch");
         sqlx::query("UPDATE link_outbox SET acknowledged=1 WHERE device=? AND sequence<=?")
             .bind(device)
@@ -255,6 +289,11 @@ impl Hub {
     pub async fn snapshot(&self, device: &str, epoch: u64, time: i64) -> Result<()> {
         // Projection reads and the domain-notification handoff share one committed view.
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+        let erasure_ready: i64 =
+            sqlx::query_scalar("SELECT projection_erasure FROM link_device WHERE id=?")
+                .bind(device)
+                .fetch_one(&mut *tx)
+                .await?;
         let active_chat:i64=sqlx::query_scalar("SELECT count(*) FROM link_device WHERE id=? AND role='chat' AND revoked=0 AND lease_until>?")
             .bind(device).bind(time).fetch_one(&mut *tx).await?;
         let notices_ready: i64 =
@@ -314,6 +353,20 @@ impl Hub {
                 .take(3)
                 .map(|s| short(s, 256))
                 .collect();
+            let bound: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM task_memory_sources WHERE task_id=?")
+                    .bind(&task.id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if bound > 0 {
+                task.evidence.clear();
+                if !matches!(
+                    task.reason.as_deref(),
+                    None | Some("memory_source_withdrawn" | "memory_source_unavailable")
+                ) {
+                    task.reason = Some("memory_context_review".into());
+                }
+            }
         }
         let mut rows = sqlx::query(
             "SELECT c.id,c.body FROM link_chat c ORDER BY EXISTS(SELECT 1 FROM operation_requests r WHERE r.id=c.id AND json_extract(r.data,'$.state') IN ('pending','approved') AND json_extract(r.data,'$.proposal.expires_at')>?) DESC,c.created_at DESC,c.rowid DESC LIMIT 10",
@@ -323,8 +376,19 @@ impl Hub {
         .await?;
         rows.reverse();
         let mut messages = Vec::new();
+        let mut memory_sources = std::collections::BTreeMap::new();
         for row in rows {
             let id: String = row.get("id");
+            let lineage:Option<String>=sqlx::query_scalar("SELECT b.data FROM memory_derived_messages d JOIN task_memory_sources b ON b.task_id=d.task_id AND b.task_revision=d.task_revision WHERE d.id=? AND d.redacted=0").bind(&id).fetch_optional(&mut *tx).await?;
+            if let Some(lineage) = lineage {
+                if erasure_ready == 0 {
+                    continue;
+                }
+                let binding: pulse_core::TaskMemorySources = serde_json::from_str(&lineage)?;
+                for source in binding.sources {
+                    memory_sources.insert(source.source_id.clone(), source);
+                }
+            }
             let approval: Option<String> =
                 sqlx::query_scalar("SELECT data FROM operation_requests WHERE id=?")
                     .bind(&id)
@@ -359,14 +423,27 @@ impl Hub {
                 artifact: metadata.map(|s| serde_json::from_str(&s)).transpose()?,
             });
         }
-        let mut payload = ServerPayload::Snapshot {
-            tasks,
-            messages,
-            synced_at: time,
-            local,
+        let mut payload = if memory_sources.is_empty() {
+            ServerPayload::Snapshot {
+                tasks,
+                messages,
+                synced_at: time,
+                local,
+            }
+        } else {
+            ServerPayload::DerivedSnapshot {
+                tasks,
+                messages,
+                synced_at: time,
+                local,
+                sources: memory_sources.into_values().collect(),
+            }
         };
         while serde_json::to_vec(&payload)?.len() > MAX_FRAME - 2048 {
             if let ServerPayload::Snapshot {
+                tasks, messages, ..
+            }
+            | ServerPayload::DerivedSnapshot {
                 tasks, messages, ..
             } = &mut payload
             {
@@ -424,18 +501,50 @@ impl Hub {
         Ok(())
     }
     pub async fn outgoing(&self, device: &str) -> Result<Vec<Envelope<ServerPayload>>> {
-        let rows:Vec<String>=sqlx::query_scalar("SELECT data FROM link_outbox WHERE device=? AND acknowledged=0 ORDER BY sequence LIMIT 100").bind(device).fetch_all(&self.db).await?;
+        let mut output = Vec::new();
+        for item in self.deliveries(device).await? {
+            match item {
+                Delivery::Data(envelope) => output.push(*envelope),
+                Delivery::Erased(_) => break,
+            }
+        }
+        Ok(output)
+    }
+    pub async fn deliveries(&self, device: &str) -> Result<Vec<Delivery>> {
+        let rows=sqlx::query("SELECT o.data,e.data AS erased FROM link_outbox o LEFT JOIN link_erased_frames e ON e.device=o.device AND e.sequence=o.sequence WHERE o.device=? AND o.acknowledged=0 ORDER BY o.sequence LIMIT 100").bind(device).fetch_all(&self.db).await?;
         let ready: i64 = sqlx::query_scalar("SELECT schedule_notices FROM link_device WHERE id=?")
             .bind(device)
             .fetch_one(&self.db)
             .await?;
         let mut outgoing = Vec::new();
+        let erased_ready: i64 =
+            sqlx::query_scalar("SELECT projection_erasure FROM link_device WHERE id=?")
+                .bind(device)
+                .fetch_one(&self.db)
+                .await?;
         for row in rows {
-            let envelope: Envelope<ServerPayload> = parse(row.as_bytes())?;
+            if let Some(data) = row.get::<Option<String>, _>("erased") {
+                if erased_ready == 0 {
+                    break;
+                }
+                let header: pulse_core::ErasedProjection = serde_json::from_str(&data)?;
+                ensure(
+                    header.valid() && header.device == device,
+                    "invalid erased projection",
+                )?;
+                outgoing.push(Delivery::Erased(header));
+                continue;
+            }
+            let envelope: Envelope<ServerPayload> = parse(row.get::<String, _>("data").as_bytes())?;
             if ready == 0 && matches!(envelope.payload, ServerPayload::ScheduleNotice { .. }) {
                 break;
             }
-            outgoing.push(envelope);
+            if erased_ready == 0
+                && matches!(envelope.payload, ServerPayload::DerivedSnapshot { .. })
+            {
+                break;
+            }
+            outgoing.push(Delivery::Data(Box::new(envelope)));
         }
         Ok(outgoing)
     }
@@ -1287,7 +1396,23 @@ async fn session(hub: Arc<Hub>, device: String, mut socket: WebSocket) {
             }
             _=ticker.tick()=>{
                 ensure(hub.live(&device,epoch,now()).await?,"revoked, expired or superseded connection")?;
-                for envelope in hub.outgoing(&device).await? {let permitted=hub.permitted(&envelope,epoch,now()).await?;send(&mut socket,&ServerWire::Data{envelope:Box::new(envelope),permitted}).await?;}
+                for delivery in hub.deliveries(&device).await? {
+                    match delivery {
+                        Delivery::Erased(header)=>send(&mut socket,&ServerWire::ErasedProjection{header}).await?,
+                        Delivery::Data(envelope)=>{
+                            if let ServerPayload::DerivedSnapshot{sources,..}=&envelope.payload {
+                                match hub.core.lease_projection_sources(sources,now()).await {
+                                    Ok(_lease)=>send(&mut socket,&ServerWire::Data{envelope,permitted:true}).await?,
+                                    Err(pulse_core::Error::Rejected(reason))=>{
+                                        if let Some(header)=hub.erased_projection(&device,&envelope.sequence).await? {send(&mut socket,&ServerWire::ErasedProjection{header}).await?;}
+                                        else{return Err(crate::Error::Rejected(reason));}
+                                    }
+                                    Err(error)=>return Err(error.into()),
+                                }
+                            } else {let permitted=hub.permitted(&envelope,epoch,now()).await?;send(&mut socket,&ServerWire::Data{envelope,permitted}).await?;}
+                        }
+                    }
+                }
             }
             frame=socket.recv()=>{
                 let Some(Ok(frame))=frame else{break;};
@@ -1298,6 +1423,7 @@ async fn session(hub: Arc<Hub>, device: String, mut socket: WebSocket) {
                         ClientWire::Heartbeat{epoch:claimed}=>{ensure(number(&claimed)?==epoch,"heartbeat epoch")?;hub.renew(&device,epoch,now()).await?;send(&mut socket,&ServerWire::Renewed{epoch:epoch.to_string(),lease_ms:LEASE_MS as u32}).await?;}
                         ClientWire::Hello{..}=>return Err(crate::Error::Rejected("duplicate hello".into())),
                         ClientWire::ScheduleReady=>hub.schedule_ready(&device,epoch,now()).await?,
+                        ClientWire::ProjectionErasureReady=>hub.projection_erasure_ready(&device,epoch,now()).await?,
                         ClientWire::ComputerReady{permits,interactions}=>hub.set_computer_capability(&device,epoch,permits,interactions,now()).await?,
                         ClientWire::BrowserReady{fixture_origin}=>hub.browser_ready(&device,epoch,fixture_origin.as_deref(),now()).await?,
                         ClientWire::BrowserInteractionReady{fixture_origin}=>hub.browser_interactive_ready(&device,epoch,fixture_origin.as_deref(),now()).await?,

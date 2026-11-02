@@ -18,6 +18,7 @@ const MANIFEST_LIMIT: u64 = 8 * 1024 * 1024;
 mod backup;
 mod checkpoint;
 mod copy;
+pub(super) mod derived_messages;
 mod revocations;
 pub(super) mod task_sources;
 mod withdrawals;

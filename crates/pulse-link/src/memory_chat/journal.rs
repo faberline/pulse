@@ -320,6 +320,7 @@ impl Journal {
         sqlx::query("INSERT INTO local_meta VALUES('memory_visible','true') ON CONFLICT(key) DO UPDATE SET value='true'").execute(&mut *tx).await?;
         dirty(&mut tx).await?;
         self.require_memory_copy()?;
+        pulse_core::Store::prune_local_memory_projection_in(&mut tx, Some(now), false).await?;
         tx.commit().await?;
         self.flush_memory().await?;
         Ok(true)
@@ -491,6 +492,7 @@ impl Journal {
                     .await?;
             }
         }
+        pulse_core::Store::prune_local_memory_projection_in(&mut tx, Some(now), false).await?;
         for (key, value) in [
             ("memory_keeper", view.keeper.clone()),
             ("memory_epoch", view.epoch.to_string()),
@@ -520,6 +522,8 @@ impl Journal {
         .await?
         .rows_affected();
         let expired = sqlx::query("UPDATE local_memory_queue SET request=NULL,phase='expired' WHERE request IS NOT NULL AND json_extract(request,'$.command.kind') NOT IN ('forget','revoke') AND json_extract(request,'$.source_at')<=?").bind(now-MEMORY_RETENTION_MS).execute(&mut *tx).await?.rows_affected();
+        let projection_removed =
+            pulse_core::Store::prune_local_memory_projection_in(&mut tx, Some(now), false).await?;
         let visible: Option<String> =
             sqlx::query_scalar("SELECT value FROM local_meta WHERE key='memory_visible'")
                 .fetch_optional(&mut *tx)
@@ -576,7 +580,7 @@ impl Journal {
         .fetch_one(&mut *tx)
         .await? as usize;
         tx.commit().await?;
-        if removed + expired > 0 {
+        if removed + expired > 0 || projection_removed {
             self.flush_memory().await?;
         }
         Ok(())

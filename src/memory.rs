@@ -93,6 +93,47 @@ pub struct TaskMemorySources {
     pub invalidated: bool,
 }
 
+/// A server-authorized erasure of an existing chat frame. Header identity stays
+/// intact so a lost ACK does not resurrect content or create a sequence conflict.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ErasedProjection {
+    pub version: u32,
+    pub id: String,
+    pub device: String,
+    pub sequence: String,
+    pub epoch: String,
+    pub digest: String,
+    pub binding_digest: String,
+}
+impl ErasedProjection {
+    pub fn valid(&self) -> bool {
+        let number = |s: &str| {
+            s.parse::<u64>()
+                .is_ok_and(|n| n <= i64::MAX as u64 && n.to_string() == s)
+        };
+        self.version == 1
+            && !self.id.is_empty()
+            && self.id.len() <= 128
+            && !self.device.is_empty()
+            && self.device.len() <= 128
+            && number(&self.sequence)
+            && self.sequence != "0"
+            && number(&self.epoch)
+            && self.digest.len() == 64
+            && self.digest.bytes().all(|b| b.is_ascii_hexdigit())
+            && crate::store::digest(&(
+                self.version,
+                &self.id,
+                &self.device,
+                &self.sequence,
+                &self.epoch,
+                &self.digest,
+            ))
+            .is_ok_and(|s| s == self.binding_digest)
+    }
+}
+
 /// Only the authenticated Human ingress may construct a mutation.
 /// Never deserialize `Origin` from this request or an untrusted payload.
 #[derive(Clone, Serialize, Deserialize)]

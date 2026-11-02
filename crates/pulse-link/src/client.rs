@@ -602,12 +602,18 @@ async fn connected(
     let mut last_heartbeat = Instant::now() - Duration::from_secs(15);
     let mut pending_heartbeat = None;
     let mut epoch: Option<u64> = None;
+    let mut projection_token: Option<String> = None;
     loop {
         tokio::select! {
             _=tick.tick()=>{
                 ensure(epoch.is_some()||started.elapsed()<Duration::from_secs(10),"welcome timeout")?;
                 if let Some(epoch)=epoch {
                     ensure(lease.borrow().live(),"local lease expired")?;
+                    let token=journal.projection_token().await?;
+                    if token!=projection_token {
+                        if token.is_some(){wire(&mut socket,&ClientWire::ProjectionErasureReady).await?;}
+                        projection_token=token;
+                    }
                     if pending_heartbeat.is_none()&&last_heartbeat.elapsed()>=Duration::from_secs(15){last_heartbeat=Instant::now();pending_heartbeat=Some(last_heartbeat);wire(&mut socket,&ClientWire::Heartbeat{epoch:epoch.to_string()}).await?;}
                     if computer_checked.elapsed() >= Duration::from_secs(5) && !journal.stopped().await? && let Some(executor) = executor.as_ref().filter(|e| e.computer_runtime().is_some()) {
                         computer_checked = Instant::now();
@@ -643,6 +649,11 @@ async fn connected(
                             let current=lease.borrow().clone();ensure(epoch.is_some()&&current.live(),"data without live session")?;
                             journal.accept(&envelope,permitted,current.epoch,current.live()&&!journal.stopped().await?).await?;
                             wire(&mut socket,&ClientWire::Ack{sequence:envelope.sequence,id:envelope.id}).await?;
+                        }
+                        ServerWire::ErasedProjection{header}=>{
+                            ensure(epoch.is_some()&&lease.borrow().live(),"erasure without live session")?;
+                            journal.accept_erased_projection(&header).await?;
+                            wire(&mut socket,&ClientWire::Ack{sequence:header.sequence,id:header.id}).await?;
                         }
                         ServerWire::Ack{sequence,id}=>{ensure(epoch.is_some(),"ACK before welcome")?;journal.ack(number(&sequence)?,&id).await?;}
                         ServerWire::Error{..}=>return Err(crate::Error::Rejected("server stopped session".into())),

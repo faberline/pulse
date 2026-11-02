@@ -249,6 +249,7 @@ pub(super) async fn replay(db: &mut SqliteConnection, value: &Restrictions) -> R
     let references = serde_json::to_string(&filters.references)?;
     sqlx::query("DELETE FROM local_memory_cache WHERE EXISTS(SELECT 1 FROM json_each(?) r WHERE r.key=local_memory_cache.id AND json_extract(data,'$.revision')<=r.value)")
         .bind(references).execute(&mut *db).await?;
+    Store::prune_local_memory_projection_in(db, None, false).await?;
     let completed: BTreeMap<_, _> = value
         .withdrawals
         .iter()
@@ -296,6 +297,62 @@ pub(super) async fn replay(db: &mut SqliteConnection, value: &Restrictions) -> R
 }
 
 impl Store {
+    /// Order a local positive projection commit with durable withdrawal.
+    pub async fn lease_local_projection_sources(
+        &self,
+        device: &str,
+        server: &str,
+        sources: &[crate::TaskMemorySource],
+        now: i64,
+    ) -> Result<super::task_sources::TaskMemoryLease<'_>> {
+        require(
+            (1..=100).contains(&sources.len()),
+            "invalid projection sources",
+        )?;
+        let lease = self.memory_guard.lease().await?;
+        let value = self
+            .memory_guard
+            .read()?
+            .ok_or_else(|| Error::Rejected("memory restrictions missing".into()))?;
+        let mut db = self.pool.acquire().await?;
+        binding(&mut db, &value, device, server).await?;
+        let copy = value.copy.as_ref().unwrap();
+        let row = sqlx::query(
+            "SELECT denied,generation,serial FROM local_memory_access WHERE singleton=1",
+        )
+        .fetch_one(&mut *db)
+        .await?;
+        require(
+            !copy.denied
+                && row.get::<i64, _>("denied") == 0
+                && row.get::<i64, _>("generation") as u64 == copy.generation
+                && row.get::<i64, _>("serial") as u64 == copy.serial,
+            "projection copy unavailable",
+        )?;
+        let filters = rules(&value);
+        for source in sources {
+            let data: Option<String> =
+                sqlx::query_scalar("SELECT data FROM local_memory_cache WHERE id=?")
+                    .bind(&source.memory_id)
+                    .fetch_optional(&mut *db)
+                    .await?;
+            let memory: Memory = serde_json::from_str(
+                &data.ok_or_else(|| Error::Rejected("projection source unavailable".into()))?,
+            )?;
+            let correcting: i64=sqlx::query_scalar("SELECT count(*) FROM local_memory_queue WHERE request IS NOT NULL AND json_extract(request,'$.command.kind')='correct' AND json_extract(request,'$.command.id')=? AND json_extract(request,'$.command.revision')>=?").bind(&source.memory_id).bind(source.revision as i64).fetch_one(&mut *db).await?;
+            require(correcting == 0, "projection source correction pending")?;
+            require(
+                memory.revision == source.revision
+                    && memory.source_id == source.source_id
+                    && memory.expires_at == source.expires_at
+                    && memory.source_at <= now
+                    && now < memory.expires_at
+                    && filters.allows(&memory),
+                "projection source unavailable",
+            )?;
+        }
+        Ok(super::task_sources::TaskMemoryLease { _lease: lease })
+    }
     /// Trusted Human ingress only. Persist bodyless evidence before SQLite.
     pub async fn queue_memory_withdrawal(
         &self,

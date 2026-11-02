@@ -7,7 +7,7 @@ use serde_json::json;
 /// Restriction lease for a controller's bounded local commit. Do not hold it over
 /// provider calls. Dispatch adapters still need to adopt this before prompt use.
 pub struct TaskMemoryLease<'a> {
-    _lease: super::Lease<'a>,
+    pub(super) _lease: super::Lease<'a>,
 }
 
 impl Store {
@@ -309,6 +309,7 @@ pub(super) async fn redact_missing(db: &mut SqliteConnection) -> Result<()> {
             .execute(&mut *db)
             .await?;
         let mut task: Task = load(db, "tasks", &binding.request.task_id).await?;
+        super::derived_messages::erase(db, &task.id, binding.request.task_revision).await?;
         let runs:Vec<String>=sqlx::query_scalar("SELECT data FROM runs WHERE json_extract(data,'$.token.task_id')=? AND json_extract(data,'$.token.revision')=?").bind(&task.id).bind(binding.request.task_revision.to_string()).fetch_all(&mut *db).await?;
         for data in runs {
             let mut run: Run = serde_json::from_str(&data)?;
@@ -332,5 +333,5 @@ pub(super) async fn redact_missing(db: &mut SqliteConnection) -> Result<()> {
         task.reason = Some("memory_source_withdrawn".into());
         put(db, "tasks", &task.id, &task).await?;
     }
-    Ok(())
+    super::derived_messages::erase_invalidated(db).await
 }

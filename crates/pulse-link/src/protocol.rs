@@ -334,6 +334,13 @@ impl<T: Serialize> Envelope<T> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerPayload {
+    DerivedSnapshot {
+        tasks: Vec<pulse_core::Task>,
+        messages: Vec<ChatMessage>,
+        synced_at: i64,
+        local: LocalStatus,
+        sources: Vec<pulse_core::TaskMemorySource>,
+    },
     ScheduleNotice {
         notice: pulse_core::ScheduleNotice,
     },
@@ -369,6 +376,7 @@ pub struct ChatMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientWire {
+    ProjectionErasureReady,
     ScheduleReady,
     ComputerReady {
         permits: Vec<pulse_core::ComputerPermit>,
@@ -399,6 +407,9 @@ pub enum ClientWire {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerWire {
+    ErasedProjection {
+        header: pulse_core::ErasedProjection,
+    },
     Welcome {
         device: String,
         epoch: String,
@@ -557,6 +568,8 @@ pub struct DesktopNotifications {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NativeState {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory_sources: Vec<pulse_core::TaskMemorySource>,
     #[serde(default)]
     pub desktop_notifications: DesktopNotifications,
     #[serde(default)]

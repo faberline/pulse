@@ -4,6 +4,8 @@ use super::*;
 mod generation_tests;
 #[path = "identity_tests.rs"]
 mod identity_tests;
+#[path = "projection_tests.rs"]
+mod projection_tests;
 #[path = "withdrawal_tests.rs"]
 mod withdrawal_tests;
 use crate::{
