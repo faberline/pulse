@@ -14,12 +14,15 @@ const OUTBOX_LIMIT: i64 = 1_000;
 const DAY_LIMIT: i64 = 1_000_000;
 const TASK_BUDGET: i64 = 250_000;
 const DEADLINE_MS: i64 = 15 * 60 * 1_000;
-const SCHEMA: i64 = 13;
+const SCHEMA: i64 = 14;
 
 mod approvals;
 mod memory;
 mod schedules;
-pub use memory::{BackupCheck, Maintenance, MemoryCopyChange, MemoryWithdrawalRules, truncate_wal};
+pub use memory::{
+    BackupCheck, Maintenance, MemoryCopyChange, MemoryWithdrawalRules, TaskMemoryLease,
+    truncate_wal,
+};
 
 #[derive(Clone)]
 pub struct Store {
@@ -111,6 +114,7 @@ impl Store {
         now: i64,
     ) -> Result<()> {
         let mut task: Task = load(db, "tasks", id).await?;
+        memory::task_sources::validate(db, id, revision, now).await?;
         require(
             task.revision == revision
                 && (task.scope == "pulse:read"
@@ -377,6 +381,18 @@ impl Store {
             if task.state != State::Queued || task.cancel_requested || task.deadline <= now {
                 continue;
             }
+            match memory::task_sources::validate(&mut tx, &task.id, task.revision, now).await {
+                Ok(()) => {}
+                Err(Error::Rejected(_)) => {
+                    task.state = State::Blocked;
+                    task.reason = Some("memory_source_unavailable".into());
+                    task.active_run = None;
+                    put(&mut tx, "tasks", &task.id, &task).await?;
+                    changed = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
             if unresolved(&mut tx, &task.id).await? {
                 continue;
             }
@@ -440,6 +456,7 @@ impl Store {
         wake_at: Option<i64>,
         now: i64,
     ) -> Result<()> {
+        let _memory = self.lease_task_memory(&token.task_id, now).await?;
         require(
             serde_jcs::to_vec(&checkpoint)?.len() <= 64 * 1024 && evidence.len() <= 64 * 1024,
             "checkpoint or evidence too large",
@@ -539,6 +556,7 @@ impl Store {
         evidence: &str,
         now: i64,
     ) -> Result<()> {
+        let _memory = self.lease_task_memory(&token.task_id, now).await?;
         require(
             !evidence.is_empty() && evidence.len() <= 64 * 1024,
             "goal completion requires bounded evidence",
@@ -577,6 +595,7 @@ impl Store {
         rate_version: &str,
         now: i64,
     ) -> Result<bool> {
+        let _memory = self.lease_task_memory(&token.task_id, now).await?;
         require(
             !call_id.is_empty()
                 && maximum_micro_usd > 0
@@ -683,6 +702,7 @@ impl Store {
         intent: Value,
         now: i64,
     ) -> Result<Operation> {
+        let _memory = self.lease_task_memory(&token.task_id, now).await?;
         require(
             target.starts_with("fixture:"),
             "v0.2 permits simulated effects only",
@@ -1221,6 +1241,7 @@ async fn current(db: &mut SqliteConnection, token: &Token, now: i64) -> Result<(
             && task.deadline > now,
         "stale run, cancelled task or deadline",
     )?;
+    memory::task_sources::validate(db, &task.id, task.revision, now).await?;
     Ok((task, run))
 }
 

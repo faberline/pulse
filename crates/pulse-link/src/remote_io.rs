@@ -41,7 +41,7 @@ pub(crate) async fn current(
     let task: Task = serde_json::from_str(&data)?;
     let data: String = sqlx::query_scalar("SELECT data FROM runs WHERE id=?")
         .bind(&token.run_id)
-        .fetch_one(db)
+        .fetch_one(&mut *db)
         .await?;
     let run: Run = serde_json::from_str(&data)?;
     ensure(
@@ -53,12 +53,17 @@ pub(crate) async fn current(
             && task.deadline > time,
         "stale remote run",
     )?;
+    pulse_core::Store::validate_task_memory_in(db, &task.id, task.revision, time).await?;
     Ok((task, run))
 }
 
 impl Hub {
     /// Build context from the current Human decision and same-revision evidence only.
     pub async fn model_context(&self, run: &Run) -> Result<(String, Vec<Exchange>)> {
+        let _memory = self
+            .core
+            .lease_task_memory(&run.token.task_id, crate::now())
+            .await?;
         let task = {
             let mut db = self.db.acquire().await?;
             let (task, _) = current(&mut db, &run.token, crate::now()).await?;
@@ -92,6 +97,7 @@ impl Hub {
 
     /// Persist a model proposal before attempting any dispatch. This is not Human input.
     pub async fn model_proposal(&self, token: &Token, reply: &Reply, time: i64) -> Result<()> {
+        let _memory = self.core.lease_task_memory(&token.task_id, time).await?;
         let call = reply
             .tool
             .as_ref()

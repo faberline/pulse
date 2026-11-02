@@ -45,6 +45,7 @@ impl Hub {
         model: &str,
         time: i64,
     ) -> Result<()> {
+        let _memory = self.core.lease_task_memory(&token.task_id, time).await?;
         ensure(
             reply.tool.is_none(),
             "tool proposal cannot be a final reply",
@@ -69,6 +70,7 @@ impl Hub {
                 && run.token == *token,
             "stale model reply",
         )?;
+        pulse_core::Store::validate_task_memory_in(&mut tx, &task.id, task.revision, time).await?;
         let id = format!(
             "model:{}:{}:{}",
             token.run_id,
@@ -447,7 +449,21 @@ impl Hub {
             task_id, revision, ..
         } = &envelope.payload
         {
+            let _memory = match self.core.lease_task_memory(task_id, time).await {
+                Ok(lease) => lease,
+                Err(pulse_core::Error::Rejected(_)) => return Ok(false),
+                Err(error) => return Err(error.into()),
+            };
             let task = self.core.task(task_id).await?;
+            let mut db = self.db.acquire().await?;
+            match pulse_core::Store::validate_task_memory_in(&mut db, &task.id, task.revision, time)
+                .await
+            {
+                Ok(()) => {}
+                Err(pulse_core::Error::Rejected(_)) => return Ok(false),
+                Err(error) => return Err(error.into()),
+            }
+            drop(db);
             return Ok(number(&envelope.epoch)? == epoch
                 && self.live(&envelope.device, epoch, time).await?
                 && sqlx::query_scalar::<_, i64>("SELECT stopped FROM link_device WHERE id=?")
@@ -873,6 +889,7 @@ impl Hub {
                         if existing > 0 {
                             return Ok(());
                         }
+                        let _memory = self.core.lease_task_memory(task_id, time).await?;
                         let task = self.core.task(task_id).await?;
                         ensure(
                             task.revision == number(revision)?

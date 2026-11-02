@@ -69,6 +69,7 @@ impl Store {
         proposal: OperationProposal,
         now: i64,
     ) -> Result<OperationRequest> {
+        let _memory = self.lease_task_memory(&proposal.token.task_id, now).await?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let result = Self::propose_operation_in(&mut tx, source_event, proposal, now).await?;
         tx.commit().await?;
@@ -161,6 +162,7 @@ impl Store {
         request_id: &str,
         now: i64,
     ) -> Result<Operation> {
+        let _memory = self.lease_task_memory(&token.task_id, now).await?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let result = Self::prepare_approved_operation_in(&mut tx, token, request_id, now).await;
         // Preserve the existing committed stop at the tool limit. Other failures roll back.

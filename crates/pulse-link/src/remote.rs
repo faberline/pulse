@@ -9,13 +9,13 @@ pub fn versions() -> Versions {
 }
 fn manifest(provider: Option<&Provider>) -> Versions {
     Versions {
-        workflow: "pulse-remote-13".into(),
+        workflow: "pulse-remote-14".into(),
         schema: "1".into(),
         prompt: "effective-read-6".into(),
         tools: "pulse-tools-6".into(),
         model: provider.map(|p| p.model).unwrap_or("unconfigured").into(),
         provider_api: "function-call-1".into(),
-        policy: "approved-computer-effects-1".into(),
+        policy: "approved-effects-memory-fences-2".into(),
     }
 }
 pub async fn step(hub: &Hub, time: i64) -> Result<bool> {
@@ -24,6 +24,10 @@ pub async fn step(hub: &Hub, time: i64) -> Result<bool> {
 pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Result<bool> {
     if !hub.core.notification_capacity_available().await? {
         return Ok(false);
+    }
+    if hub.core.flush_memory_task_changes().await? {
+        hub.notify_change();
+        return Ok(true);
     }
     let pending = hub.core.pending_events(100).await?;
     if !pending.is_empty() {

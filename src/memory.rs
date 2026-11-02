@@ -58,11 +58,39 @@ pub enum MemoryCommand {
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryRef {
     pub id: String,
     pub revision: u64,
+}
+
+/// Human adoption of source references for one task revision. No source body.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TaskMemoryRequest {
+    pub source_id: String,
+    pub source_at: i64,
+    pub task_id: String,
+    #[serde(with = "crate::model::decimal")]
+    pub task_revision: u64,
+    pub sources: Vec<MemoryRef>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TaskMemorySource {
+    pub memory_id: String,
+    pub revision: u64,
+    pub source_id: String,
+    pub expires_at: i64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TaskMemorySources {
+    pub request: TaskMemoryRequest,
+    pub authorization_event: String,
+    pub sources: Vec<TaskMemorySource>,
+    pub invalidated: bool,
 }
 
 /// Only the authenticated Human ingress may construct a mutation.

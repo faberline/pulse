@@ -19,10 +19,12 @@ mod backup;
 mod checkpoint;
 mod copy;
 mod revocations;
+pub(super) mod task_sources;
 mod withdrawals;
 pub use backup::{BackupCheck, Maintenance};
 pub use checkpoint::truncate as truncate_wal;
 pub use copy::MemoryCopyChange;
+pub use task_sources::TaskMemoryLease;
 pub use withdrawals::MemoryWithdrawalRules;
 
 /// This file is deliberately outside the database backup. It is restriction
@@ -573,7 +575,7 @@ async fn reconcile(db: &mut SqliteConnection, manifest: &Restrictions) -> Result
         "memory restrictions are stale; restore refused",
     )?;
     if epoch == manifest.epoch {
-        return Ok(());
+        return task_sources::redact_missing(db).await;
     }
     for (id, revision) in &manifest.removed {
         sqlx::query("DELETE FROM memories WHERE id=? AND revision<=?")
@@ -585,6 +587,7 @@ async fn reconcile(db: &mut SqliteConnection, manifest: &Restrictions) -> Result
             .bind(id).bind(*revision as i64).execute(&mut *db).await?;
     }
     revocations::replay(db, manifest).await?;
+    task_sources::redact_missing(db).await?;
     sqlx::query("UPDATE settings SET value=? WHERE key='memory_redaction_epoch'")
         .bind(manifest.epoch.to_string())
         .execute(&mut *db)
