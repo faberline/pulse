@@ -26,14 +26,8 @@ fn main() {
 }
 async fn run() -> Result<()> {
     let (config, pairing) = Config::parse_with_pairing(std::env::args().skip(1), ClientRole::Chat)?;
-    let device = Device::open_chat(config, std::sync::Arc::new(NativeVault)).await?;
     let (commands, receiver) = mpsc::channel(32);
-    if let Some(code) = pairing {
-        commands
-            .send(NativeCommand::Pair { code })
-            .await
-            .map_err(|_| pulse_link::Error::Rejected("chat stopped".into()))?;
-    }
+    let startup_commands = commands.clone();
     let (states, mut state) = watch::channel(NativeState::default());
     let mut input = tokio::spawn(async move {
         let mut reader = BufReader::new(tokio::io::stdin());
@@ -60,8 +54,12 @@ async fn run() -> Result<()> {
                 }
             }
             let command: NativeCommand = parse(&bytes)?;
-            if commands.send(command).await.is_err() {
-                return Ok(());
+            match commands.try_send(command) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Closed(_)) => return Ok(()),
+                // Do not stop reading behind a full startup queue: that would
+                // hide a closed UI pipe while initialization is still waiting.
+                Err(mpsc::error::TrySendError::Full(_)) => return Err(pulse_link::Error::Capacity),
             }
         }
     });
@@ -79,7 +77,15 @@ async fn run() -> Result<()> {
         Ok::<_, pulse_link::Error>(())
     });
     let result = tokio::select! {
-        result=device.run(receiver,states)=>result,
+        result=async {
+            // Watch EOF while opening the journal too. Startup may wait for a
+            // database lock; it must not outlive the UI which owns this pipe.
+            let device=Device::open_chat(config,std::sync::Arc::new(NativeVault)).await?;
+            if let Some(code)=pairing {
+                startup_commands.send(NativeCommand::Pair{code}).await.map_err(|_|pulse_link::Error::Rejected("chat stopped".into()))?;
+            }
+            device.run(receiver,states).await
+        }=>result,
         result=&mut input=>result.map_err(|_|pulse_link::Error::Rejected("IPC input stopped".into()))?,
         result=&mut output=>result.map_err(|_|pulse_link::Error::Rejected("IPC output stopped".into()))?,
     };

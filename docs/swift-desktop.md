@@ -9,6 +9,9 @@
 SwiftUI 只啟動自己的 `pulse-chat`。兩者透過私有 stdin/stdout 傳送有界 JSON Lines。這是對話框元件內的傳輸程序，不是 local executor。它沿用 Rust 的 Keychain、journal、角色檢查、重送與 WSS。密鑰不進入 SwiftUI 訊息或偏好設定。
 
 `pulse-executor` 仍是獨立 local process。對話框不啟動、代理或終止它。關閉對話框只會結束 `pulse-chat`；父程序關閉 pipe 後，chat 也有有界退出測試。
+chat 在開啟 journal 的同時監看輸入管線。即使 SQLite 正被鎖住，關閉管線也會中止啟動，不等待資料庫恢復。
+私有輸入佇列滿時會停止這個傳輸程序，不能卡住輸入讀取而漏看管線關閉。尚未取得 Rust 保存回覆的要求不能當成已保存；Swift 保留待核對的原識別與草稿。
+回歸測試涵蓋一般關閉、資料庫鎖定及鎖定時的滿佇列，三者均保留 5 秒退出門檻。這不是冷啟動、整體效能或實機驗收通過的證據。
 
 ## 畫面與輸入
 
