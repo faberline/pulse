@@ -242,6 +242,9 @@ impl Device {
                     && value.role == self.journal.role,
                 "Keychain identity mismatch",
             )?;
+            if !self.journal.bind_memory_credential(value).await? {
+                credential = None;
+            }
         }
         let (lease_tx, lease_rx) = watch::channel(Lease::default());
         let (link_tx, mut link_rx) = watch::channel(LinkState::default());
@@ -348,14 +351,20 @@ impl Device {
                         lease_tx.send_replace(Lease::default());
                         if let Some(task)=connection.take(){task.abort();let _=task.await;}
                         if let Some(task)=memory_sync.take(){task.abort();let _=task.await;}
-                        if credential.is_some() {self.journal.deny_memory_access().await?;}
-                        self.journal.allow_memory_access().await?;
+                        self.journal.activate_memory_pairing(&value).await?;
                         // Old workers must be joined before clearing their rejection signal.
                         link_tx.send_replace(LinkState::default());
                         connection=Some(tokio::spawn(reconnect(self.config.clone(),self.journal.clone(),value.clone(),lease_tx.clone(),link_tx.clone(),self.executor.clone())));
                         credential=Some(value);message="配對完成。密鑰已存入 Keychain。".into();
                     }
-                    _=>message="配對未完成。請核對伺服器、一次性配對碼及 Keychain 權限。若已兌換配對碼，須先由操作員撤銷再重試。".into(),
+                    _=>{
+                        if let Some(old)=credential.as_ref() {
+                            if self.journal.bind_memory_credential(old).await? {
+                                connection=Some(tokio::spawn(reconnect(self.config.clone(),self.journal.clone(),old.clone(),lease_tx.clone(),link_tx.clone(),self.executor.clone())));
+                            } else {credential=None;}
+                        }
+                        message="配對未完成。請核對伺服器、一次性配對碼及 Keychain 權限。若已兌換但尚未存入 Keychain，須由操作員撤銷再重試。".into();
+                    }
                 }
             }
             _=ticker.tick()=>{
@@ -441,11 +450,16 @@ impl Device {
                     }
                     Some(NativeCommand::Pair{code})=>{
                         if pairing.is_some(){message="配對仍在進行。".into();continue;}
+                        lease_tx.send_replace(Lease::default());
+                        if let Some(task)=connection.take(){task.abort();let _=task.await;}
+                        if let Some(task)=memory_sync.take(){task.abort();let _=task.await;}
+                        link_tx.send_replace(LinkState::default());
                         let request=PairRequest{device:self.journal.device.clone(),code,role:self.journal.role};
-                        let config=self.config.clone();let vault=self.vault.clone();let account=self.account.clone();
+                        let config=self.config.clone();let vault=self.vault.clone();let account=self.account.clone();let journal=self.journal.clone();
                         pairing=Some(tokio::spawn(async move {
                             let value=redeem(&config,&request).await?;
                             ensure(value.device==request.device&&value.token.len()==64&&value.role==request.role,"pair response identity")?;
+                            journal.prepare_memory_pairing(&value).await?;
                             let copy=value.clone();tokio::task::spawn_blocking(move||vault.save(&account,&copy)).await.map_err(|_|crate::Error::Rejected("Keychain worker failed".into()))??;
                             Ok(value)
                         }));message="正在配對。本機停止工具仍可用。".into();

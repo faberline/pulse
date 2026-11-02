@@ -11,6 +11,12 @@ use sqlx::Row;
 
 impl Journal {
     pub(crate) async fn memory_access_allowed(&self) -> Result<bool> {
+        if self
+            .memory_denied
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(false);
+        }
         Ok(
             sqlx::query_scalar::<_, i64>(
                 "SELECT denied FROM local_memory_access WHERE singleton=1",
@@ -24,34 +30,135 @@ impl Journal {
         if self.role != ClientRole::Chat {
             return Ok(());
         }
-        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query("UPDATE local_memory_access SET denied=1 WHERE singleton=1")
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM local_memory_cache")
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("UPDATE local_memory_queue SET request=NULL,phase='access_denied' WHERE request IS NOT NULL")
-            .execute(&mut *tx).await?;
-        sqlx::query("DELETE FROM local_meta WHERE key IN ('memory_synced_at','memory_dirty')")
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        Ok(pulse_core::truncate_wal(&self.db).await?)
+        self.memory_copy(pulse_core::MemoryCopyChange::Deny).await?;
+        Ok(())
     }
-    /// Called only after the trusted Human pairing flow has saved fresh credentials.
-    pub(crate) async fn allow_memory_access(&self) -> Result<()> {
+    async fn memory_copy(&self, change: pulse_core::MemoryCopyChange<'_>) -> Result<bool> {
+        if self.role != ClientRole::Chat {
+            return Ok(true);
+        }
+        let _lifecycle = self.memory_lifecycle.lock().await;
+        self.memory_copy_locked(change).await
+    }
+    async fn memory_copy_locked(&self, change: pulse_core::MemoryCopyChange<'_>) -> Result<bool> {
+        let identity = match &change {
+            pulse_core::MemoryCopyChange::Bind(hash)
+            | pulse_core::MemoryCopyChange::Activate(hash) => Some((*hash).to_owned()),
+            _ => None,
+        };
+        self.memory_denied
+            .store(true, std::sync::atomic::Ordering::Release);
+        *self.memory_identity.lock().unwrap() = None;
+        let allowed = self
+            .core
+            .memory_copy(&self.device, &crate::protocol::hash(&self.server)?, change)
+            .await?;
+        self.memory_denied
+            .store(!allowed, std::sync::atomic::Ordering::Release);
+        if allowed {
+            *self.memory_identity.lock().unwrap() = identity;
+        }
+        Ok(allowed)
+    }
+    pub(crate) fn require_memory_identity(
+        &self,
+        credential: &crate::protocol::Credential,
+    ) -> Result<()> {
+        self.require_memory_copy()?;
+        ensure(
+            self.memory_identity.lock().unwrap().as_ref()
+                == Some(&crate::protocol::hash(credential)?),
+            "memory identity changed",
+        )
+    }
+    pub(crate) async fn deny_memory_credential(
+        &self,
+        credential: &crate::protocol::Credential,
+    ) -> Result<bool> {
+        let _lifecycle = self.memory_lifecycle.lock().await;
+        if self
+            .memory_denied
+            .load(std::sync::atomic::Ordering::Acquire)
+            || self.memory_identity.lock().unwrap().as_ref()
+                != Some(&crate::protocol::hash(credential)?)
+        {
+            return Ok(false);
+        }
+        self.memory_copy_locked(pulse_core::MemoryCopyChange::Deny)
+            .await?;
+        Ok(true)
+    }
+    pub(crate) async fn finish_memory_for(
+        &self,
+        source: &str,
+        phase: &str,
+        credential: &crate::protocol::Credential,
+    ) -> Result<()> {
+        let _lifecycle = self.memory_lifecycle.lock().await;
+        self.require_memory_identity(credential)?;
+        self.finish_memory(source, phase).await
+    }
+    pub(crate) async fn apply_memory_view_for(
+        &self,
+        view: &MemoryView,
+        credential: &crate::protocol::Credential,
+        now: i64,
+    ) -> Result<()> {
+        let _lifecycle = self.memory_lifecycle.lock().await;
+        self.require_memory_identity(credential)?;
+        self.apply_memory_view(view, now).await
+    }
+    pub(crate) async fn bind_memory_credential(
+        &self,
+        credential: &crate::protocol::Credential,
+    ) -> Result<bool> {
+        ensure(
+            credential.device == self.device && credential.role == self.role,
+            "memory credential binding",
+        )?;
+        self.memory_copy(pulse_core::MemoryCopyChange::Bind(&crate::protocol::hash(
+            credential,
+        )?))
+        .await
+    }
+    pub(crate) async fn prepare_memory_pairing(
+        &self,
+        credential: &crate::protocol::Credential,
+    ) -> Result<()> {
+        ensure(
+            credential.device == self.device && credential.role == self.role,
+            "memory credential binding",
+        )?;
+        self.memory_copy(pulse_core::MemoryCopyChange::Prepare(
+            &crate::protocol::hash(credential)?,
+        ))
+        .await?;
+        Ok(())
+    }
+    pub(crate) async fn activate_memory_pairing(
+        &self,
+        credential: &crate::protocol::Credential,
+    ) -> Result<()> {
+        ensure(
+            credential.device == self.device && credential.role == self.role,
+            "memory credential binding",
+        )?;
+        self.memory_copy(pulse_core::MemoryCopyChange::Activate(
+            &crate::protocol::hash(credential)?,
+        ))
+        .await?;
         if self.role == ClientRole::Chat {
-            let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
-            sqlx::query("UPDATE local_memory_access SET denied=0 WHERE singleton=1")
-                .execute(&mut *tx)
-                .await?;
-            dirty(&mut tx).await?;
-            tx.commit().await?;
+            dirty(&mut *self.db.acquire().await?).await?;
         }
         Ok(())
     }
     pub(crate) async fn memory_request_active(&self, request: &MemoryRequest) -> Result<bool> {
+        if self
+            .memory_denied
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(false);
+        }
         let data:Option<String>=sqlx::query_scalar("SELECT request FROM local_memory_queue WHERE source_uuid=lower(?) AND request IS NOT NULL")
             .bind(canonical(&request.source_id)?).fetch_optional(&self.db).await?;
         Ok(data.is_some_and(|s| {
@@ -65,6 +172,7 @@ impl Journal {
         Ok(count > 0)
     }
     pub(crate) async fn reset_memory_session(&self) -> Result<()> {
+        self.memory_copy(pulse_core::MemoryCopyChange::Open).await?;
         // A restored local DB cannot prove that cached remote restrictions are
         // current. Never reveal its old source content before a fresh sync.
         sqlx::query("DELETE FROM local_memory_cache")
@@ -80,6 +188,7 @@ impl Journal {
         let Some(intent) = parse(text) else {
             return Ok(false);
         };
+        self.require_memory_copy()?;
         ensure(
             self.role == ClientRole::Chat && uuid::Uuid::parse_str(source).is_ok(),
             "memory source or role invalid",
@@ -163,6 +272,7 @@ impl Journal {
         .await?;
         sqlx::query("INSERT INTO local_meta VALUES('memory_visible','true') ON CONFLICT(key) DO UPDATE SET value='true'").execute(&mut *tx).await?;
         dirty(&mut tx).await?;
+        self.require_memory_copy()?;
         tx.commit().await?;
         self.flush_memory().await?;
         Ok(true)
@@ -183,6 +293,12 @@ impl Journal {
         Ok(())
     }
     pub(crate) async fn memory_requests(&self) -> Result<Vec<MemoryRequest>> {
+        if self
+            .memory_denied
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(Vec::new());
+        }
         let rows: Vec<String> = sqlx::query_scalar("SELECT request FROM local_memory_queue WHERE request IS NOT NULL ORDER BY CASE WHEN json_extract(request,'$.command.kind') IN ('forget','revoke') THEN 0 ELSE 1 END,saved_at,rowid LIMIT 200").fetch_all(&self.db).await?;
         Ok(rows
             .into_iter()
@@ -204,6 +320,7 @@ impl Journal {
         self.flush_memory().await
     }
     pub async fn apply_memory_view(&self, view: &MemoryView, now: i64) -> Result<()> {
+        self.require_memory_copy()?;
         ensure(
             self.role == ClientRole::Chat
                 && uuid::Uuid::parse_str(&view.keeper).is_ok()
@@ -328,6 +445,7 @@ impl Journal {
         sqlx::query("UPDATE local_memory_queue SET phase='queried' WHERE phase='query'")
             .execute(&mut *tx)
             .await?;
+        self.require_memory_copy()?;
         tx.commit().await?;
         self.flush_memory().await
     }
@@ -349,7 +467,11 @@ impl Journal {
             sqlx::query_scalar("SELECT value FROM local_meta WHERE key='memory_visible'")
                 .fetch_optional(&mut *tx)
                 .await?;
-        if visible.as_deref() == Some("true") {
+        if visible.as_deref() == Some("true")
+            && !self
+                .memory_denied
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
             let rows: Vec<String> = sqlx::query_scalar("SELECT data FROM local_memory_cache ORDER BY json_extract(data,'$.source_at'),id LIMIT 100").fetch_all(&mut *tx).await?;
             state.memories = rows
                 .into_iter()
@@ -407,6 +529,16 @@ impl Journal {
             .fetch_one(&self.db)
             .await?;
         ensure(row.get::<i64, _>(0) == 0, "memory cache checkpoint busy")
+    }
+    fn require_memory_copy(&self) -> Result<()> {
+        if self
+            .memory_denied
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            Err(crate::Error::CredentialRejected)
+        } else {
+            Ok(())
+        }
     }
 }
 

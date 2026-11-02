@@ -1,5 +1,7 @@
 use super::parse;
 use super::*;
+#[path = "generation_tests.rs"]
+mod generation_tests;
 #[path = "identity_tests.rs"]
 mod identity_tests;
 use crate::{
@@ -78,6 +80,7 @@ async fn setup() -> Fixture {
         )
         .await
         .unwrap();
+    assert!(journal.bind_memory_credential(&credential).await.unwrap());
     let writes = Arc::new(AtomicUsize::new(0));
     let counter = writes.clone();
     let app = router(hub.clone()).layer(axum::middleware::from_fn(

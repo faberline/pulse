@@ -37,6 +37,7 @@ final class ChatModel: ObservableObject {
       Task { @MainActor in
         guard let self, self.generation == id else { return }
         self.state.connected = false
+        self.state.memories = []; self.state.memory_synced_at = nil
         self.notice = "對話連線已停止。草稿會保留，可在設定重新連線。"
       }
     })
@@ -68,6 +69,7 @@ final class ChatModel: ObservableObject {
       browserImages = [:]; browserImageDigests = [:]; loadingBrowserImages = []; requestedBrowserImages = []; failedBrowserImages = []; imageRequestInFlight = nil
     }
     activeBinding = settings.binding
+    state.memories = []; state.memory_synced_at = nil
     generation = UUID()
     transport.start(arguments: settings.arguments, generation: generation)
     settings.pairFile = nil

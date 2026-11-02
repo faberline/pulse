@@ -17,9 +17,11 @@ const MANIFEST_LIMIT: u64 = 8 * 1024 * 1024;
 
 mod backup;
 mod checkpoint;
+mod copy;
 mod revocations;
 pub use backup::{BackupCheck, Maintenance};
 pub use checkpoint::truncate as truncate_wal;
+pub use copy::MemoryCopyChange;
 
 /// This file is deliberately outside the database backup. It is restriction
 /// evidence, not another task or knowledge store. Never put source text in it.
@@ -34,6 +36,8 @@ struct Restrictions {
     sources: BTreeMap<String, revocations::SourceRestriction>,
     #[serde(default)]
     cancellations: BTreeMap<String, revocations::Cancellation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    copy: Option<copy::CopyFence>,
 }
 
 pub(super) struct MemoryGuard {
@@ -165,10 +169,14 @@ impl MemoryGuard {
         let value: Restrictions = serde_json::from_slice(&bytes)
             .map_err(|_| Error::Rejected("invalid memory restrictions".into()))?;
         require(
-            (value.format == 1 || value.format == 2)
+            (1..=3).contains(&value.format)
                 && uuid::Uuid::parse_str(&value.keeper).is_ok()
                 && value.removed.len() <= 20_100
                 && revocations::valid(&value)
+                && value
+                    .copy
+                    .as_ref()
+                    .is_none_or(|c| value.format == 3 && c.valid())
                 && value.removed.iter().all(|(id, revision)| {
                     uuid::Uuid::parse_str(id).is_ok()
                         && *revision > 0
@@ -234,12 +242,13 @@ impl Store {
                     Some(manifest) => manifest,
                     None => {
                         let manifest = Restrictions {
-                            format: 2,
+                            format: 3,
                             keeper: uuid::Uuid::new_v4().to_string(),
                             epoch: 0,
                             removed: BTreeMap::new(),
                             sources: BTreeMap::new(),
                             cancellations: BTreeMap::new(),
+                            copy: None,
                         };
                         self.memory_guard.write(&manifest)?;
                         manifest
@@ -250,7 +259,9 @@ impl Store {
                 manifest
             }
         };
-        if revocations::upgrade(&mut tx, &mut manifest).await? {
+        let upgraded = revocations::upgrade(&mut tx, &mut manifest).await?;
+        if upgraded || manifest.format < 3 {
+            manifest.format = 3;
             self.memory_guard.write(&manifest)?;
         }
         reconcile(&mut tx, &manifest).await?;

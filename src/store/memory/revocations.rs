@@ -105,7 +105,7 @@ pub(super) async fn capture(
 }
 
 pub(super) async fn upgrade(db: &mut SqliteConnection, value: &mut Restrictions) -> Result<bool> {
-    if value.format == 2 {
+    if value.format >= 2 {
         return Ok(false);
     }
     require(

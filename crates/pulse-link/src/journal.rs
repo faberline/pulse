@@ -8,6 +8,10 @@ use std::{
 
 #[derive(Clone)]
 pub struct Journal {
+    pub(crate) core: pulse_core::Store,
+    pub(crate) memory_denied: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) memory_lifecycle: std::sync::Arc<tokio::sync::Mutex<()>>,
+    pub(crate) memory_identity: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     pub(crate) db: SqlitePool,
     pub device: String,
     pub server: String,
@@ -153,6 +157,10 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
             .await?;
         tx.commit().await?;
         let journal = Self {
+            core,
+            memory_denied: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            memory_lifecycle: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            memory_identity: std::sync::Arc::new(std::sync::Mutex::new(None)),
             db,
             device,
             server: server.into(),

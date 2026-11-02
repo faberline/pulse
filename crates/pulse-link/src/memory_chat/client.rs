@@ -9,7 +9,11 @@ use pulse_core::{MemoryOutcome, MemoryView};
 use serde::de::DeserializeOwned;
 use std::time::Duration;
 
-async fn check_access(journal: &Journal, response: &reqwest::Response) -> Result<()> {
+async fn check_access(
+    journal: &Journal,
+    credential: &Credential,
+    response: &reqwest::Response,
+) -> Result<()> {
     if matches!(
         response.status(),
         reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
@@ -18,10 +22,13 @@ async fn check_access(journal: &Journal, response: &reqwest::Response) -> Result
         .get("x-pulse-credential-denied")
         .is_some_and(|v| v == "1")
     {
-        journal
-            .deny_memory_access()
+        let denied = journal
+            .deny_memory_credential(credential)
             .await
             .map_err(|error| crate::Error::CredentialCleanup(Box::new(error)))?;
+        if !denied {
+            return Err(crate::Error::Rejected("memory identity changed".into()));
+        }
         return Err(crate::Error::CredentialRejected);
     }
     Ok(())
@@ -53,6 +60,7 @@ pub async fn sync(config: &Config, journal: &Journal, credential: &Credential) -
     if !journal.memory_access_allowed().await? {
         return Err(crate::Error::CredentialRejected);
     }
+    journal.require_memory_identity(credential)?;
     let Some(generation) = journal.memory_dirty().await? else {
         return Ok(());
     };
@@ -64,13 +72,14 @@ pub async fn sync(config: &Config, journal: &Journal, credential: &Credential) -
         .map_err(|_| crate::Error::Rejected("memory HTTP configuration failed".into()))?;
     let url = config.server.join("v1/memories")?;
     let get = || async {
+        journal.require_memory_identity(credential)?;
         let response = client
             .get(url.clone())
             .bearer_auth(&credential.token)
             .send()
             .await
             .map_err(|_| crate::Error::Rejected("memory sync unavailable".into()))?;
-        check_access(journal, &response).await?;
+        check_access(journal, credential, &response).await?;
         ensure(
             response.status() == reqwest::StatusCode::OK,
             "memory sync denied",
@@ -79,12 +88,13 @@ pub async fn sync(config: &Config, journal: &Journal, credential: &Credential) -
     };
     // Restrictions FIRST, before replaying any unacknowledged source payload.
     journal
-        .apply_memory_view(&get().await?, crate::now())
+        .apply_memory_view_for(&get().await?, credential, crate::now())
         .await?;
     for request in journal.memory_requests().await? {
         if !journal.memory_request_active(&request).await? {
             continue;
         }
+        journal.require_memory_identity(credential)?;
         if !matches!(
             request.command,
             pulse_core::MemoryCommand::Revoke { .. } | pulse_core::MemoryCommand::Forget { .. }
@@ -99,7 +109,7 @@ pub async fn sync(config: &Config, journal: &Journal, credential: &Credential) -
             .send()
             .await
             .map_err(|_| crate::Error::Rejected("memory delivery interrupted".into()))?;
-        check_access(journal, &response).await?;
+        check_access(journal, credential, &response).await?;
         match response.status() {
             reqwest::StatusCode::OK => {
                 let outcome: MemoryOutcome = body(response).await?;
@@ -110,11 +120,13 @@ pub async fn sync(config: &Config, journal: &Journal, credential: &Credential) -
                     } => "review",
                     _ => "accepted",
                 };
-                journal.finish_memory(&request.source_id, phase).await?;
+                journal
+                    .finish_memory_for(&request.source_id, phase, credential)
+                    .await?;
             }
             reqwest::StatusCode::CONFLICT | reqwest::StatusCode::BAD_REQUEST => {
                 journal
-                    .finish_memory(&request.source_id, "rejected")
+                    .finish_memory_for(&request.source_id, "rejected", credential)
                     .await?
             }
             _ => {
@@ -125,7 +137,7 @@ pub async fn sync(config: &Config, journal: &Journal, credential: &Credential) -
         }
     }
     journal
-        .apply_memory_view(&get().await?, crate::now())
+        .apply_memory_view_for(&get().await?, credential, crate::now())
         .await?;
     journal.memory_clean(&generation).await
 }
