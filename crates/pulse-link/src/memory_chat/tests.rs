@@ -1002,6 +1002,7 @@ async fn post_commit_checkpoint_busy_is_retryable_and_same_source_never_applies_
         .build()
         .unwrap();
     let url = f.config.server.join("v1/memories").unwrap();
+    let started = std::time::Instant::now();
     let response = client
         .post(url.clone())
         .bearer_auth(&f.credential.token)
@@ -1010,6 +1011,12 @@ async fn post_commit_checkpoint_busy_is_retryable_and_same_source_never_applies_
         .await
         .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    let writer_timeout: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+        .fetch_one(&f.hub.core.application_pool())
+        .await
+        .unwrap();
+    assert_eq!(writer_timeout, 5000);
     sqlx::query("ROLLBACK").execute(&mut reader).await.unwrap();
     reader.close().await.unwrap();
     let response = client

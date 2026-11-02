@@ -16,6 +16,7 @@ const EVENT_LIMIT: i64 = 10_000;
 const MANIFEST_LIMIT: u64 = 8 * 1024 * 1024;
 
 mod backup;
+mod checkpoint;
 mod revocations;
 pub use backup::{BackupCheck, Maintenance};
 
@@ -486,14 +487,7 @@ impl Store {
     }
 
     async fn checkpoint_memory_redaction(&self) -> Result<()> {
-        let row = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-            .fetch_one(&self.pool)
-            .await?;
-        if row.get::<i64, _>(0) == 0 {
-            Ok(())
-        } else {
-            Err(Error::Busy)
-        }
+        checkpoint::truncate(&self.pool).await
     }
 
     async fn expire_memory_in(
