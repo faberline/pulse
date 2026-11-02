@@ -7,9 +7,9 @@ use super::*;
 pub(super) struct CopyFence {
     device: String,
     server: String,
-    generation: u64,
-    serial: u64,
-    denied: bool,
+    pub(super) generation: u64,
+    pub(super) serial: u64,
+    pub(super) denied: bool,
     credential: Option<String>,
     pending: Option<String>,
     preserve_bootstrap: bool,
@@ -43,8 +43,11 @@ impl CopyFence {
             .ok_or_else(|| Error::Rejected("memory copy generation exhausted".into()))?;
         Ok(())
     }
-    fn active(&self, hash: &str) -> bool {
+    pub(super) fn active(&self, hash: &str) -> bool {
         !self.denied && self.pending.is_none() && self.credential.as_deref() == Some(hash)
+    }
+    pub(super) fn bound(&self, device: &str, server: &str) -> bool {
+        self.device == device && self.server == server
     }
 }
 
@@ -200,7 +203,8 @@ impl Store {
         let serial = copy.serial;
         let allowed = !copy.denied && !mismatch && (!opening || row.get::<i64, _>("denied") == 0);
         let clear = db_generation != generation || (copy.denied && !copy.preserve_bootstrap);
-        if created || manifest.copy.as_ref().unwrap() != &prior {
+        let imported = super::withdrawals::import(&mut tx, &mut manifest).await?;
+        if created || imported || manifest.copy.as_ref().unwrap() != &prior {
             self.memory_guard.write(&manifest)?; // Durable restriction precedes SQLite.
         }
         if clear || !allowed {
@@ -223,6 +227,7 @@ impl Store {
         .bind(serial as i64)
         .execute(&mut *tx)
         .await?;
+        super::withdrawals::replay(&mut tx, &manifest).await?;
         tx.commit().await?;
         self.checkpoint_memory_redaction().await?;
         Ok(allowed)

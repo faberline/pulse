@@ -113,6 +113,12 @@ pub async fn sync(config: &Config, journal: &Journal, credential: &Credential) -
         match response.status() {
             reqwest::StatusCode::OK => {
                 let outcome: MemoryOutcome = body(response).await?;
+                if let pulse_core::MemoryCommand::Revoke { expected, .. } = &request.command {
+                    ensure(
+                        matches!(outcome,MemoryOutcome::Revoked {current_changed} if expected.is_some() || !current_changed),
+                        "withdrawal acknowledgement mismatch",
+                    )?;
+                }
                 let phase = match outcome {
                     MemoryOutcome::Redacted { .. } => "redacted",
                     MemoryOutcome::Revoked {

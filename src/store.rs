@@ -18,7 +18,7 @@ const SCHEMA: i64 = 11;
 
 mod approvals;
 mod memory;
-pub use memory::{BackupCheck, Maintenance, MemoryCopyChange, truncate_wal};
+pub use memory::{BackupCheck, Maintenance, MemoryCopyChange, MemoryWithdrawalRules, truncate_wal};
 
 #[derive(Clone)]
 pub struct Store {

@@ -4,6 +4,8 @@ use super::*;
 mod generation_tests;
 #[path = "identity_tests.rs"]
 mod identity_tests;
+#[path = "withdrawal_tests.rs"]
+mod withdrawal_tests;
 use crate::{
     client::Config,
     journal::{DeviceLock, Journal},
@@ -33,6 +35,7 @@ struct Fixture {
     config: Config,
     server: tokio::task::JoinHandle<std::io::Result<()>>,
     writes: Arc<AtomicUsize>,
+    bad_ack: Arc<std::sync::atomic::AtomicBool>,
     _permit: tokio::sync::SemaphorePermit<'static>,
 }
 impl Drop for Fixture {
@@ -83,14 +86,29 @@ async fn setup() -> Fixture {
     assert!(journal.bind_memory_credential(&credential).await.unwrap());
     let writes = Arc::new(AtomicUsize::new(0));
     let counter = writes.clone();
+    let bad_ack = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fault = bad_ack.clone();
     let app = router(hub.clone()).layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let fault = fault.clone();
+            let memory_post = request.method() == axum::http::Method::POST
+                && request.uri().path() == "/v1/memories";
             if request.method() == axum::http::Method::POST
                 && request.uri().path() == "/v1/memories"
             {
                 counter.fetch_add(1, Ordering::SeqCst);
             }
-            async move { next.run(request).await }
+            async move {
+                if memory_post && fault.load(Ordering::SeqCst) {
+                    use axum::response::IntoResponse;
+                    return axum::Json(pulse_core::MemoryOutcome::Stored {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        revision: 1,
+                    })
+                    .into_response();
+                }
+                next.run(request).await
+            }
         },
     ));
     let server = tokio::spawn(axum::serve(listener, app).into_future());
@@ -103,6 +121,7 @@ async fn setup() -> Fixture {
         config,
         server,
         writes,
+        bad_ack,
         _permit: permit,
     }
 }

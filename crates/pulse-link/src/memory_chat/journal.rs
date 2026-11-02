@@ -96,6 +96,19 @@ impl Journal {
     ) -> Result<()> {
         let _lifecycle = self.memory_lifecycle.lock().await;
         self.require_memory_identity(credential)?;
+        if self
+            .core
+            .finish_memory_withdrawal(
+                &self.device,
+                &crate::protocol::hash(&self.server)?,
+                &crate::protocol::hash(credential)?,
+                source,
+                phase,
+            )
+            .await?
+        {
+            return Ok(());
+        }
         self.finish_memory(source, phase).await
     }
     pub(crate) async fn apply_memory_view_for(
@@ -106,7 +119,7 @@ impl Journal {
     ) -> Result<()> {
         let _lifecycle = self.memory_lifecycle.lock().await;
         self.require_memory_identity(credential)?;
-        self.apply_memory_view(view, now).await
+        self.apply_memory_view_locked(view, now).await
     }
     pub(crate) async fn bind_memory_credential(
         &self,
@@ -188,12 +201,23 @@ impl Journal {
         let Some(intent) = parse(text) else {
             return Ok(false);
         };
+        let _lifecycle = self.memory_lifecycle.lock().await;
         self.require_memory_copy()?;
         ensure(
             self.role == ClientRole::Chat && uuid::Uuid::parse_str(source).is_ok(),
             "memory source or role invalid",
         )?;
         let source_uuid = canonical(source)?;
+        let rules = self
+            .core
+            .memory_withdrawal_rules(&self.device, &crate::protocol::hash(&self.server)?)
+            .await?;
+        if matches!(intent, Intent::Remember { .. } | Intent::Correct { .. }) {
+            ensure(
+                rules.allows_source(&source_uuid),
+                "memory source was withdrawn",
+            )?;
+        }
         ensure(
             (0..=i64::MAX - MEMORY_RETENTION_MS).contains(&now),
             "invalid memory source clock",
@@ -252,11 +276,34 @@ impl Journal {
         };
         let request = if let Some(command) = command {
             validate(&command)?;
-            Some(serde_json::to_string(&MemoryRequest {
+            let request = MemoryRequest {
                 source_id: source_uuid,
                 source_at: now,
                 command,
-            })?)
+            };
+            if matches!(
+                request.command,
+                MemoryCommand::Revoke { .. } | MemoryCommand::Forget { .. }
+            ) {
+                // The plan contains only exact source IDs and revisions. Release
+                // SQLite before Core takes its keeper lease, preserving lock order.
+                tx.rollback().await?;
+                self.memory_denied
+                    .store(true, std::sync::atomic::Ordering::Release);
+                self.core
+                    .queue_memory_withdrawal(
+                        pulse_core::Origin::Human,
+                        &self.device,
+                        &crate::protocol::hash(&self.server)?,
+                        &request,
+                        now,
+                    )
+                    .await?;
+                self.memory_denied
+                    .store(false, std::sync::atomic::Ordering::Release);
+                return Ok(true);
+            }
+            Some(serde_json::to_string(&request)?)
         } else {
             None
         };
@@ -320,7 +367,15 @@ impl Journal {
         self.flush_memory().await
     }
     pub async fn apply_memory_view(&self, view: &MemoryView, now: i64) -> Result<()> {
+        let _lifecycle = self.memory_lifecycle.lock().await;
+        self.apply_memory_view_locked(view, now).await
+    }
+    async fn apply_memory_view_locked(&self, view: &MemoryView, now: i64) -> Result<()> {
         self.require_memory_copy()?;
+        let rules = self
+            .core
+            .memory_withdrawal_rules(&self.device, &crate::protocol::hash(&self.server)?)
+            .await?;
         ensure(
             self.role == ClientRole::Chat
                 && uuid::Uuid::parse_str(&view.keeper).is_ok()
@@ -423,7 +478,8 @@ impl Journal {
         for memory in &view.memories {
             let mut memory = memory.clone();
             memory.source_id = canonical(&memory.source_id)?;
-            if !hidden.contains(&memory.id)
+            if rules.allows(&memory)
+                && !hidden.contains(&memory.id)
                 && !hidden_sources
                     .iter()
                     .any(|s| s.eq_ignore_ascii_case(&memory.source_id))
@@ -454,6 +510,7 @@ impl Journal {
         state: &mut crate::protocol::NativeState,
         now: i64,
     ) -> Result<()> {
+        let _lifecycle = self.memory_lifecycle.lock().await;
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
         let removed = sqlx::query(
             "DELETE FROM local_memory_cache WHERE json_extract(data,'$.expires_at')<=?",
@@ -652,25 +709,6 @@ async fn revoke_named(
     }
     sources.sort();
     sources.dedup();
-    for source in &sources {
-        sqlx::query(
-            "UPDATE local_memory_queue SET request=NULL,phase='redacted' WHERE source_uuid=?",
-        )
-        .bind(source)
-        .execute(&mut *db)
-        .await?;
-        sqlx::query(
-            "DELETE FROM local_memory_cache WHERE lower(json_extract(data,'$.source_id'))=?",
-        )
-        .bind(source)
-        .execute(&mut *db)
-        .await?;
-    }
-    if let Some(reference) = &expected {
-        sqlx::query("DELETE FROM local_memory_cache WHERE id=?")
-            .bind(&reference.id)
-            .execute(db)
-            .await?;
-    }
+    // Plan only. Core saves bodyless evidence before it erases the local copy.
     Ok(MemoryCommand::Revoke { sources, expected })
 }

@@ -19,9 +19,11 @@ mod backup;
 mod checkpoint;
 mod copy;
 mod revocations;
+mod withdrawals;
 pub use backup::{BackupCheck, Maintenance};
 pub use checkpoint::truncate as truncate_wal;
 pub use copy::MemoryCopyChange;
+pub use withdrawals::MemoryWithdrawalRules;
 
 /// This file is deliberately outside the database backup. It is restriction
 /// evidence, not another task or knowledge store. Never put source text in it.
@@ -38,6 +40,8 @@ struct Restrictions {
     cancellations: BTreeMap<String, revocations::Cancellation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     copy: Option<copy::CopyFence>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    withdrawals: BTreeMap<String, withdrawals::Withdrawal>,
 }
 
 pub(super) struct MemoryGuard {
@@ -169,14 +173,15 @@ impl MemoryGuard {
         let value: Restrictions = serde_json::from_slice(&bytes)
             .map_err(|_| Error::Rejected("invalid memory restrictions".into()))?;
         require(
-            (1..=3).contains(&value.format)
+            (1..=4).contains(&value.format)
                 && uuid::Uuid::parse_str(&value.keeper).is_ok()
                 && value.removed.len() <= 20_100
                 && revocations::valid(&value)
                 && value
                     .copy
                     .as_ref()
-                    .is_none_or(|c| value.format == 3 && c.valid())
+                    .is_none_or(|c| value.format >= 3 && c.valid())
+                && withdrawals::valid(&value)
                 && value.removed.iter().all(|(id, revision)| {
                     uuid::Uuid::parse_str(id).is_ok()
                         && *revision > 0
@@ -242,13 +247,14 @@ impl Store {
                     Some(manifest) => manifest,
                     None => {
                         let manifest = Restrictions {
-                            format: 3,
+                            format: 4,
                             keeper: uuid::Uuid::new_v4().to_string(),
                             epoch: 0,
                             removed: BTreeMap::new(),
                             sources: BTreeMap::new(),
                             cancellations: BTreeMap::new(),
                             copy: None,
+                            withdrawals: BTreeMap::new(),
                         };
                         self.memory_guard.write(&manifest)?;
                         manifest
@@ -260,8 +266,13 @@ impl Store {
             }
         };
         let upgraded = revocations::upgrade(&mut tx, &mut manifest).await?;
-        if upgraded || manifest.format < 3 {
-            manifest.format = 3;
+        let imported = if manifest.copy.is_some() {
+            withdrawals::import(&mut tx, &mut manifest).await?
+        } else {
+            false
+        };
+        if upgraded || imported || manifest.format < 4 {
+            manifest.format = 4;
             self.memory_guard.write(&manifest)?;
         }
         reconcile(&mut tx, &manifest).await?;
