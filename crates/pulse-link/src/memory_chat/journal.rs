@@ -285,9 +285,12 @@ impl Journal {
                 request.command,
                 MemoryCommand::Revoke { .. } | MemoryCommand::Forget { .. }
             ) {
-                // The plan contains only exact source IDs and revisions. Release
-                // SQLite before Core takes its keeper lease, preserving lock order.
-                tx.rollback().await?;
+                // The deletion plan above is read-only. Commit only a bodyless
+                // topic marker before Core takes its keeper lease and erases data.
+                // This never needs a slot in the ordinary transport queue.
+                self.mark_conversation_boundary_in(&mut tx, &request.source_id)
+                    .await?;
+                tx.commit().await?;
                 self.memory_denied
                     .store(true, std::sync::atomic::Ordering::Release);
                 self.core
@@ -319,6 +322,7 @@ impl Journal {
         .await?;
         sqlx::query("INSERT INTO local_meta VALUES('memory_visible','true') ON CONFLICT(key) DO UPDATE SET value='true'").execute(&mut *tx).await?;
         dirty(&mut tx).await?;
+        self.mark_conversation_boundary_in(&mut tx, source).await?;
         self.require_memory_copy()?;
         pulse_core::Store::prune_local_memory_projection_in(&mut tx, Some(now), false).await?;
         tx.commit().await?;

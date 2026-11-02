@@ -213,6 +213,8 @@ impl ReadOp {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HumanAction {
+    /// A Human changed topics locally. No memory text or task instruction.
+    ConversationBoundary {},
     Schedule {
         request: pulse_core::ScheduleRequest,
         text: String,

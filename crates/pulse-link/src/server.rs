@@ -1042,7 +1042,9 @@ impl Hub {
                     HumanAction::Read { task_id, .. } => vec![Command::Query {
                         ids: vec![task_id.clone()],
                     }],
-                    HumanAction::Status | HumanAction::StopLocal { .. } => vec![],
+                    HumanAction::Status
+                    | HumanAction::ConversationBoundary {}
+                    | HumanAction::StopLocal { .. } => vec![],
                 };
                 let event = self
                     .core
@@ -1269,7 +1271,7 @@ impl Hub {
                         .await?;
                         tx.commit().await?;
                     }
-                    HumanAction::Status => {}
+                    HumanAction::Status | HumanAction::ConversationBoundary {} => {}
                 }
             }
             DevicePayload::Result {

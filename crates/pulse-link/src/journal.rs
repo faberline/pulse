@@ -310,6 +310,14 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         sqlx::query("UPDATE local_meta SET value='false' WHERE key='memory_visible'")
             .execute(&mut *tx)
             .await?;
+        if matches!(
+            action,
+            HumanAction::Submit { .. }
+                | HumanAction::SubmitComputer { .. }
+                | HumanAction::Schedule { .. }
+        ) {
+            self.enqueue_conversation_boundary_in(&mut tx).await?;
+        }
         self.enqueue_in(
             &mut tx,
             DevicePayload::Human {

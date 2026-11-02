@@ -6,12 +6,66 @@ use sqlx::Row;
 
 const KEY: &str = "chat_conversation_context_v1";
 const MAX_AGE_MS: i64 = 30 * 60 * 1000;
+const LOCAL_BOUNDARY: &str = "conversation_boundary_v1";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Target {
     id: String,
     revision: u64,
+}
+
+impl crate::journal::Journal {
+    pub(crate) async fn mark_conversation_boundary_in(
+        &self,
+        db: &mut sqlx::SqliteConnection,
+        source: &str,
+    ) -> Result<()> {
+        crate::ensure(
+            self.role == crate::protocol::ClientRole::Chat,
+            "chat topic role",
+        )?;
+        let source = uuid::Uuid::parse_str(source)
+            .map_err(|_| crate::Error::Rejected("invalid topic source".into()))?
+            .to_string();
+        sqlx::query("INSERT INTO local_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+            .bind(LOCAL_BOUNDARY)
+            .bind(source)
+            .execute(db)
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn enqueue_conversation_boundary_in(
+        &self,
+        db: &mut sqlx::SqliteConnection,
+    ) -> Result<()> {
+        let source: Option<String> = sqlx::query_scalar("SELECT value FROM local_meta WHERE key=?")
+            .bind(LOCAL_BOUNDARY)
+            .fetch_optional(&mut *db)
+            .await?;
+        let Some(source) = source else { return Ok(()) };
+        crate::ensure(
+            self.role == crate::protocol::ClientRole::Chat,
+            "chat topic role",
+        )?;
+        let source = uuid::Uuid::parse_str(&source)
+            .map_err(|_| crate::Error::Rejected("invalid saved topic source".into()))?;
+        self.enqueue_in(
+            db,
+            crate::protocol::DevicePayload::Human {
+                source_id: format!("topic:{source}"),
+                action: HumanAction::ConversationBoundary {},
+            },
+            0,
+        )
+        .await?;
+        sqlx::query("DELETE FROM local_meta WHERE key=?")
+            .bind(LOCAL_BOUNDARY)
+            .execute(db)
+            .await?;
+        Ok(())
+    }
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
