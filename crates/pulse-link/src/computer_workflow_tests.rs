@@ -880,7 +880,7 @@ async fn native_worker_erasure_cancels_an_active_child_and_revokes_cached_select
         .accept_worker_erasure(context.read_header.as_ref().unwrap(), &context)
         .await
         .unwrap();
-    f.executor.invalidate_source(&context).await;
+    f.executor.invalidate_source(&context).await.unwrap();
     crate::computer_runtime::tests::assert_reaped(&f.runtime).await;
     assert_eq!(f.effects(), 1);
     assert!(!f.runtime.permitted("task", "1", &f.observation.selection()));

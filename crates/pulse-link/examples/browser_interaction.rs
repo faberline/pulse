@@ -99,12 +99,12 @@ async fn execute(
             matches!(saved, ReadOutcome::Completed { .. }),
             "effect failed before crash cut",
         )?;
-        executor.maintain_browser(None, &[]).await;
+        executor.maintain_browser(None, &[]).await?;
         std::process::exit(73);
     }
     journal.finish_work_image(&envelope, outcome, image).await?;
     if cut == Some("result") {
-        executor.maintain_browser(None, &[]).await;
+        executor.maintain_browser(None, &[]).await?;
         std::process::exit(73);
     }
     for envelope in journal.outgoing().await? {
@@ -377,7 +377,7 @@ async fn main() -> Result<()> {
             dir.path().join("unsupported-form.json"),
             serde_json::to_vec_pretty(&json!({"case":case,"counter":0,"outcome":outcome}))?,
         )?;
-        runtime.maintain(None, &[]).await;
+        runtime.maintain(None, &[]).await?;
         server.abort();
         println!(
             "Native unsupported form passed ({case}): {}",
@@ -512,7 +512,7 @@ async fn main() -> Result<()> {
                     hub.core.task("other-task").await?,
                 ],
             )
-            .await;
+            .await?;
         ensure(
             hub.core
                 .operation_request(&request.proposal.id)
@@ -541,7 +541,7 @@ async fn main() -> Result<()> {
             dir.path().join("rejected.json"),
             b"{\"counter\":0,\"operations\":0}",
         )?;
-        runtime.maintain(None, &[]).await;
+        runtime.maintain(None, &[]).await?;
         server.abort();
         println!("Native rejection passed: {}", dir.keep().display());
         return Ok(());
@@ -646,7 +646,7 @@ async fn main() -> Result<()> {
             dir.path().join("changed-view.json"),
             serde_json::to_vec_pretty(&json!({"counter":0,"result":clicked}))?,
         )?;
-        runtime.maintain(None, &[]).await;
+        runtime.maintain(None, &[]).await?;
         server.abort();
         println!(
             "Native changed-view rejection passed: {}",
@@ -736,7 +736,7 @@ async fn main() -> Result<()> {
             &json!({"inspect":outcome,"click":clicked,"type":typed,"counter":1,"provider_calls":0,"fixture_controlled_decisions":true}),
         )?,
     )?;
-    runtime.maintain(None, &[]).await;
+    runtime.maintain(None, &[]).await?;
     server.abort();
     println!(
         "Native interaction component passed. Evidence: {}",

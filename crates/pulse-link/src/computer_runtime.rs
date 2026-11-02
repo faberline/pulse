@@ -1,7 +1,7 @@
 //! Fixed native helper IPC. The model cannot select its executable, arguments or cache path.
+use crate::owned_process::{ProcessTracker, SourceScope};
 use crate::{Result, artifact::png_dimensions, ensure, journal::private_dir, protocol::hash_bytes};
 use pulse_core::{ComputerBinding, ComputerImageRef, ComputerObservation, ComputerTarget};
-use rustix::process::{Pid, Signal, kill_process_group};
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
@@ -10,7 +10,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    process::{Child, Command},
+    process::Command,
 };
 
 const VERSION: &str = "pulse-computer-observe-5";
@@ -150,6 +150,7 @@ pub struct ComputerRuntime {
     permits: std::sync::Arc<std::sync::Mutex<Vec<pulse_core::ComputerPermit>>>,
     activity: tokio::sync::watch::Sender<bool>,
     observations: std::sync::Arc<std::sync::Mutex<Vec<ComputerObservation>>>,
+    processes: ProcessTracker,
 }
 impl ComputerRuntime {
     pub async fn list_windows(&self) -> Result<Vec<pulse_core::ComputerWindowChoice>> {
@@ -249,6 +250,7 @@ impl ComputerRuntime {
             gate: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
             permits: Default::default(),
             observations: Default::default(),
+            processes: Default::default(),
             activity: tokio::sync::watch::channel(false).0,
         })
     }
@@ -401,15 +403,22 @@ impl ComputerRuntime {
             entries.retain(|entry| entry != permit);
         }
     }
-    pub(crate) fn invalidate_source(&self, task: &str, revision: &str) {
-        if let Ok(mut permits) = self.permits.lock() {
-            permits.retain(|p| p.task_id != task || p.revision != revision);
-        }
-        if let Ok(mut observations) = self.observations.lock() {
-            observations.retain(|o| {
-                o.binding.task_id != task || o.binding.revision.to_string() != revision
-            });
-        }
+    pub(crate) fn invalidate_source(&self, task: &str, revision: &str) -> Result<()> {
+        self.processes.fence(&SourceScope::new(task, revision)?)?;
+        self.permits
+            .lock()
+            .map_err(|_| crate::Error::Rejected("local selections unavailable".into()))?
+            .retain(|p| p.task_id != task || p.revision != revision);
+        self.observations
+            .lock()
+            .map_err(|_| crate::Error::Rejected("local observations unavailable".into()))?
+            .retain(|o| o.binding.task_id != task || o.binding.revision.to_string() != revision);
+        Ok(())
+    }
+    pub(crate) async fn wait_source(&self, task: &str, revision: &str) -> Result<()> {
+        self.processes
+            .wait_source(&SourceScope::new(task, revision)?)
+            .await
     }
     pub(crate) fn maintain(&self, tasks: &[pulse_core::Task]) {
         if let Ok(mut entries) = self.permits.lock() {
@@ -510,7 +519,17 @@ impl ComputerRuntime {
         ensure(request.len() <= 16_384, "computer request limit")?;
         let args = self.arguments(target, &cache)?;
         let started = crate::now();
-        let response = self.call(&args, Some(request), self.timeout).await?;
+        let response = self
+            .call_source(
+                &args,
+                Some(request),
+                self.timeout,
+                Some(SourceScope::new(
+                    &binding.task_id,
+                    &binding.revision.to_string(),
+                )?),
+            )
+            .await?;
         ensure(
             response.error.is_none()
                 && response.selection.is_none()
@@ -577,12 +596,22 @@ impl ComputerRuntime {
         input: Option<Vec<u8>>,
         timeout: Duration,
     ) -> Result<NativeResponse> {
+        self.call_source(args, input, timeout, None).await
+    }
+    async fn call_source(
+        &self,
+        args: &[String],
+        input: Option<Vec<u8>>,
+        timeout: Duration,
+        source: Option<SourceScope>,
+    ) -> Result<NativeResponse> {
         let _permit = self
             .gate
             .clone()
             .try_acquire_owned()
             .map_err(|_| crate::Error::Capacity)?;
-        self.call_with_permit(args, input, timeout, _permit).await
+        self.call_with_permit(args, input, timeout, _permit, source)
+            .await
     }
     async fn call_with_permit(
         &self,
@@ -590,6 +619,7 @@ impl ComputerRuntime {
         input: Option<Vec<u8>>,
         timeout: Duration,
         _permit: tokio::sync::OwnedSemaphorePermit,
+        source: Option<SourceScope>,
     ) -> Result<NativeResponse> {
         tokio::time::timeout(timeout, async {
             let mut command = Command::new(&self.helper);
@@ -615,27 +645,18 @@ impl ComputerRuntime {
                     .env("PULSE_COMPUTER_PID", target.pid.to_string())
                     .env("PULSE_COMPUTER_WINDOW_ID", target.window_id.to_string());
             }
-            let child = command.spawn()?;
-            let pid = child
-                .id()
-                .and_then(|id| i32::try_from(id).ok())
-                .and_then(Pid::from_raw)
-                .ok_or_else(|| crate::Error::Rejected("native process group missing".into()))?;
-            let mut owner = NativeChild {
-                child,
-                pid: Some(pid),
-            };
+            let mut owner = self.processes.spawn(&mut command, source, None)?;
             let mut stdout = owner
-                .child
+                .child()
                 .stdout
                 .take()
                 .ok_or_else(|| crate::Error::Rejected("native output missing".into()))?;
             let mut stderr = owner
-                .child
+                .child()
                 .stderr
                 .take()
                 .ok_or_else(|| crate::Error::Rejected("native diagnostics missing".into()))?;
-            let stdin = owner.child.stdin.take();
+            let stdin = owner.child().stdin.take();
             let (bytes, _) = tokio::try_join!(
                 async {
                     let mut bytes = Vec::new();
@@ -660,8 +681,7 @@ impl ComputerRuntime {
                     Ok::<_, crate::Error>(())
                 }
             )?;
-            let status = owner.child.wait().await?;
-            owner.pid = None;
+            let status = owner.wait().await?;
             ensure(
                 status.success(),
                 "native helper exited without a valid result",
@@ -682,17 +702,6 @@ impl ComputerRuntime {
         })
         .await
         .map_err(|_| crate::Error::Rejected("native helper timed out".into()))?
-    }
-}
-struct NativeChild {
-    child: Child,
-    pid: Option<Pid>,
-}
-impl Drop for NativeChild {
-    fn drop(&mut self) {
-        if let Some(pid) = self.pid.take() {
-            let _ = kill_process_group(pid, Signal::KILL);
-        }
     }
 }
 fn read_image(path: &Path, image: &ComputerImageRef) -> Result<Vec<u8>> {

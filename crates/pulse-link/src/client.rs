@@ -652,13 +652,13 @@ async fn connected(
                         ServerWire::Data{envelope,permitted}=>{
                             let current=lease.borrow().clone();ensure(epoch.is_some()&&current.live(),"data without live session")?;
                             journal.accept(&envelope,permitted,current.epoch,current.live()&&!journal.stopped().await?).await?;
-                            if let ServerPayload::EraseWork{context}=&envelope.payload && let Some(executor)=&executor {executor.invalidate_source(context).await;}
+                            if let ServerPayload::EraseWork{context}=&envelope.payload && let Some(executor)=&executor {executor.invalidate_source(context).await?;}
                             wire(&mut socket,&ClientWire::Ack{sequence:envelope.sequence,id:envelope.id}).await?;
                         }
                         ServerWire::ErasedWork{header,context}=>{
                             ensure(epoch.is_some() && lease.borrow().live(),"work erasure without live session")?;
                             journal.accept_worker_erasure(&header,&context).await?;
-                            if let Some(executor)=&executor {executor.invalidate_source(&context).await;}
+                            if let Some(executor)=&executor {executor.invalidate_source(&context).await?;}
                             wire(&mut socket,&ClientWire::Ack{sequence:header.sequence,id:header.id}).await?;
                         }
                         ServerWire::ErasedProjection{header}=>{
@@ -702,7 +702,7 @@ async fn work(journal: Journal, executor: Executor, lease: watch::Receiver<Lease
                 (active.live() && !journal.stopped().await?).then_some(active.epoch),
                 &view.tasks,
             )
-            .await;
+            .await?;
         if let Some(envelope) = journal.take_work().await? {
             let current = lease.borrow().clone();
             let allowed = current.live()

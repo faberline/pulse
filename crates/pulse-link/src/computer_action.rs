@@ -150,7 +150,11 @@ impl ComputerRuntime {
         let started = crate::now();
         let mut activity = self.activity.subscribe();
         let mut check = tokio::time::interval(Duration::from_millis(20));
-        let call = self.call_with_permit(&args, Some(request), self.timeout, permit);
+        let source = match SourceScope::new(&binding.task_id, &binding.revision) {
+            Ok(source) => source,
+            Err(_) => return result(false, "computer source rejected; no command sent"),
+        };
+        let call = self.call_with_permit(&args, Some(request), self.timeout, permit, Some(source));
         tokio::pin!(call);
         let response = loop {
             tokio::select! {

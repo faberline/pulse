@@ -5,8 +5,8 @@ use crate::{
     browser_network::{BrowserProxy, NetworkPolicy},
     ensure,
     journal::{private_dir, private_write},
+    owned_process::{OwnedProcess, ProcessTracker, SourceScope},
 };
-use rustix::process::{Pid, Signal, kill_process_group};
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
@@ -14,7 +14,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, BufReader},
-    process::{Child, Command},
+    process::Command,
 };
 use url::Url;
 
@@ -29,6 +29,7 @@ pub struct BrowserRuntime {
         >,
     >,
     pub interactions: bool,
+    pub(crate) processes: ProcessTracker,
 }
 impl BrowserRuntime {
     pub fn from_environment(directory: &Path) -> Result<Option<Self>> {
@@ -50,6 +51,7 @@ impl BrowserRuntime {
             directory,
             sessions: Default::default(),
             interactions: std::env::var("PULSE_BROWSER_INTERACTION").as_deref() == Ok("1"),
+            processes: Default::default(),
         }))
     }
     pub fn new(driver: PathBuf, policy: NetworkPolicy, directory: PathBuf) -> Result<Self> {
@@ -65,12 +67,25 @@ impl BrowserRuntime {
             directory,
             sessions: Default::default(),
             interactions: false,
+            processes: Default::default(),
         })
     }
     pub async fn read(&self, url: &Url) -> Result<BrowserSnapshot> {
         self.policy.validate_url(url)?;
         self.artifact_room()?;
-        tokio::time::timeout(Duration::from_secs(35), self.read_inner(url))
+        tokio::time::timeout(Duration::from_secs(35), self.read_inner(url, None))
+            .await
+            .map_err(|_| crate::Error::Rejected("browser read timed out".into()))?
+    }
+    pub(crate) async fn read_bound(
+        &self,
+        url: &Url,
+        binding: &crate::browser_session::WorkBinding,
+    ) -> Result<BrowserSnapshot> {
+        self.policy.validate_url(url)?;
+        self.artifact_room()?;
+        let scope = SourceScope::new(&binding.task_id, &binding.revision)?;
+        tokio::time::timeout(Duration::from_secs(35), self.read_inner(url, Some(scope)))
             .await
             .map_err(|_| crate::Error::Rejected("browser read timed out".into()))?
     }
@@ -87,25 +102,32 @@ impl BrowserRuntime {
         self.interactions = enabled;
         self
     }
-    async fn read_inner(&self, url: &Url) -> Result<BrowserSnapshot> {
-        let mut session = self.start(url).await?;
+    async fn read_inner(&self, url: &Url, source: Option<SourceScope>) -> Result<BrowserSnapshot> {
+        let mut session = self.start(url, source).await?;
         let result = async {
             session.browser.navigate(url).await?;
             session.browser.observe().await
         }
         .await;
         let closed = session.browser.close().await;
-        session.owner.stop().await?;
+        session.owner.shutdown().await?;
         let snapshot = result?;
         closed?;
         self.store_snapshot(&snapshot)?;
         Ok(snapshot)
     }
-    pub(crate) async fn start(&self, url: &Url) -> Result<OwnedBrowser> {
+    pub(crate) async fn start(
+        &self,
+        url: &Url,
+        source: Option<SourceScope>,
+    ) -> Result<OwnedBrowser> {
+        use std::os::unix::fs::PermissionsExt;
         self.policy.validate_url(url)?;
         let profile = tempfile::Builder::new()
             .prefix("session-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir_in(&self.directory)?;
+        let profile_path = profile.path().to_path_buf();
         let proxy = BrowserProxy::start(self.policy.clone()).await?;
         let mut command = Command::new(&self.driver);
         command
@@ -121,21 +143,12 @@ impl BrowserRuntime {
         if let Some(home) = std::env::var_os("HOME") {
             command.env("HOME", home);
         }
-        let mut child = command.spawn()?;
-        let group = child
-            .id()
-            .and_then(|p| i32::try_from(p).ok())
-            .and_then(Pid::from_raw)
-            .ok_or_else(|| crate::Error::Rejected("browser process group missing".into()))?;
-        let stdout = child
+        let mut owner = self.processes.spawn(&mut command, source, Some(profile))?;
+        let stdout = owner
+            .child()
             .stdout
             .take()
             .ok_or_else(|| crate::Error::Rejected("browser startup output missing".into()))?;
-        let owner = Driver {
-            child,
-            group: Some(group),
-            _profile: profile,
-        };
         let mut lines = BufReader::new(stdout.take(8192)).lines();
         let endpoint = tokio::time::timeout(Duration::from_secs(8), async {
             while let Some(line) = lines.next_line().await? {
@@ -156,12 +169,13 @@ impl BrowserRuntime {
         })
         .await
         .map_err(|_| crate::Error::Rejected("browser driver startup timed out".into()))??;
+        owner.driver_shutdown(&endpoint)?;
         let browser = FixtureBrowser::open_guarded(
             endpoint,
             url.clone(),
             self.policy.clone(),
             proxy.address,
-            &owner._profile.path().join("profile"),
+            &profile_path.join("profile"),
         )
         .await?;
         Ok(OwnedBrowser {
@@ -203,34 +217,13 @@ impl BrowserRuntime {
 }
 pub(crate) struct OwnedBrowser {
     pub browser: FixtureBrowser,
-    owner: Driver,
+    owner: OwnedProcess,
     pub proxy: BrowserProxy,
 }
-struct Driver {
-    child: Child,
-    group: Option<Pid>,
-    _profile: tempfile::TempDir,
-}
-impl Driver {
-    fn kill(&mut self) -> Result<()> {
-        if let Some(group) = self.group {
-            match kill_process_group(group, Signal::KILL) {
-                Ok(()) | Err(rustix::io::Errno::SRCH) => self.group = None,
-                Err(e) => return Err(e.into()),
-            }
-        }
+impl OwnedBrowser {
+    pub(crate) async fn stop(mut self) -> Result<()> {
+        let _ = tokio::time::timeout(Duration::from_secs(3), self.browser.close()).await;
+        self.owner.shutdown().await?;
         Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        self.kill()?;
-        tokio::time::timeout(Duration::from_secs(5), self.child.wait())
-            .await
-            .map_err(|_| crate::Error::Rejected("browser process did not exit".into()))??;
-        Ok(())
-    }
-}
-impl Drop for Driver {
-    fn drop(&mut self) {
-        let _ = self.kill();
     }
 }

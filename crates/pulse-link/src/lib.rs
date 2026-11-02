@@ -17,6 +17,7 @@ pub mod desktop_notifications;
 pub mod executor;
 pub mod journal;
 mod operation_orchestration;
+mod owned_process;
 mod pairing;
 pub mod protocol;
 pub mod provider;

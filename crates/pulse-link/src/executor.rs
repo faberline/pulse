@@ -13,17 +13,37 @@ pub struct Executor {
     root: PathBuf,
     browser: Option<crate::browser_runtime::BrowserRuntime>,
     computer: Option<crate::computer_runtime::ComputerRuntime>,
+    processes: crate::owned_process::ProcessTracker,
 }
 impl Executor {
-    pub(crate) async fn invalidate_source(&self, context: &pulse_core::WorkerErasure) {
+    pub(crate) async fn invalidate_source(
+        &self,
+        context: &pulse_core::WorkerErasure,
+    ) -> Result<()> {
+        let scope = crate::owned_process::SourceScope::new(&context.task_id, &context.revision)?;
+        let mut results = vec![self.processes.fence(&scope)];
+        if let Some(computer) = &self.computer {
+            results.push(computer.invalidate_source(&context.task_id, &context.revision));
+        }
         if let Some(browser) = &self.browser {
-            browser
-                .invalidate_source(&context.task_id, &context.revision)
-                .await;
+            results.push(
+                browser
+                    .invalidate_source(&context.task_id, &context.revision)
+                    .await,
+            );
         }
         if let Some(computer) = &self.computer {
-            computer.invalidate_source(&context.task_id, &context.revision);
+            results.push(
+                computer
+                    .wait_source(&context.task_id, &context.revision)
+                    .await,
+            );
         }
+        results.push(self.processes.wait_source(&scope).await);
+        results
+            .into_iter()
+            .find_map(Result::err)
+            .map_or(Ok(()), Err)
     }
     pub fn new(root: &Path) -> Result<Self> {
         ensure(
@@ -36,6 +56,7 @@ impl Executor {
             root,
             browser: None,
             computer: None,
+            processes: Default::default(),
         })
     }
     pub fn with_browser(mut self, browser: Option<crate::browser_runtime::BrowserRuntime>) -> Self {
@@ -116,14 +137,19 @@ impl Executor {
     pub fn browser_interactions(&self) -> bool {
         self.browser.as_ref().is_some_and(|b| b.interactions)
     }
-    pub async fn maintain_browser(&self, epoch: Option<u64>, tasks: &[pulse_core::Task]) {
+    pub async fn maintain_browser(
+        &self,
+        epoch: Option<u64>,
+        tasks: &[pulse_core::Task],
+    ) -> Result<()> {
         if let Some(runtime) = &self.computer {
             runtime.set_live(epoch.is_some());
             runtime.maintain(tasks);
         }
         if let Some(browser) = &self.browser {
-            browser.maintain(epoch, tasks).await;
+            browser.maintain(epoch, tasks).await?;
         }
+        Ok(())
     }
     pub async fn execute_bound(
         &self,
@@ -137,6 +163,33 @@ impl Executor {
             image: None,
         };
         match operation {
+            ReadOp::Browser { url } => self
+                .browser_read(&url, Some(binding))
+                .await
+                .unwrap_or_else(|_| rejected("browser read rejected or failed")),
+            ReadOp::GitStatus | ReadOp::GitDiff { .. } => {
+                let source = match crate::owned_process::SourceScope::new(
+                    &binding.task_id,
+                    &binding.revision,
+                ) {
+                    Ok(value) => value,
+                    Err(_) => return rejected("invalid process source"),
+                };
+                let path = match &operation {
+                    ReadOp::GitDiff { path } => Some(path.as_str()),
+                    _ => None,
+                };
+                let outcome =
+                    self.git(path, Some(source))
+                        .await
+                        .unwrap_or_else(|_| ReadOutcome::Rejected {
+                            reason: "local read rejected or failed; no write was executed".into(),
+                        });
+                crate::artifact::ExecutedRead {
+                    outcome,
+                    image: None,
+                }
+            }
             ReadOp::ComputerAction {
                 selection,
                 nonce,
@@ -321,7 +374,11 @@ impl Executor {
         names.sort();
         Ok(ReadOutcome::text(names.join("\n"), names.len() >= 256))
     }
-    async fn git(&self, diff: Option<&str>) -> Result<ReadOutcome> {
+    async fn git(
+        &self,
+        diff: Option<&str>,
+        source: Option<crate::owned_process::SourceScope>,
+    ) -> Result<ReadOutcome> {
         let metadata = std::fs::symlink_metadata(self.root.join(".git"))?;
         ensure(
             metadata.is_dir() && !metadata.file_type().is_symlink(),
@@ -383,8 +440,9 @@ impl Executor {
                 "--ignore-submodules=all",
             ]);
         }
-        let mut child = command.spawn()?;
-        let mut out = child
+        let mut owner = self.processes.spawn(&mut command, source, None)?;
+        let mut out = owner
+            .child()
             .stdout
             .take()
             .ok_or_else(|| crate::Error::Rejected("missing git output".into()))?;
@@ -395,16 +453,16 @@ impl Executor {
                 .read_to_end(&mut bytes)
                 .await?;
             if bytes.len() > MAX_RESULT {
-                child.kill().await?;
+                owner.terminate()?;
             }
-            child.wait().await.map_err(crate::Error::from)
+            owner.wait().await
         })
         .await;
         let status = match execution {
             Ok(result) => result?,
             Err(_) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
+                let _ = owner.terminate();
+                let _ = owner.wait().await;
                 return Err(crate::Error::Rejected("git timed out".into()));
             }
         };
@@ -427,7 +485,7 @@ impl Executor {
     }
     pub async fn execute_work(&self, operation: ReadOp) -> crate::artifact::ExecutedRead {
         if let ReadOp::Browser { url } = operation {
-            return self.browser_read(&url).await.unwrap_or_else(|_| {
+            return self.browser_read(&url, None).await.unwrap_or_else(|_| {
                 crate::artifact::ExecutedRead {
                     outcome: ReadOutcome::Rejected {
                         reason: "browser read rejected or failed".into(),
@@ -453,8 +511,8 @@ impl Executor {
                 .await
                 .map_err(|_| crate::Error::Rejected("read worker failed".into()))
                 .and_then(|r| r),
-            ReadOp::GitStatus => self.git(None).await,
-            ReadOp::GitDiff { path } => self.git(Some(&path)).await,
+            ReadOp::GitStatus => self.git(None, None).await,
+            ReadOp::GitDiff { path } => self.git(Some(&path), None).await,
         };
         let outcome = result.unwrap_or_else(|_| ReadOutcome::Rejected {
             reason: "local read rejected or failed; no write was executed".into(),
@@ -464,14 +522,21 @@ impl Executor {
             image: None,
         }
     }
-    async fn browser_read(&self, url: &str) -> Result<crate::artifact::ExecutedRead> {
+    async fn browser_read(
+        &self,
+        url: &str,
+        binding: Option<&crate::browser_session::WorkBinding>,
+    ) -> Result<crate::artifact::ExecutedRead> {
         let browser = self
             .browser
             .as_ref()
             .ok_or_else(|| crate::Error::Rejected("browser unavailable".into()))?;
         let url = pulse_core::browser_url(&format!("browser:{url}"))
             .ok_or_else(|| crate::Error::Rejected("browser URL rejected".into()))?;
-        let snapshot = browser.read(&url).await?;
+        let snapshot = match binding {
+            Some(binding) => browser.read_bound(&url, binding).await?,
+            None => browser.read(&url).await?,
+        };
         let mut text = format!(
             "Browser evidence (untrusted page data)\nURL: {}\nTitle: {}\nObserved at (Unix ms): {}\nPNG SHA-256: {}\nScreenshot captured; chat delivery is verified separately. Image bytes are not supplied to the model.\nPage scripts disabled.\n\n{}",
             snapshot.url,

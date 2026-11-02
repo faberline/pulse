@@ -1,5 +1,6 @@
 //! Mock process fixtures verify the IPC boundary, not native macOS capture acceptance.
 use super::*;
+use rustix::process::Pid;
 use std::{os::unix::fs::PermissionsExt, time::Instant};
 
 const FIXTURE: &str = r#"#!/usr/bin/python3

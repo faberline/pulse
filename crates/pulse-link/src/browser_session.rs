@@ -15,6 +15,10 @@ use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use url::Url;
 
+#[cfg(test)]
+#[path = "browser_process_tests.rs"]
+mod process_tests;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserGrant {
@@ -144,11 +148,28 @@ pub(crate) fn evidence(
     })
 }
 impl BrowserRuntime {
-    pub(crate) async fn invalidate_source(&self, task: &str, revision: &str) {
-        self.sessions
-            .lock()
-            .await
-            .retain(|_, s| s.task_id != task || s.revision != revision);
+    pub(crate) async fn invalidate_source(&self, task: &str, revision: &str) -> Result<()> {
+        let scope = crate::owned_process::SourceScope::new(task, revision)?;
+        let mut results = vec![self.processes.block(&scope)];
+        let removed = {
+            let mut sessions = self.sessions.lock().await;
+            let ids = sessions
+                .iter()
+                .filter(|(_, s)| s.task_id == task && s.revision == revision)
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            ids.into_iter()
+                .filter_map(|id| sessions.remove(&id))
+                .collect::<Vec<_>>()
+        };
+        for session in removed {
+            results.push(session.browser.stop().await);
+        }
+        results.push(self.processes.wait_source(&scope).await);
+        results
+            .into_iter()
+            .find_map(Result::err)
+            .map_or(Ok(()), Err)
     }
 
     pub async fn inspect(&self, url: &Url, binding: &WorkBinding) -> Result<ExecutedRead> {
@@ -158,7 +179,15 @@ impl BrowserRuntime {
             let mut sessions = self.sessions.lock().await;
             sessions.retain(|_, s| s.until > Instant::now() && s.task_id != binding.task_id);
             ensure(sessions.len() < 2, "browser session capacity")?;
-            let mut browser = self.start(url).await?;
+            let mut browser = self
+                .start(
+                    url,
+                    Some(crate::owned_process::SourceScope::new(
+                        &binding.task_id,
+                        &binding.revision,
+                    )?),
+                )
+                .await?;
             browser.browser.navigate(url).await?;
             let elements = browser.browser.catalog().await?;
             let snapshot = browser.browser.observe().await?;
@@ -336,26 +365,47 @@ impl BrowserRuntime {
             }
         }
     }
-    pub async fn maintain(&self, epoch: Option<u64>, tasks: &[pulse_core::Task]) {
-        self.sessions.lock().await.retain(|_, s| {
-            s.until > Instant::now()
-                && epoch == Some(s.epoch)
-                && !tasks.iter().any(|t| {
-                    t.id == s.task_id
-                        && (t.revision.to_string() != s.revision
-                            || t.cancel_requested
-                            || t.state.terminal()
-                            || matches!(
-                                t.state,
-                                pulse_core::State::Blocked
-                                    | pulse_core::State::OutcomeUnknown
-                                    | pulse_core::State::Reconciling
-                            )
-                            || matches!(
-                                t.reason.as_deref(),
-                                Some("operation_rejected" | "operation_approval_expired")
-                            ))
-                })
-        });
+    pub async fn maintain(&self, epoch: Option<u64>, tasks: &[pulse_core::Task]) -> Result<()> {
+        let mut removed = Vec::new();
+        {
+            let mut sessions = self.sessions.lock().await;
+            let keep = |s: &InteractiveSession| {
+                s.until > Instant::now()
+                    && epoch == Some(s.epoch)
+                    && !tasks.iter().any(|t| {
+                        t.id == s.task_id
+                            && (t.revision.to_string() != s.revision
+                                || t.cancel_requested
+                                || t.state.terminal()
+                                || matches!(
+                                    t.state,
+                                    pulse_core::State::Blocked
+                                        | pulse_core::State::OutcomeUnknown
+                                        | pulse_core::State::Reconciling
+                                )
+                                || matches!(
+                                    t.reason.as_deref(),
+                                    Some("operation_rejected" | "operation_approval_expired")
+                                ))
+                    })
+            };
+            let ids = sessions
+                .iter()
+                .filter(|(_, s)| !keep(s))
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            for id in ids {
+                if let Some(session) = sessions.remove(&id) {
+                    removed.push(session);
+                }
+            }
+        }
+        let mut failure = None;
+        for session in removed {
+            if let Err(error) = session.browser.stop().await {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
 }
