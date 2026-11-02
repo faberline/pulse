@@ -85,7 +85,7 @@ pub(crate) fn label(task: &Task) -> &str {
 fn clarify() -> Vec<Command> {
     vec![Command::Clarify{question:"請指明任務與動作。例如「查詢 A、B」、「修改 A：新的需求」或「取消 B」。新工作可寫「任務 A：需求」。".into()}]
 }
-fn selected<'a>(text: &str, tasks: &'a [Task]) -> Option<Vec<&'a Task>> {
+pub(crate) fn selected<'a>(text: &str, tasks: &'a [Task]) -> Option<Vec<&'a Task>> {
     let text = text.trim().trim_end_matches(['。', '？', '?']).trim();
     let text = text.strip_prefix("任務 ").unwrap_or(text);
     let joined = if tasks.iter().any(|t| label(t) == text || t.id == text) {
@@ -182,6 +182,47 @@ fn request_text(text: &str) -> &str {
     }
     text
 }
+// These are presentation refinements, not resource or execution permissions.
+const REFINEMENTS: &[&str] = &[
+    "再詳細一點",
+    "詳細一點",
+    "再簡短一點",
+    "簡短一點",
+    "用條列整理",
+    "用表格整理",
+    "改用繁體中文",
+    "用繁體中文回答",
+    "改用英文",
+    "用英文回答",
+];
+pub(crate) fn refinement(text: &str) -> Option<&str> {
+    let text = request_text(text);
+    REFINEMENTS.contains(&text).then_some(text)
+}
+fn targeted_refinement(text: &str) -> Option<(&str, &str)> {
+    let text = request_text(text);
+    REFINEMENTS.iter().find_map(|refinement| {
+        text.strip_suffix(refinement)
+            .map(str::trim)
+            .filter(|target| !target.is_empty())
+            .map(|target| (target, *refinement))
+    })
+}
+pub(crate) fn named_request(text: &str) -> bool {
+    name(request_text(text)).is_some()
+}
+pub(crate) fn refine(task: &Task, text: &str) -> Vec<Command> {
+    let goal = format!("{}\n補充要求：{text}", task.goal);
+    if task.state.terminal() || task.cancel_requested || goal.len() > 4096 {
+        return clarify();
+    }
+    vec![Command::Revise {
+        id: task.id.clone(),
+        expected_revision: task.revision,
+        goal,
+        scope: None,
+    }]
+}
 fn line(id: &str, text: &str, tasks: &[Task]) -> Vec<Command> {
     let text = request_text(text);
     if let Some((label, goal)) = name(text) {
@@ -189,6 +230,20 @@ fn line(id: &str, text: &str, tasks: &[Task]) -> Vec<Command> {
             return clarify();
         }
         return vec![create(id.into(), format!("任務 {label}：{goal}"))];
+    }
+    if refinement(text).is_some() {
+        return clarify();
+    }
+    if let Some(targets) = selected(text, tasks) {
+        return vec![Command::Query {
+            ids: targets.iter().map(|task| task.id.clone()).collect(),
+        }];
+    }
+    if let Some((target, refinement)) = targeted_refinement(text) {
+        return selected(target, tasks)
+            .filter(|targets| targets.len() == 1)
+            .map(|targets| refine(targets[0], refinement))
+            .unwrap_or_else(clarify);
     }
     if matches!(
         text,
@@ -339,6 +394,7 @@ pub(crate) fn plan(id: &str, text: &str, tasks: &[Task]) -> Vec<Command> {
     let explicit = |s: &str| {
         let s = request_text(s);
         name(s).is_some()
+            || targeted_refinement(s).is_some()
             || [
                 "取消 ", "停止 ", "繼續 ", "修改 ", "補充 ", "查詢 ", "核對 ",
             ]

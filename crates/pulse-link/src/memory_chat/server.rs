@@ -36,6 +36,8 @@ impl Hub {
     ) -> Result<MemoryOutcome> {
         let _human = self.human.lock().await;
         self.memory_identity(device).await?;
+        // A memory instruction breaks implicit task focus. It is a different topic.
+        self.clear_conversation_context().await?;
         let result = self
             .core
             .change_memory(Origin::Human, request, time)

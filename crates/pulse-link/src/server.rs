@@ -904,6 +904,19 @@ impl Hub {
                     !source_id.is_empty() && source_id.len() <= 128,
                     "source ID limit",
                 )?;
+                let replay: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM events WHERE source=? AND source_id=? AND origin='human')",
+                )
+                .bind(format!("device:{device}"))
+                .bind(source_id)
+                .fetch_one(&self.db)
+                .await?;
+                let context = if replay {
+                    None
+                } else {
+                    self.take_conversation_context(device, time).await?
+                };
+                let mut pending_targets = None;
                 let commands = match action {
                     HumanAction::Schedule { request, text } => {
                         ensure(text.len() <= 4096, "schedule input size")?;
@@ -950,11 +963,14 @@ impl Hub {
                             {
                                 commands
                             } else {
-                                crate::conversation::plan(
+                                let (commands, pending) = crate::conversation_context::plan(
                                     id,
                                     goal,
                                     &self.core.list_tasks(100).await?,
-                                )
+                                    context.as_ref(),
+                                );
+                                pending_targets = pending;
+                                commands
                             }
                         }
                     }
@@ -1039,6 +1055,16 @@ impl Hub {
                     )
                     .await?;
                 let outcome = self.core.route(&event.event_id).await?;
+                if !replay && matches!(action, HumanAction::Submit { .. }) {
+                    self.save_conversation_context(
+                        device,
+                        &event.event_id,
+                        &outcome,
+                        pending_targets,
+                        time,
+                    )
+                    .await?;
+                }
                 if let (
                     pulse_core::Outcome::Rejected { reason },
                     HumanAction::Submit { goal, .. }
