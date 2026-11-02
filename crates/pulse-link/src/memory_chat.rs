@@ -13,6 +13,7 @@ pub enum Intent {
     Remember { label: String, body: String },
     Correct { label: String, body: String },
     Forget { label: String },
+    Cancel { label: String },
     Clarify,
 }
 
@@ -59,10 +60,11 @@ pub fn parse(text: &str) -> Option<Intent> {
             });
         }
     }
-    if let Some(label) = text
-        .strip_prefix("忘記記憶")
-        .or_else(|| text.strip_prefix("刪除記憶"))
-    {
+    let cancellation = text.strip_prefix("取消待送記憶");
+    if let Some(label) = cancellation.or_else(|| {
+        text.strip_prefix("忘記記憶")
+            .or_else(|| text.strip_prefix("刪除記憶"))
+    }) {
         let rest = label.trim().trim_start_matches(['：', ':']).trim();
         let label = if rest.starts_with('"') {
             let Some((name, tail)) = quoted_name(rest) else {
@@ -77,6 +79,8 @@ pub fn parse(text: &str) -> Option<Intent> {
         };
         return Some(if label.is_empty() {
             Intent::Clarify
+        } else if cancellation.is_some() {
+            Intent::Cancel { label }
         } else {
             Intent::Forget { label }
         });
@@ -106,7 +110,7 @@ fn validate(command: &MemoryCommand) -> Result<()> {
                 "memory content limit",
             )?;
         }
-        MemoryCommand::Forget { .. } => {}
+        MemoryCommand::Forget { .. } | MemoryCommand::Revoke { .. } => {}
     }
     Ok(())
 }

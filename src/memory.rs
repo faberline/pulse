@@ -38,6 +38,10 @@ pub struct MemoryView {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MemoryCommand {
+    Revoke {
+        sources: Vec<String>,
+        expected: Option<MemoryRef>,
+    },
     Remember {
         label: String,
         body: String,
@@ -54,6 +58,13 @@ pub enum MemoryCommand {
     },
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryRef {
+    pub id: String,
+    pub revision: u64,
+}
+
 /// Only the authenticated Human ingress may construct a mutation.
 /// Never deserialize `Origin` from this request or an untrusted payload.
 #[derive(Clone, Serialize, Deserialize)]
@@ -67,6 +78,7 @@ pub struct MemoryRequest {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MemoryOutcome {
+    Revoked { current_changed: bool },
     Stored { id: String, revision: u64 },
     Forgotten { id: String, revision: u64 },
     Redacted { id: String, revision: u64 },

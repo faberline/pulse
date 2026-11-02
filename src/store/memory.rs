@@ -13,9 +13,10 @@ use std::{
 use tokio::sync::{Mutex, MutexGuard};
 
 const EVENT_LIMIT: i64 = 10_000;
-const MANIFEST_LIMIT: u64 = 2 * 1024 * 1024;
+const MANIFEST_LIMIT: u64 = 8 * 1024 * 1024;
 
 mod backup;
+mod revocations;
 pub use backup::{BackupCheck, Maintenance};
 
 /// This file is deliberately outside the database backup. It is restriction
@@ -27,6 +28,10 @@ struct Restrictions {
     keeper: String,
     epoch: u64,
     removed: BTreeMap<String, u64>,
+    #[serde(default)]
+    sources: BTreeMap<String, revocations::SourceRestriction>,
+    #[serde(default)]
+    cancellations: BTreeMap<String, revocations::Cancellation>,
 }
 
 pub(super) struct MemoryGuard {
@@ -158,15 +163,16 @@ impl MemoryGuard {
         let value: Restrictions = serde_json::from_slice(&bytes)
             .map_err(|_| Error::Rejected("invalid memory restrictions".into()))?;
         require(
-            value.format == 1
+            (value.format == 1 || value.format == 2)
                 && uuid::Uuid::parse_str(&value.keeper).is_ok()
-                && value.removed.len() <= EVENT_LIMIT as usize
+                && value.removed.len() <= 20_100
+                && revocations::valid(&value)
                 && value.removed.iter().all(|(id, revision)| {
                     uuid::Uuid::parse_str(id).is_ok()
                         && *revision > 0
                         && *revision <= i64::MAX as u64
                 })
-                && (value.removed.is_empty() == (value.epoch == 0)),
+                && ((value.removed.is_empty() && value.sources.is_empty()) == (value.epoch == 0)),
             "invalid memory restrictions",
         )?;
         Ok(Some(value))
@@ -205,7 +211,7 @@ impl Store {
                 .fetch_optional(&mut *tx)
                 .await?;
         let manifest = self.memory_guard.read()?;
-        let manifest = match (bound, manifest) {
+        let mut manifest = match (bound, manifest) {
             (Some(keeper), Some(manifest)) => {
                 require(keeper == manifest.keeper, "wrong memory restriction keeper")?;
                 manifest
@@ -226,10 +232,12 @@ impl Store {
                     Some(manifest) => manifest,
                     None => {
                         let manifest = Restrictions {
-                            format: 1,
+                            format: 2,
                             keeper: uuid::Uuid::new_v4().to_string(),
                             epoch: 0,
                             removed: BTreeMap::new(),
+                            sources: BTreeMap::new(),
+                            cancellations: BTreeMap::new(),
                         };
                         self.memory_guard.write(&manifest)?;
                         manifest
@@ -240,6 +248,9 @@ impl Store {
                 manifest
             }
         };
+        if revocations::upgrade(&mut tx, &mut manifest).await? {
+            self.memory_guard.write(&manifest)?;
+        }
         reconcile(&mut tx, &manifest).await?;
         tx.commit().await?;
         self.checkpoint_memory_redaction().await?;
@@ -254,6 +265,9 @@ impl Store {
         request: &MemoryRequest,
         now: i64,
     ) -> Result<MemoryOutcome> {
+        let mut normalized = request.clone();
+        normalized.source_id = revocations::canonical(&request.source_id)?;
+        let request = &normalized;
         require(origin == Origin::Human, "only Human may change knowledge")?;
         require(
             uuid::Uuid::parse_str(&request.source_id).is_ok(),
@@ -282,7 +296,10 @@ impl Store {
                     "memory body must be 1..1024 UTF-8 bytes",
                 )?;
             }
-            MemoryCommand::Forget { .. } => {}
+            MemoryCommand::Forget { .. } | MemoryCommand::Revoke { .. } => {}
+        }
+        if let MemoryCommand::Revoke { sources, expected } = &request.command {
+            return self.revoke_sources(request, sources, expected, now).await;
         }
         let _lease = self.memory_guard.lease().await?;
         let mut restrictions = self
@@ -291,10 +308,14 @@ impl Store {
             .ok_or_else(|| Error::Rejected("memory restrictions missing".into()))?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         reconcile(&mut tx, &restrictions).await?;
+        require(
+            !restrictions.cancellations.contains_key(&request.source_id),
+            "source belongs to a cancellation",
+        )?;
         self.expire_memory_in(&mut tx, &mut restrictions, now)
             .await?;
         if let Some(row) = sqlx::query(
-            "SELECT memory_id,revision,fingerprint,outcome FROM memory_events WHERE source_id=?",
+            "SELECT source_id,memory_id,revision,fingerprint,outcome FROM memory_events WHERE source_uuid=?",
         )
         .bind(&request.source_id)
         .fetch_optional(&mut *tx)
@@ -305,7 +326,9 @@ impl Store {
             let fingerprint: Option<String> = row.get("fingerprint");
             let outcome: String = row.get("outcome");
             let reply = if let Some(fingerprint) = fingerprint {
-                require(fingerprint == digest(request)?, "memory source ID conflict")?;
+                let mut original=request.clone();
+                original.source_id=row.get("source_id");
+                require(fingerprint == digest(&original)?, "memory source ID conflict")?;
                 match outcome.as_str() {
                     "stored" => MemoryOutcome::Stored { id, revision },
                     "forgotten" => MemoryOutcome::Forgotten { id, revision },
@@ -324,6 +347,7 @@ impl Store {
             .ok_or_else(|| Error::Rejected("invalid memory expiry".into()))?;
         require(expires_at > now, "memory source has expired")?;
         let (id, revision) = match &request.command {
+            MemoryCommand::Revoke { .. } => unreachable!(),
             MemoryCommand::Remember { .. } => (uuid::Uuid::new_v4().to_string(), 1),
             MemoryCommand::Correct { id, revision, .. }
             | MemoryCommand::Forget { id, revision } => {
@@ -378,10 +402,12 @@ impl Store {
             // Durable restriction FIRST. A crash or failed SQL commit is recovered
             // by reconcile before any subsequent retrieval or correction.
             restrict(&mut restrictions, &id, revision)?;
+            revocations::capture(&mut tx, &mut restrictions, &id, revision).await?;
             self.memory_guard.write(&restrictions)?;
             reconcile(&mut tx, &restrictions).await?;
         }
         let reply = match &request.command {
+            MemoryCommand::Revoke { .. } => unreachable!(),
             MemoryCommand::Remember { label, body }
             | MemoryCommand::Correct { label, body, .. } => {
                 let revision = if matches!(request.command, MemoryCommand::Correct { .. }) {
@@ -405,7 +431,7 @@ impl Store {
         let (revision, outcome) = match &reply {
             MemoryOutcome::Stored { revision, .. } => (*revision, "stored"),
             MemoryOutcome::Forgotten { revision, .. } => (*revision, "forgotten"),
-            MemoryOutcome::Redacted { .. } => unreachable!(),
+            MemoryOutcome::Redacted { .. } | MemoryOutcome::Revoked { .. } => unreachable!(),
         };
         sqlx::query("INSERT INTO memory_events(source_id,memory_id,revision,fingerprint,outcome) VALUES(?,?,?,?,?)")
             .bind(&request.source_id).bind(&id).bind(revision as i64).bind(digest(request)?)
@@ -442,12 +468,12 @@ impl Store {
                 revision: row.get::<i64, _>("revision") as u64,
                 label: row.get("label"),
                 body: row.get("body"),
-                source_id: row.get("source_id"),
+                source_id: row.get("source_uuid"),
                 source_at: row.get("source_at"),
                 expires_at: row.get("expires_at"),
             })
             .collect();
-        let redacted_sources = sqlx::query_scalar("SELECT source_id FROM memory_events WHERE fingerprint IS NULL ORDER BY source_id LIMIT 10100")
+        let redacted_sources = sqlx::query_scalar("SELECT source_uuid FROM memory_events WHERE fingerprint IS NULL ORDER BY source_uuid LIMIT 20100")
             .fetch_all(&mut *tx).await?;
         tx.commit().await?;
         self.checkpoint_memory_redaction().await?;
@@ -484,6 +510,13 @@ impl Store {
             return Ok(());
         }
         for row in expired {
+            revocations::capture(
+                db,
+                restrictions,
+                &row.get::<String, _>("id"),
+                row.get::<i64, _>("revision") as u64,
+            )
+            .await?;
             restrict(
                 restrictions,
                 &row.get::<String, _>("id"),
@@ -534,6 +567,7 @@ async fn reconcile(db: &mut SqliteConnection, manifest: &Restrictions) -> Result
         sqlx::query("UPDATE memory_events SET fingerprint=NULL,outcome='redacted' WHERE memory_id=? AND revision<=?")
             .bind(id).bind(*revision as i64).execute(&mut *db).await?;
     }
+    revocations::replay(db, manifest).await?;
     sqlx::query("UPDATE settings SET value=? WHERE key='memory_redaction_epoch'")
         .bind(manifest.epoch.to_string())
         .execute(&mut *db)

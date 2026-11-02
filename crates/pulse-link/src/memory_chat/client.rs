@@ -60,6 +60,16 @@ pub async fn sync(config: &Config, journal: &Journal, credential: &Credential) -
         .apply_memory_view(&get().await?, crate::now())
         .await?;
     for request in journal.memory_requests().await? {
+        if !journal.memory_request_active(&request).await? {
+            continue;
+        }
+        if !matches!(
+            request.command,
+            pulse_core::MemoryCommand::Revoke { .. } | pulse_core::MemoryCommand::Forget { .. }
+        ) && journal.pending_memory_revocation().await?
+        {
+            break;
+        }
         let response = client
             .post(url.clone())
             .bearer_auth(&credential.token)
@@ -70,10 +80,12 @@ pub async fn sync(config: &Config, journal: &Journal, credential: &Credential) -
         match response.status() {
             reqwest::StatusCode::OK => {
                 let outcome: MemoryOutcome = body(response).await?;
-                let phase = if matches!(outcome, MemoryOutcome::Redacted { .. }) {
-                    "redacted"
-                } else {
-                    "accepted"
+                let phase = match outcome {
+                    MemoryOutcome::Redacted { .. } => "redacted",
+                    MemoryOutcome::Revoked {
+                        current_changed: true,
+                    } => "review",
+                    _ => "accepted",
                 };
                 journal.finish_memory(&request.source_id, phase).await?;
             }

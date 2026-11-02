@@ -16,6 +16,10 @@ use std::{
     },
 };
 
+// Each fixture fsyncs independent server and chat databases. Bound this test
+// workload so it cannot starve unrelated native process deadline checks.
+static MEMORY_FIXTURES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
 struct Fixture {
     _root: tempfile::TempDir,
     hub: Hub,
@@ -25,6 +29,7 @@ struct Fixture {
     config: Config,
     server: tokio::task::JoinHandle<std::io::Result<()>>,
     writes: Arc<AtomicUsize>,
+    _permit: tokio::sync::SemaphorePermit<'static>,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -32,6 +37,7 @@ impl Drop for Fixture {
     }
 }
 async fn setup() -> Fixture {
+    let permit = MEMORY_FIXTURES.acquire().await.unwrap();
     let root = tempfile::tempdir().unwrap();
     let hub = Hub::new(
         Store::open(root.path().join("server.db"), "owner")
@@ -92,6 +98,7 @@ async fn setup() -> Fixture {
         config,
         server,
         writes,
+        _permit: permit,
     }
 }
 async fn say(f: &Fixture, text: &str) -> String {
@@ -118,6 +125,223 @@ async fn count(f: &Fixture, query: &'static str) -> i64 {
         .fetch_one(&f.journal.db)
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn cancelling_an_offline_source_erases_payload_and_fences_late_delivery() {
+    let f = setup().await;
+    let source = say(&f, "記住 離線偏好：PRIVATE_CANCELLED_PENDING").await;
+    let captured = f.journal.memory_requests().await.unwrap().remove(0);
+    let cancel = say(&f, "取消待送記憶 離線偏好").await;
+    assert!(!f.journal.memory_request_active(&captured).await.unwrap());
+    assert!(f.journal.pending_memory_revocation().await.unwrap());
+    let requests = f.journal.memory_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].source_id, cancel);
+    assert!(
+        matches!(&requests[0].command, pulse_core::MemoryCommand::Revoke { sources, expected: None } if sources == &vec![source])
+    );
+    let payload: String =
+        sqlx::query_scalar("SELECT group_concat(coalesce(request,'')) FROM local_memory_queue")
+            .fetch_one(&f.journal.db)
+            .await
+            .unwrap();
+    assert!(!payload.contains("PRIVATE_CANCELLED_PENDING"));
+    assert!(!payload.contains("離線偏好"));
+    sync(&f).await;
+    assert_eq!(f.writes.load(Ordering::SeqCst), 1); // Only the bodyless revocation.
+    let response = reqwest::Client::new()
+        .post(f.config.server.join("v1/memories").unwrap())
+        .bearer_auth(&f.credential.token)
+        .json(&captured)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert!(matches!(
+        response.json::<pulse_core::MemoryOutcome>().await.unwrap(),
+        pulse_core::MemoryOutcome::Redacted { .. }
+    ));
+    assert!(
+        f.hub
+            .core
+            .list_memories(crate::now())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(f.journal.outgoing().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn forget_cancels_an_accepted_source_when_the_ack_was_lost() {
+    let f = setup().await;
+    say(&f, "記住 尚未確認：PRIVATE_LOST_ACK").await;
+    let captured = f.journal.memory_requests().await.unwrap().remove(0);
+    f.hub
+        .core
+        .change_memory(Origin::Human, &captured, crate::now())
+        .await
+        .unwrap();
+    // No ACK and no cache: deletion must still address this pending source.
+    assert!(f.journal.view().await.unwrap().memories.is_empty());
+    say(&f, "忘記記憶 尚未確認").await;
+    sync(&f).await;
+    assert_eq!(f.writes.load(Ordering::SeqCst), 1);
+    assert!(
+        f.hub
+            .core
+            .list_memories(crate::now())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        count(
+            &f,
+            "SELECT count(*) FROM local_memory_queue WHERE request IS NOT NULL"
+        )
+        .await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn cancelling_a_pending_correction_preserves_old_data_only_if_it_never_committed() {
+    for committed in [false, true] {
+        let f = setup().await;
+        say(&f, "記住 修正偏好：old").await;
+        sync(&f).await;
+        say(&f, "更正記憶 修正偏好：PRIVATE_PENDING_NEW").await;
+        let captured = f.journal.memory_requests().await.unwrap().remove(0);
+        if committed {
+            f.hub
+                .core
+                .change_memory(Origin::Human, &captured, crate::now())
+                .await
+                .unwrap();
+        }
+        say(&f, "取消待送記憶 修正偏好").await;
+        sync(&f).await;
+        let memories = f.hub.core.list_memories(crate::now()).await.unwrap();
+        if committed {
+            assert!(memories.is_empty());
+        } else {
+            assert_eq!(memories.len(), 1);
+            assert_eq!(memories[0].body, "old");
+        }
+        assert!(matches!(
+            f.hub
+                .core
+                .change_memory(Origin::Human, &captured, crate::now())
+                .await
+                .unwrap(),
+            pulse_core::MemoryOutcome::Redacted { .. }
+        ));
+    }
+}
+
+#[tokio::test]
+async fn forgetting_during_an_unacknowledged_correction_removes_both_possible_versions() {
+    for committed in [false, true] {
+        let f = setup().await;
+        say(&f, "記住 刪除偏好：old").await;
+        sync(&f).await;
+        say(&f, "更正記憶 刪除偏好：new").await;
+        let captured = f.journal.memory_requests().await.unwrap().remove(0);
+        if committed {
+            f.hub
+                .core
+                .change_memory(Origin::Human, &captured, crate::now())
+                .await
+                .unwrap();
+        }
+        say(&f, "忘記記憶 刪除偏好").await;
+        sync(&f).await;
+        assert!(
+            f.hub
+                .core
+                .list_memories(crate::now())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn full_write_queue_still_accepts_query_and_prioritizes_deletion() {
+    let f = setup().await;
+    say(&f, "記住 現有：old").await;
+    sync(&f).await;
+    for n in 0..100 {
+        say(&f, &format!("記住 待送{n}：body")).await;
+    }
+    assert!(
+        f.journal
+            .memory_control(
+                &uuid::Uuid::new_v4().to_string(),
+                "記住 超額：body",
+                crate::now()
+            )
+            .await
+            .is_err()
+    );
+    say(&f, "查詢記憶").await;
+    say(&f, "忘記記憶 現有").await;
+    let requests = f.journal.memory_requests().await.unwrap();
+    assert_eq!(requests.len(), 101);
+    assert!(matches!(
+        requests[0].command,
+        pulse_core::MemoryCommand::Revoke { .. }
+    ));
+    sync(&f).await;
+    let memories = f.hub.core.list_memories(crate::now()).await.unwrap();
+    assert_eq!(memories.len(), 100);
+    assert!(memories.iter().all(|m| m.label != "現有"));
+    assert_eq!(
+        count(
+            &f,
+            "SELECT count(*) FROM local_memory_queue WHERE request IS NOT NULL"
+        )
+        .await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn local_source_aliases_keep_the_original_ui_identity_and_ack_the_same_request() {
+    let f = setup().await;
+    let id = uuid::Uuid::new_v4();
+    let source = id.to_string().to_uppercase();
+    f.journal
+        .memory_control(&source, "記住 身分：body", crate::now())
+        .await
+        .unwrap();
+    f.journal
+        .memory_control(
+            &id.simple().to_string(),
+            "記住 不可替換：other",
+            crate::now(),
+        )
+        .await
+        .unwrap();
+    let requests = f.journal.memory_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        f.journal
+            .view()
+            .await
+            .unwrap()
+            .messages
+            .iter()
+            .any(|m| m.id == source)
+    );
+    f.journal
+        .finish_memory(&id.braced().to_string(), "accepted")
+        .await
+        .unwrap();
+    assert!(f.journal.memory_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]
