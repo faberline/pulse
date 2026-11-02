@@ -24,6 +24,9 @@ Each request carries a random `request_id`. Replies keep that ID in `NativeState
 Rust chat asks the local executor through the existing private Unix socket.
 The socket checks peer UID and exact server origin. Inventory uses a version 3, newline-terminated frame.
 The version 2 selection/probe frame remains supported.
+The version 1 permission frame adds local Human status and request controls. Closing the stream cancels a call.
+Opening the picker checks status without prompting, then reads inventory if allowed. Separate buttons request the system prompt.
+Rust checks both sides of the private channel. The request never reaches a server or model tool.
 
 The executor permits one bounded native child. It passes only fixed operator filters to that child.
 Filters apply before window titles are read. The helper returns at most 64 choices and a bounded JSON reply.
@@ -34,11 +37,12 @@ Changing a request generation cancels the prior request. Old replies cannot fill
 
 ## Native effect boundary
 
-The helper protocol is `pulse-computer-observe-5`. The caller rejects older helpers.
+The helper protocol is `pulse-computer-observe-6`. The caller rejects older helpers.
 Requests use the shared Rust source and intent types. Extra fields on fixed effects are rejected.
 The child checks the selected process launch time, window, AX owner, frame, text and PNG before an effect.
 It skips secure fields and their children. It offers only AX press and bounded plain-text replacement.
-It does not use coordinate fallback, synthetic keys, scripts, shell or OS permission requests.
+It does not use coordinate fallback, synthetic keys, scripts or shell.
+Only the separate local Human control path can request an OS prompt; no tool operation can do so.
 
 The Rust caller still owns the durable Human grant. Helper input is not a grant.
 The child sends one command. An AX failure or missing result remains Unknown and cannot trigger a retry.
@@ -51,8 +55,11 @@ The former seven Swift helper tests moved to Rust contract and cache tests.
 Rust process tests cover inventory scope/capacity, wrong origin, extra input, cancellation and child reaping.
 Swift tests cover the picker state format and original-image approval display.
 The build script takes `pulse-computer` from Cargo output. Swift no longer builds an execution helper.
+Set `PULSE_APP_OUTPUT` to a new path to build a separate review bundle. The script refuses to overwrite that path.
+The default output remains `target/debug/Pulse.app` with `--debug`, or `target/release/Pulse.app` otherwise.
 
 A direct command-line status check reported no Accessibility or screen-capture grants in that launch context.
 This is not proof of the GUI app's permission state. No real capture or effect was accepted from that check.
 Actual owned-fixture capture, counters/text, original-image approval, both providers and restart faults remain required.
+The new Human permission UI and OS prompt flow are also unaccepted until checked on the machine.
 Passing builds, contract tests and CI does not accept D04, D05, D08 or the full D01–D10 goal.

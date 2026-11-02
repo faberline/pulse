@@ -2,6 +2,22 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+/// A local Human permission prompt. This is not a task grant or a model tool.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerPermission {
+    Accessibility,
+    ScreenCapture,
+}
+impl ComputerPermission {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Accessibility => "accessibility",
+            Self::ScreenCapture => "screen_capture",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ComputerTarget {

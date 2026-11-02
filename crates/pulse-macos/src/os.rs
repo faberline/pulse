@@ -42,6 +42,30 @@ pub(super) fn permissions() -> Permissions {
         }
     }
 }
+pub(super) fn request_permission(permission: pulse_core::ComputerPermission) {
+    // SAFETY: These APIs request a system-owned prompt only. The Human decides
+    // the grant. They do not enumerate windows, read AX content or capture pixels.
+    unsafe {
+        match permission {
+            pulse_core::ComputerPermission::Accessibility => {
+                if !permissions().accessibility {
+                    let options = objc2_core_foundation::CFDictionary::from_slices(
+                        &[objc2_application_services::kAXTrustedCheckOptionPrompt],
+                        &[objc2_core_foundation::kCFBooleanTrue.expect("CoreFoundation true")],
+                    );
+                    let _ = objc2_application_services::AXIsProcessTrustedWithOptions(Some(
+                        options.as_opaque(),
+                    ));
+                }
+            }
+            pulse_core::ComputerPermission::ScreenCapture => {
+                if !permissions().screen_capture {
+                    let _ = objc2_core_graphics::CGRequestScreenCaptureAccess();
+                }
+            }
+        }
+    }
+}
 fn wait<T>(receiver: mpsc::Receiver<Result<T>>, deadline: Instant) -> Result<T> {
     loop {
         match receiver.try_recv() {

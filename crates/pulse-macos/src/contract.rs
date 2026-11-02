@@ -1,7 +1,7 @@
 use pulse_core::{ComputerBinding, ComputerIntent, ComputerObservation, ComputerSelection};
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: &str = "pulse-computer-observe-5";
+pub const VERSION: &str = "pulse-computer-observe-6";
 pub const LIMIT: usize = 65_536;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]

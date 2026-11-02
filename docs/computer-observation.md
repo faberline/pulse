@@ -4,9 +4,35 @@ This is preparation for D04. The full D01–D10 goal remains active. It does not
 
 ## Current implementation
 
-Cargo builds `pulse-computer` from `crates/pulse-macos` as a local native helper. The main app bundle includes and signs it. The helper has permission status, selected-window identity probe, observation, fixed Accessibility press and plain-text replacement commands. Both providers can now propose those effects after a current observation. The same composer shows the original image and a Human approval card. Server dispatch, local execution and original result-image receipts use the existing durable queue. There are no script, shell, Apple Events, keyboard-event or permission-request commands. The Rust local executor owns its bridge. The journal saves the goal and local Human selection intent together. A private local channel probes the selected target and admits its read scope. This candidate still needs actual UI, capture and effect acceptance.
+Cargo builds `pulse-computer` from `crates/pulse-macos` as a local native helper. The main app bundle includes and signs it. The helper has permission status, selected-window identity probe, observation, fixed Accessibility press and plain-text replacement commands. Both providers can now propose those effects after a current observation. The same composer shows the original image and a Human approval card. Server dispatch, local execution and original result-image receipts use the existing durable queue. There are no script, shell, Apple Events or keyboard-event commands. A separate local Human-only permission request path is described below. The Rust local executor owns its bridge. The journal saves the goal and local Human selection intent together. A private local channel probes the selected target and admits its read scope. This candidate still needs actual UI, capture and effect acceptance.
 
-The helper uses Apple's [Accessibility API](https://developer.apple.com/documentation/applicationservices/1460720-axisprocesstrusted) and [ScreenCaptureKit screenshot API](https://developer.apple.com/documentation/screencapturekit/scscreenshotmanager/captureimage(contentfilter:configuration:completionhandler:)). It checks [screen capture access](https://developer.apple.com/documentation/coregraphics/cgpreflightscreencaptureaccess()) before capture. It does not call either OS permission-request API. A positive preflight is a prerequisite, not proof that an observation will succeed.
+The helper uses Apple's [Accessibility API](https://developer.apple.com/documentation/applicationservices/1460720-axisprocesstrusted) and [ScreenCaptureKit screenshot API](https://developer.apple.com/documentation/screencapturekit/scscreenshotmanager/captureimage(contentfilter:configuration:completionhandler:)). It checks [screen capture access](https://developer.apple.com/documentation/coregraphics/cgpreflightscreencaptureaccess()) before capture. Status, inventory, probe, observation and effects never request permissions. A positive preflight is a prerequisite, not proof that an observation will succeed.
+
+## Human permission controls
+
+The picker displays the Rust executor's current Accessibility and screen-capture flags.
+Opening the picker checks status without prompting. It then loads inventory if screen capture is allowed.
+Rust skips window inventory when screen capture is missing.
+The Human can press a separate button for each missing permission, then press Check Again.
+Swift only displays status and sends these explicit input commands.
+
+Rust chat handles the frontend's `computer_permissions` command, then sends a `permissions` frame over the private local channel, not the server.
+The version 1 permission frame binds an exact server origin and a UUID request ID.
+It permits only `accessibility`, `screen_capture`, or a status-only check.
+The helper command `--request-permission` is eligible only for this local Human path.
+It is absent from `HumanAction` and model `ReadOp`. No task permit or operation grant is created.
+The channel rejects replayed prompt UUIDs, including case aliases, and allows at most 64 per executor lifetime.
+Prompts are never put in a journal, retried on reconnect, or requested by startup and CI.
+
+For Accessibility, Rust uses [AXIsProcessTrustedWithOptions](https://developer.apple.com/documentation/applicationservices/1459186-axisprocesstrustedwithoptions) with the prompt option.
+Apple documents that this prompt is asynchronous and does not change the returned trust value.
+For screen capture, it uses [CGRequestScreenCaptureAccess](https://developer.apple.com/documentation/coregraphics/cgrequestscreencaptureaccess()).
+The response always queries actual permissions again. A submitted request is not an OS grant.
+The Human handles the system prompt or settings. No agent may click an OS permission grant.
+Closing the picker cancels the local call and reaps its child. It cannot undo an already opened system prompt.
+The Human must check again after a grant. A helper timeout is not proof that no prompt was shown.
+Permission identity depends on the signed helper and responsible parent. A CLI result is not GUI permission proof.
+The new signed bundle and actual Human prompt/grant flow still require machine acceptance.
 
 The local Human selects an exact bundle ID, process ID, launch time and window ID. A server or model request cannot change that local selection, choose a helper executable or supply a private path. An effect needs a separate Human approval of its exact source and intent. The target must be running. ScreenCaptureKit's window must have that exact owner, bundle and window ID, be on screen, and have normal window layer 0. An Accessibility window must uniquely match its title and frame. Missing, ambiguous or changed targets are rejected. The selected window can be in the background so that using the composer does not itself invalidate an observation. The helper never activates an app, launches a target, returns an app inventory, or falls back to a whole-display screenshot. The fixed effect checks below add to these read rules.
 
@@ -26,7 +52,7 @@ An earlier local preflight returned Accessibility=false and screen_capture=true.
 
 ## Rust local bridge
 
-`ComputerRuntime` uses only the fixed `pulse-computer` sibling inside the local executor's app bundle. No model or server argument can select another executable. It starts a separate process group, clears the inherited environment, sets only a fixed PATH and local HOME, writes one bounded request, closes stdin and bounds stdout/stderr. A permission probe takes at most three seconds. An observation call takes at most 18 seconds; the Swift child retains its own 15-second watchdog. One shared permit limits a runtime to one child at a time. Cancellation, timeout and output-limit failures stop the owned process group. Normal exits are reaped, and their old process IDs are not signalled again.
+`ComputerRuntime` uses only the fixed `pulse-computer` sibling inside the local executor's app bundle. No model or server argument can select another executable. It starts a separate process group, clears the inherited environment, sets only a fixed PATH and local HOME, writes one bounded request, closes stdin and bounds stdout/stderr. A permission status probe takes at most three seconds. A Human request or observation call takes at most 18 seconds; the Rust helper retains its own 15-second watchdog. One shared permit limits a runtime to one child at a time. Cancellation, timeout and output-limit failures stop the owned process group. Normal exits are reaped, and their old process IDs are not signalled again.
 
 The Rust boundary checks the native protocol version, exact operation/task/revision/device/epoch, configured bundle/process/window, process launch time, capture time, nonce, control IDs and count, and image metadata. It accepts only the expected hash-derived cache entry. It refuses symlinks, non-regular files, wrong owner/mode, length/hash/dimension mismatches and stale observations. Only typed metadata and verified PNG bytes leave the local boundary. The private native cache path is removed from that metadata. The evidence object has no automatic serializer for image bytes.
 
@@ -54,7 +80,7 @@ Cancelled, expired, dispatched, reconciling and outcome-unknown tasks cannot use
 
 The authenticated chat action `submit_computer` saves the exact bundle, PID, window and process launch time as a Human-selected scope. Its scope has one canonical form. A local-role message cannot create that Human event. A later authenticated Human or model read must name the current task/revision and the same selection, and pass local capability admission. Another app, a reused process instance, a repo tool, a cancelled task or a stale revision cannot borrow it.
 
-`computer_inspect` checks the selection against the local permit and any operator restriction before starting the native child. Native protocol `pulse-computer-observe-5` also receives the expected launch time. The Rust macOS adapter compares it before collecting Accessibility data or taking a screenshot. The caller checks it again in the result. This inspect request does not grant permission or perform effects.
+`computer_inspect` checks the selection against the local permit and any operator restriction before starting the native child. Native protocol `pulse-computer-observe-6` also receives the expected launch time. The Rust macOS adapter compares it before collecting Accessibility data or taking a screenshot. The caller checks it again in the result. This inspect request does not grant permission or perform effects.
 
 Computer PNG metadata has an explicit computer source with the work binding and selected process instance. It has no browser URL or private path. Both the local journal and server compare the exact operation, task, revision, device epoch, process, window, title, capture time and PNG metadata. A completed observation requires the full verified original PNG. The server cannot publish a partial image or a result from another tool kind. Retained evidence can outlive the 120-second action lifetime. Saving old evidence does not renew that lifetime.
 

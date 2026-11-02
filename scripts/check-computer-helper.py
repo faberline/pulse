@@ -17,7 +17,7 @@ def call(arguments, payload=None):
     )
     assert len(result.stdout) <= 65_536
     value = json.loads(result.stdout)
-    assert value["version"] == "pulse-computer-observe-5"
+    assert value["version"] == "pulse-computer-observe-6"
     assert type(value["permissions"]["accessibility"]) is bool
     assert type(value["permissions"]["screen_capture"]) is bool
     assert value.get("observation") is None
@@ -27,6 +27,10 @@ def call(arguments, payload=None):
 
 status = call(["--status"])
 assert status.get("error") is None
+# Malformed requests never enter a system prompt. Never add a valid permission
+# request here: this script is deliberately safe for unattended CI.
+for arguments in [["--request-permission"], ["--request-permission", "all"], ["--request-permission", "accessibility", "--grant"]]:
+    assert call(arguments)["error"] == "invalid_request"
 with tempfile.TemporaryDirectory(prefix="pulse-computer-check-") as directory:
     arguments = ["--bundle-id", "com.faberline.PulseComputerFixture", "--pid", "2147483647", "--window-id", "1", "--cache", directory]
     binding = {"operation_id": "probe-no-target", "task_id": "owned-fixture", "revision": "1", "device": str(uuid.uuid4()), "epoch": "1"}

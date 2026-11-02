@@ -8,6 +8,21 @@ mod private_png;
 
 pub use contract::*;
 
+/// Only the private local Human control path may request a prompt.
+/// Observation, status and model work never call this function.
+pub fn request_permission(permission: pulse_core::ComputerPermission) -> Response {
+    #[cfg(target_os = "macos")]
+    {
+        os::request_permission(permission);
+        Response::empty()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = permission;
+        Response::error(Error::UnsupportedWindow)
+    }
+}
+
 pub fn list_windows() -> Response {
     #[cfg(target_os = "macos")]
     {

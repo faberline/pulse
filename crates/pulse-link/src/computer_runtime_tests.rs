@@ -23,7 +23,17 @@ if mode=='oversize': print('x'*65537);sys.exit(0)
 if mode=='stderr': sys.stderr.write('x'*4097);sys.exit(0)
 if mode=='exit': sys.exit(74)
 if mode=='invalid': print('not-json');sys.exit(0)
-response={'version':'pulse-computer-observe-5','permissions':{'accessibility':True,'screen_capture':True}}
+response={'version':'pulse-computer-observe-6','permissions':{'accessibility':True,'screen_capture':True}}
+if mode in ['permission-pending','permission-request-hang']:response['permissions']={'accessibility':False,'screen_capture':False}
+if mode=='permission-legacy':response['version']='pulse-computer-observe-5'
+if sys.argv[1:2]==['--request-permission']:
+ assert len(sys.argv)==3 and sys.argv[2] in ['accessibility','screen_capture']
+ counter=script.with_suffix('.requests')
+ publish(counter,str(int(counter.read_text())+1 if counter.exists() else 1))
+ publish(script.with_suffix('.requested'),sys.argv[2])
+ if mode=='permission-request-hang':time.sleep(60)
+ if mode=='permission-extra':response['windows']=[]
+ print(json.dumps(response));sys.exit(0)
 if sys.argv[1:]==['--list']:
  response['windows']=[{'selection':{'target':{'bundle_id':'com.faberline.PulseComputerFixture','pid':42,'window_id':7},'process_launched_at':1},'app_name':'Owned fixture','title':'Only owned window'}]
  if mode=='list-outside':response['windows'][0]['selection']['target']['pid']=43

@@ -13,7 +13,7 @@ use tokio::{
     process::Command,
 };
 
-const VERSION: &str = "pulse-computer-observe-5";
+const VERSION: &str = "pulse-computer-observe-6";
 const RESPONSE_LIMIT: usize = 65_536;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -258,18 +258,39 @@ impl ComputerRuntime {
         self.target.as_ref()
     }
     pub async fn permissions(&self) -> Result<ComputerPermissions> {
+        self.permission_call(None).await
+    }
+    /// Private local Human path only. Never called by a model or server operation.
+    pub(crate) async fn request_permission(
+        &self,
+        request: pulse_core::ComputerPermission,
+    ) -> Result<ComputerPermissions> {
+        self.permission_call(Some(request)).await
+    }
+    async fn permission_call(
+        &self,
+        request: Option<pulse_core::ComputerPermission>,
+    ) -> Result<ComputerPermissions> {
+        let args = request
+            .map(|permission| vec!["--request-permission".into(), permission.as_str().into()])
+            .unwrap_or_else(|| vec!["--status".into()]);
         let response = self
             .call(
-                &["--status".into()],
+                &args,
                 None,
-                self.timeout.min(Duration::from_secs(3)),
+                if request.is_some() {
+                    self.timeout
+                } else {
+                    self.timeout.min(Duration::from_secs(3))
+                },
             )
             .await?;
         ensure(
             response.error.is_none()
                 && response.observation.is_none()
                 && response.selection.is_none()
-                && response.action.is_none(),
+                && response.action.is_none()
+                && response.windows.is_none(),
             "invalid native permission response",
         )?;
         Ok(response.permissions)

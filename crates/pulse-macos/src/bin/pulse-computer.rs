@@ -12,6 +12,14 @@ fn run() -> Response {
     if args == ["--status"] {
         return Response::empty();
     }
+    if args.len() == 2 && args[0] == "--request-permission" {
+        return match serde_json::from_value::<pulse_core::ComputerPermission>(
+            serde_json::Value::String(args[1].clone()),
+        ) {
+            Ok(permission) => pulse_macos::request_permission(permission),
+            Err(_) => Response::error(Error::InvalidRequest),
+        };
+    }
     // Listing is local-only. Operator restrictions are read by the adapter before
     // inspecting titles. It never enters task history, server or model context.
     if args == ["--list"] {

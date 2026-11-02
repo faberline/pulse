@@ -140,6 +140,13 @@ final class ChatModel: ObservableObject {
   func cancelComputerWindows(_ id: String) {
     send(["kind":"cancel_computer_windows", "request_id":id])
   }
+  func requestComputerPermission(_ permission: String) -> String? {
+    let id = UUID().uuidString
+    return send(["kind":"computer_permissions", "request_id":id, "request":permission]) ? id : nil
+  }
+  func cancelComputerPermissions(_ id: String) {
+    send(["kind":"cancel_computer_permissions", "request_id":id])
+  }
   func receive(_ value: NativeState, generation id: UUID) {
     guard generation == id else { return }
     state = value

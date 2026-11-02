@@ -52,7 +52,7 @@ struct PulseTask: Decodable, Identifiable, Sendable {
 }
 struct NativeState: Decodable, Sendable {
   enum CodingKeys: String, CodingKey {
-    case server, connected, stopped, paired, message, pending, tasks, messages, artifacts, artifact_loading, artifact_failure, computer_selecting, computer_failure, computer_selections, memories, memory_synced_at, input_failure, computer_windows
+    case server, connected, stopped, paired, message, pending, tasks, messages, artifacts, artifact_loading, artifact_failure, computer_selecting, computer_failure, computer_selections, memories, memory_synced_at, input_failure, computer_windows, computer_permissions
     case localConnected = "local_connected"
     case desktop_notifications
     case syncedAt = "synced_at"
@@ -77,7 +77,18 @@ struct NativeState: Decodable, Sendable {
   var computer_failure: String?
   var computer_selections: [ComputerSelectionStatus]?
   var computer_windows: ComputerWindowList?
+  var computer_permissions: ComputerPermissionState?
   var desktop_notifications: DesktopNotifications?
+}
+struct ComputerPermissionState: Decodable, Sendable {
+  let request_id: String
+  let loading: Bool
+  let failed: Bool
+  let permissions: ComputerPermissions?
+}
+struct ComputerPermissions: Decodable, Sendable {
+  let accessibility: Bool
+  let screen_capture: Bool
 }
 struct ComputerWindowList: Decodable, Sendable {
   let request_id: String

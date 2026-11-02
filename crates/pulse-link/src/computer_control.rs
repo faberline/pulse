@@ -29,7 +29,23 @@ struct SelectionResponse {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum WindowRequest {
-    List { version: u8, server: String },
+    List {
+        version: u8,
+        server: String,
+    },
+    Permissions {
+        version: u8,
+        server: String,
+        request_id: String,
+        request: Option<pulse_core::ComputerPermission>,
+    },
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PermissionResponse {
+    version: u8,
+    request_id: String,
+    permissions: crate::computer_runtime::ComputerPermissions,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,6 +59,7 @@ pub(crate) struct PickerChannel {
     path: PathBuf,
     inode: (u64, u64),
     server: String,
+    permission_requests: std::sync::Mutex<std::collections::BTreeSet<String>>,
 }
 pub(crate) struct PickerWorker(tokio::task::JoinHandle<Result<()>>);
 impl PickerWorker {
@@ -60,7 +77,7 @@ impl Drop for PickerWorker {
         self.0.abort();
     }
 }
-fn control_directory() -> PathBuf {
+pub(crate) fn control_directory() -> PathBuf {
     std::env::var_os("PULSE_LOCAL_CONTROL_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| crate::journal::default_data_dir().join("control"))
@@ -94,7 +111,7 @@ impl PickerChannel {
     pub(crate) async fn bind(server: &str) -> Result<Self> {
         Self::bind_at(&control_directory(), server).await
     }
-    async fn bind_at(directory: &Path, server: &str) -> Result<Self> {
+    pub(crate) async fn bind_at(directory: &Path, server: &str) -> Result<Self> {
         private_dir(directory)?;
         let directory = directory.canonicalize()?;
         ensure(
@@ -129,6 +146,7 @@ impl PickerChannel {
             path,
             inode: (metadata.dev(), metadata.ino()),
             server: server.into(),
+            permission_requests: Default::default(),
         })
     }
     pub(crate) async fn serve(self, runtime: ComputerRuntime) -> Result<()> {
@@ -157,7 +175,51 @@ impl PickerChannel {
         ensure(bytes.len() <= 16_384, "local picker request too large")?;
         let value: serde_json::Value = parse(&bytes)?;
         if value.get("kind").is_some() {
-            let WindowRequest::List { version, server } = parse(&bytes)?;
+            let request: WindowRequest = parse(&bytes)?;
+            if let WindowRequest::Permissions {
+                version,
+                server,
+                request_id,
+                request,
+            } = request
+            {
+                ensure(
+                    version == 1
+                        && server == self.server
+                        && uuid::Uuid::parse_str(&request_id).is_ok(),
+                    "invalid permission request binding",
+                )?;
+                if request.is_some() {
+                    let mut seen = self
+                        .permission_requests
+                        .lock()
+                        .map_err(|_| crate::Error::Rejected("permission request lock".into()))?;
+                    let canonical = uuid::Uuid::parse_str(&request_id)
+                        .map_err(|_| crate::Error::Rejected("permission request identity".into()))?
+                        .to_string();
+                    ensure(
+                        seen.len() < 64 && seen.insert(canonical),
+                        "permission request replay or capacity",
+                    )?;
+                }
+                let mut extra = [0];
+                let permissions = tokio::select! {
+                    result=async {match request {Some(permission)=>runtime.request_permission(permission).await,None=>runtime.permissions().await}}=>result?,
+                    _=stream.read(&mut extra)=>return Err(crate::Error::Rejected("permission request cancelled or extra input".into())),
+                };
+                stream
+                    .write_all(&serde_json::to_vec(&PermissionResponse {
+                        version: 1,
+                        request_id,
+                        permissions,
+                    })?)
+                    .await?;
+                stream.shutdown().await?;
+                return Ok(());
+            }
+            let WindowRequest::List { version, server } = request else {
+                unreachable!()
+            };
             ensure(
                 version == 3 && server == self.server,
                 "invalid window list binding",
@@ -212,9 +274,79 @@ impl PickerChannel {
     }
 }
 
-pub(crate) async fn list_windows(server: &str) -> Result<Vec<pulse_core::ComputerWindowChoice>> {
-    let directory = control_directory();
-    let metadata = std::fs::symlink_metadata(&directory)?;
+async fn list_windows(
+    directory: &Path,
+    server: &str,
+) -> Result<Vec<pulse_core::ComputerWindowChoice>> {
+    let value: WindowResponse = exchange(
+        directory,
+        server,
+        &WindowRequest::List {
+            version: 3,
+            server: server.into(),
+        },
+    )
+    .await?;
+    ensure(
+        value.version == 3
+            && value.windows.len() <= 64
+            && value
+                .windows
+                .iter()
+                .all(pulse_core::ComputerWindowChoice::valid),
+        "invalid window list",
+    )?;
+    Ok(value.windows)
+}
+pub(crate) struct WindowInventory {
+    pub permissions: crate::computer_runtime::ComputerPermissions,
+    pub windows: Result<Vec<pulse_core::ComputerWindowChoice>>,
+}
+pub(crate) async fn inventory(
+    directory: &Path,
+    server: &str,
+    request_id: &str,
+) -> Result<WindowInventory> {
+    let permissions = permissions(directory, server, request_id, None).await?;
+    let windows = if permissions.screen_capture {
+        list_windows(directory, server).await
+    } else {
+        Ok(vec![])
+    };
+    Ok(WindowInventory {
+        permissions,
+        windows,
+    })
+}
+pub(crate) async fn permissions(
+    directory: &Path,
+    server: &str,
+    request_id: &str,
+    request: Option<pulse_core::ComputerPermission>,
+) -> Result<crate::computer_runtime::ComputerPermissions> {
+    let value: PermissionResponse = exchange(
+        directory,
+        server,
+        &WindowRequest::Permissions {
+            version: 1,
+            server: server.into(),
+            request_id: request_id.into(),
+            request,
+        },
+    )
+    .await?;
+    ensure(
+        value.version == 1 && value.request_id == request_id,
+        "permission response binding",
+    )?;
+    Ok(value.permissions)
+}
+async fn exchange<T: Serialize, R: serde::de::DeserializeOwned>(
+    directory: &Path,
+    server: &str,
+    request: &T,
+) -> Result<R> {
+    let metadata = std::fs::symlink_metadata(directory)?;
     ensure(
         metadata.is_dir()
             && !metadata.file_type().is_symlink()
@@ -228,27 +360,14 @@ pub(crate) async fn list_windows(server: &str) -> Result<Vec<pulse_core::Compute
     tokio::time::timeout(Duration::from_secs(20), async {
         let mut stream = UnixStream::connect(&path).await?;
         same_user(&stream)?;
-        let mut data = serde_json::to_vec(&WindowRequest::List {
-            version: 3,
-            server: server.into(),
-        })?;
+        let mut data = serde_json::to_vec(request)?;
         data.push(b'\n');
         stream.write_all(&data).await?;
         // Keep the write half open. Full disconnect cancels the executor child.
         let mut bytes = Vec::new();
         stream.take(65_537).read_to_end(&mut bytes).await?;
         ensure(bytes.len() <= 65_536, "window list response limit")?;
-        let value: WindowResponse = parse(&bytes)?;
-        ensure(
-            value.version == 3
-                && value.windows.len() <= 64
-                && value
-                    .windows
-                    .iter()
-                    .all(pulse_core::ComputerWindowChoice::valid),
-            "invalid window list",
-        )?;
-        Ok(value.windows)
+        parse(&bytes)
     })
     .await
     .map_err(|_| crate::Error::Rejected("window list timeout".into()))?
@@ -309,6 +428,10 @@ async fn prepare_mode(
     .await
     .map_err(|_| crate::Error::Rejected("local picker timed out".into()))?
 }
+
+#[cfg(test)]
+#[path = "computer_permission_tests.rs"]
+mod permission_tests;
 
 #[cfg(test)]
 mod tests {

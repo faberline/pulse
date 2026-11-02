@@ -111,6 +111,10 @@ pub fn validate_server(value: &str, dev: bool) -> Result<Url> {
     Ok(url)
 }
 
+#[cfg(test)]
+#[path = "client/permission_tests.rs"]
+mod permission_tests;
+
 mod vault;
 pub use vault::{NativeVault, Vault};
 mod pairing;
@@ -134,6 +138,7 @@ struct LinkState {
 }
 
 pub struct Device {
+    control_directory: PathBuf,
     config: Config,
     journal: Journal,
     _lock: DeviceLock,
@@ -172,6 +177,7 @@ impl Device {
         let account = hash(&(config.server.as_str(), &journal.device, role))?;
         journal.recover().await?;
         Ok(Self {
+            control_directory: crate::computer_control::control_directory(),
             config,
             journal,
             _lock: lock,
@@ -272,9 +278,13 @@ impl Device {
         let mut memory_sync: Option<tokio::task::JoinHandle<Result<()>>> = None;
         let mut memory_retry = Instant::now();
         let mut window_list: Option<
-            tokio::task::JoinHandle<Result<Vec<pulse_core::ComputerWindowChoice>>>,
+            tokio::task::JoinHandle<Result<crate::computer_control::WindowInventory>>,
         > = None;
         let mut windows: Option<ComputerWindowList> = None;
+        let mut permission_task: Option<
+            tokio::task::JoinHandle<Result<crate::computer_runtime::ComputerPermissions>>,
+        > = None;
+        let mut permissions: Option<ComputerPermissionState> = None;
         let result=async {loop {tokio::select! {
             changed=link_rx.changed()=>{
                 changed.map_err(|_|crate::Error::Rejected("connection state stopped".into()))?;
@@ -292,17 +302,32 @@ impl Device {
                     artifact_loading=None;
                     if let Some(task)=window_list.take(){task.abort();let _=task.await;}
                     windows=None;
+                    if let Some(task)=permission_task.take(){task.abort();let _=task.await;}
+                    permissions=None;
                     computer_selection.abort_all();while computer_selection.join_next().await.is_some(){}
                     computer_selecting=None;
                     self.journal.deny_memory_access().await?;
                     message=if self.journal.role==ClientRole::Chat {"連線身分已失效。本機記憶與待送正文已清除，請重新配對。"} else {"連線身分已失效，請重新配對。"}.into();
                 }
             }
+            completed=async {match permission_task.as_mut(){Some(task)=>task.await,None=>std::future::pending().await}}=>{
+                permission_task=None;
+                if let Some(state)=permissions.as_mut() {
+                    state.loading=false;
+                    match completed {Ok(Ok(value))=>{state.permissions=Some(value);state.failed=false;},_=>{state.permissions=None;state.failed=true;}}
+                }
+            }
             completed=async {match window_list.as_mut(){Some(task)=>task.await,None=>std::future::pending().await}}=>{
                 window_list=None;
                 if let Some(state)=windows.as_mut() {
                     state.loading=false;
-                    match completed {Ok(Ok(value))=>{state.windows=value;state.failed=false;},_=>{state.windows.clear();state.failed=true;}}
+                    match completed {
+                        Ok(Ok(value))=>{
+                            permissions=Some(ComputerPermissionState {request_id:state.request_id.clone(),loading:false,failed:false,permissions:Some(value.permissions)});
+                            match value.windows {Ok(windows)=>{state.windows=windows;state.failed=false;},Err(_)=>{state.windows.clear();state.failed=true;}}
+                        },
+                        _=>{state.windows.clear();state.failed=true;permissions=Some(ComputerPermissionState {request_id:state.request_id.clone(),loading:false,failed:true,permissions:None});}
+                    }
                 }
             }
             completed=async{match memory_sync.as_mut(){Some(task)=>task.await,None=>std::future::pending().await}}=>{
@@ -369,6 +394,7 @@ impl Device {
                 }
                 state.artifact_loading=artifact_loading.clone();state.artifact_failure=artifact_failure.clone();
                 state.computer_windows=windows.clone();
+                state.computer_permissions=permissions.clone();
                 if computer_selection.is_empty() && let Some(entry)=self.journal.take_computer_selection(crate::now()).await? {
                     computer_selecting=Some(entry.source_id.clone());let server=self.config.server.to_string();
                     computer_selection.spawn(async move {crate::computer_control::prepare(&server,entry.permit,entry.replace).await});
@@ -390,6 +416,22 @@ impl Device {
                             Err(e)=>return Err(e),
                         }
                     }
+                    Some(NativeCommand::ComputerPermissions{request_id,request})=>{
+                        ensure(self.journal.role==ClientRole::Chat && uuid::Uuid::parse_str(&request_id).is_ok(),"permission control requires Human chat")?;
+                        if permissions.as_ref().is_some_and(|s|s.request_id==request_id) {continue;}
+                        // Never replace or retry an in-flight OS prompt automatically.
+                        if permission_task.is_some() || window_list.is_some(){continue;}
+                        permissions=Some(ComputerPermissionState {request_id:request_id.clone(),loading:true,failed:false,permissions:None});
+                        let server=self.config.server.to_string();let directory=self.control_directory.clone();
+                        permission_task=Some(tokio::spawn(async move {crate::computer_control::permissions(&directory,&server,&request_id,request).await}));
+                    }
+                    Some(NativeCommand::CancelComputerPermissions{request_id})=>{
+                        ensure(self.journal.role==ClientRole::Chat,"permission control requires Human chat")?;
+                        if permissions.as_ref().is_some_and(|s|s.request_id==request_id) {
+                            if let Some(task)=permission_task.take(){task.abort();let _=task.await;}
+                            permissions=None;
+                        }
+                    }
                     Some(NativeCommand::CancelComputerWindows{request_id})=>{
                         ensure(self.journal.role==ClientRole::Chat,"window picker requires Human chat")?;
                         if windows.as_ref().is_some_and(|s|s.request_id==request_id) {
@@ -401,9 +443,10 @@ impl Device {
                         ensure(self.journal.role==ClientRole::Chat && uuid::Uuid::parse_str(&request_id).is_ok(),"window picker requires Human chat")?;
                         if windows.as_ref().is_some_and(|s|s.request_id==request_id) {continue;}
                         if let Some(task)=window_list.take(){task.abort();let _=task.await;}
-                        windows=Some(ComputerWindowList {request_id,loading:true,failed:false,windows:vec![]});
-                        let server=self.config.server.to_string();
-                        window_list=Some(tokio::spawn(async move {crate::computer_control::list_windows(&server).await}));
+                        if permission_task.is_some(){continue;}
+                        windows=Some(ComputerWindowList {request_id:request_id.clone(),loading:true,failed:false,windows:vec![]});
+                        let server=self.config.server.to_string();let directory=self.control_directory.clone();
+                        window_list=Some(tokio::spawn(async move {crate::computer_control::inventory(&directory,&server,&request_id).await}));
                     }
                     Some(NativeCommand::SubmitComputer{source_id,id,goal,selection,selected_at})=>{
                         if crate::memory_chat::parse(&goal).is_some() {
@@ -457,6 +500,8 @@ impl Device {
                         lease_tx.send_replace(Lease::default());
                         if let Some(task)=connection.take(){task.abort();let _=task.await;}
                         if let Some(task)=memory_sync.take(){task.abort();let _=task.await;}
+                        if let Some(task)=permission_task.take(){task.abort();let _=task.await;}
+                        permissions=None;
                         link_tx.send_replace(LinkState::default());
                         pairing=Some(tokio::spawn(pairing::begin(self.config.clone(),self.journal.clone(),self.vault.clone(),self.account.clone(),code)));
                         message="正在配對。本機停止工具仍可用。".into();
@@ -488,6 +533,10 @@ impl Device {
             let _ = task.await;
         }
         if let Some(task) = window_list {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = permission_task {
             task.abort();
             let _ = task.await;
         }

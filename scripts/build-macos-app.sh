@@ -11,6 +11,11 @@ case "${1-}" in
   '') ;;
   *) printf '%s\n' 'Use build-macos-app.sh [--debug]' >&2; exit 1 ;;
 esac
+app="${PULSE_APP_OUTPUT:-target/$profile/Pulse.app}"
+if [ -n "${PULSE_APP_OUTPUT-}" ] && { [ -e "$app" ] || [ -L "$app" ]; }; then
+  printf '%s\n' 'Use a new PULSE_APP_OUTPUT path for an isolated review bundle.' >&2
+  exit 1
+fi
 if [ "$profile" = release ]; then
   cargo build --locked --release -p pulse-link -p pulse-macos --bins
 else
@@ -18,7 +23,6 @@ else
 fi
 swift build --package-path apps/pulse-desktop --scratch-path target/swift-desktop --configuration "$profile"
 swift_bin=$(swift build --package-path apps/pulse-desktop --scratch-path target/swift-desktop --configuration "$profile" --show-bin-path)
-app="target/$profile/Pulse.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$swift_bin/pulse-desktop" "$app/Contents/MacOS/pulse-desktop"
 cp "target/$profile/pulse-computer" "$app/Contents/MacOS/pulse-computer"

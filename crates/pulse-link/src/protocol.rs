@@ -506,6 +506,13 @@ pub(crate) fn secret() -> crate::Result<String> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeCommand {
+    ComputerPermissions {
+        request_id: String,
+        request: Option<pulse_core::ComputerPermission>,
+    },
+    CancelComputerPermissions {
+        request_id: String,
+    },
     SetDesktopNotifications {
         enabled: bool,
     },
@@ -592,6 +599,8 @@ pub struct NativeState {
     #[serde(default)]
     pub computer_windows: Option<ComputerWindowList>,
     #[serde(default)]
+    pub computer_permissions: Option<ComputerPermissionState>,
+    #[serde(default)]
     pub memories: Vec<pulse_core::Memory>,
     #[serde(default)]
     pub memory_synced_at: Option<i64>,
@@ -628,6 +637,13 @@ pub struct ComputerWindowList {
     pub loading: bool,
     pub failed: bool,
     pub windows: Vec<pulse_core::ComputerWindowChoice>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ComputerPermissionState {
+    pub request_id: String,
+    pub loading: bool,
+    pub failed: bool,
+    pub permissions: Option<crate::computer_runtime::ComputerPermissions>,
 }
 
 pub fn hash(value: &impl Serialize) -> Result<String> {
