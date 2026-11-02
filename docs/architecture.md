@@ -20,6 +20,7 @@
 | U10 | executor 分為 remote 系統與 local process；remote 不綁定 VM | 使用者於 2026-10-31 修正 |
 | U11 | remote 由 Pulse 自行實作；只在能減少程式時重用 core，不接 AW | 使用者於 2026-10-31 修正；取代先前 AW 整合方向 |
 | U12 | 桌面 UI 改用 SwiftUI；server 與 executor 保留 Rust | 使用者於 2026-10-31 確認 |
+| U13 | Swift 只負責介面；核心採 Rust，讓不同介面共用同一套命令、狀態與事件 | 使用者於 2026-11-02 再確認 |
 
 一台 macOS Apple Silicon 裝置、一個地端 worker、雲端最多兩個執行中任務，是本版實作預設。這些數值可經新決策修改，但不能由模型自行調高。
 
@@ -62,6 +63,16 @@ flowchart TB
 雲端先採單一服務。這些模組不是七個微服務，也不要求一個任務配一個常駐 process。等待時保存進度並釋放工作名額。
 
 SwiftUI 透過自己的 Rust chat 傳輸程序連 server。兩者使用私有、有界 JSON Lines。local executor 獨立連 server。兩者有各自的身分與私有 journal。對話框不啟動、代理或終止 executor。關閉對話框後，executor 仍可回傳結果。server 保存結果，對話框重開後再同步。
+
+SwiftUI 是可替換的顯示與輸入層。任務關聯、記憶、批准核對、排程、費用、執行與恢復均由 Rust 擁有。
+介面可以先檢查輸入格式或停用無效按鈕；Rust 仍必須重查全部規則，不能相信畫面已查過。
+新增 CLI、網頁或其他原生介面時，共用 Rust 的命令與狀態契約，不複製任務邏輯或另建權威資料庫。
+目前 `pulse-chat` 的 JSON Lines 入口已不依賴 Swift。命令與回覆定義在 `crates/pulse-link/src/protocol.rs` 的 `NativeCommand`／`NativeState`；名稱是歷史名稱，不限制介面語言。
+這個入口使用 chat 身分，不能當作 executor 身分或新增工具授權。
+
+2026-11-02 邊界檢查：目前 `PulseComputerCore`／`PulseComputerHelper` 仍有 Swift 實作的 macOS 擷取與操作橋接；`ComputerWindowPicker` 也直接讀取系統視窗清單。
+依 U13，這些非顯示功能須移入 Rust local executor 的 macOS adapter，並由共用的本機協定供介面使用。
+這項遷移尚未完成。不能把目前 Swift helper 當作「Swift 只做 UI」已通過的證據；原有目標限縮、原圖核對、一次性批准、程序中止與未知結果限制仍須保留。
 
 remote executor 是 Pulse 自己的執行系統。沿用 `pulse-core::Store` 的持久任務、run token、checkpoint、重試與取消。先不增加另一套工作 DB、外部系統介面或服務。faberline/core 只在可減少重複程式時使用。模型與工具執行迴圈仍是 v0.4 工作，不能把現有狀態核心當作已完成的模型閉環。
 
