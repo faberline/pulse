@@ -106,6 +106,57 @@ pub struct ErasedProjection {
     pub digest: String,
     pub binding_digest: String,
 }
+/// Negative transport metadata. It contains no command, argument or grant.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerErasure {
+    pub operation_id: String,
+    pub task_id: String,
+    pub revision: String,
+    pub device: String,
+    pub epoch: String,
+    pub source_id: String,
+    pub is_effect: bool,
+    pub read_header: Option<ErasedProjection>,
+}
+impl WorkerErasure {
+    pub fn valid(&self) -> bool {
+        let number = |s: &str| {
+            s.parse::<u64>()
+                .is_ok_and(|n| n > 0 && n <= i64::MAX as u64 && n.to_string() == s)
+        };
+        !self.operation_id.is_empty()
+            && self.operation_id.len() <= 256
+            && !self.task_id.is_empty()
+            && self.task_id.len() <= 128
+            && !self.device.is_empty()
+            && self.device.len() <= 128
+            && number(&self.revision)
+            && number(&self.epoch)
+            && uuid::Uuid::parse_str(&self.source_id).is_ok()
+            && self
+                .read_header
+                .as_ref()
+                .is_none_or(|h| h.valid() && h.device == self.device && h.epoch == self.epoch)
+    }
+}
+impl ErasedProjection {
+    pub fn from_value(value: &serde_json::Value) -> crate::Result<Self> {
+        let header = Self {
+            version: serde_json::from_value(value["version"].clone())?,
+            id: serde_json::from_value(value["id"].clone())?,
+            device: serde_json::from_value(value["device"].clone())?,
+            sequence: serde_json::from_value(value["sequence"].clone())?,
+            epoch: serde_json::from_value(value["epoch"].clone())?,
+            digest: serde_json::from_value(value["digest"].clone())?,
+            binding_digest: serde_json::from_value(value["binding_digest"].clone())?,
+        };
+        if !header.valid() {
+            return Err(crate::Error::Rejected("invalid erased frame header".into()));
+        }
+        Ok(header)
+    }
+}
 impl ErasedProjection {
     pub fn valid(&self) -> bool {
         let number = |s: &str| {

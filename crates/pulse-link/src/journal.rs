@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS local_outbox(sequence INTEGER PRIMARY KEY,id TEXT NOT
 CREATE TABLE IF NOT EXISTS local_inbox(sequence INTEGER PRIMARY KEY,id TEXT NOT NULL,digest TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS local_work(id TEXT PRIMARY KEY,envelope TEXT NOT NULL,state TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,accepted INTEGER NOT NULL DEFAULT 0);").execute(&db).await?;
+        sqlx::raw_sql("CREATE TABLE IF NOT EXISTS local_erased_outbox(sequence INTEGER PRIMARY KEY REFERENCES local_outbox(sequence) ON DELETE CASCADE,operation_id TEXT NOT NULL,source_id TEXT NOT NULL,header TEXT NOT NULL CHECK(json_valid(header))); ").execute(&db).await?;
         let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
         let existing: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM local_meta WHERE key='device'")
@@ -174,6 +175,11 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         };
         if role == ClientRole::Chat {
             journal.reset_memory_session().await?;
+        } else {
+            journal
+                .core
+                .replay_worker_erasures(&journal.device, &hash(&journal.server)?, true)
+                .await?;
         }
         Ok((journal, DeviceLock(lock)))
     }
@@ -317,11 +323,14 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         Ok(())
     }
     pub async fn outgoing(&self) -> Result<Vec<Envelope<DevicePayload>>> {
-        let rows: Vec<String> =
-            sqlx::query_scalar("SELECT data FROM local_outbox ORDER BY sequence LIMIT 100")
-                .fetch_all(&self.db)
-                .await?;
-        rows.into_iter().map(|s| parse(s.as_bytes())).collect()
+        let mut values = Vec::new();
+        for item in self.deliveries().await? {
+            match item {
+                crate::worker_erasure::DeviceDelivery::Data(frame) => values.push(*frame),
+                crate::worker_erasure::DeviceDelivery::Erased(_) => break,
+            }
+        }
+        Ok(values)
     }
     pub async fn ack(&self, sequence: u64, id: &str) -> Result<()> {
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
@@ -331,6 +340,24 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
             .await?;
         if let Some(row) = row {
             ensure(row.get::<String, _>("id") == id, "ACK identity conflict")?;
+            if row.get::<String, _>("data") == "null" {
+                let data: String =
+                    sqlx::query_scalar("SELECT header FROM local_erased_outbox WHERE sequence=?")
+                        .bind(sequence as i64)
+                        .fetch_one(&mut *tx)
+                        .await?;
+                let header: pulse_core::ErasedProjection = serde_json::from_str(&data)?;
+                ensure(
+                    header.valid() && header.id == id,
+                    "erased ACK identity conflict",
+                )?;
+                sqlx::query("DELETE FROM local_outbox WHERE sequence=?")
+                    .bind(sequence as i64)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                return Ok(());
+            }
             let envelope: Envelope<DevicePayload> = parse(row.get::<String, _>("data").as_bytes())?;
             if let DevicePayload::Human { source_id, .. } = envelope.payload {
                 sqlx::query("UPDATE local_pending SET accepted=1 WHERE id=?")
@@ -357,10 +384,27 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
     ) -> Result<bool> {
         let (sequence, message_epoch) = envelope.validate()?;
         ensure(envelope.device == self.device, "wrong device")?;
-        let _lifecycle = if matches!(&envelope.payload, ServerPayload::DerivedSnapshot { .. }) {
+        if let ServerPayload::EraseWork { context } = &envelope.payload {
+            let header =
+                pulse_core::ErasedProjection::from_value(&serde_json::to_value(envelope)?)?;
+            return self.accept_erasure_control(&header, context).await;
+        }
+        let _lifecycle = if self.role == ClientRole::LocalExecutor
+            || matches!(&envelope.payload, ServerPayload::DerivedSnapshot { .. })
+        {
             Some(self.memory_lifecycle.lock().await)
         } else {
             None
+        };
+        let source_erased = if let ServerPayload::Read {
+            task_id, revision, ..
+        } = &envelope.payload
+        {
+            self.core
+                .worker_task_erased(&self.device, &hash(&self.server)?, task_id, revision)
+                .await?
+        } else {
+            false
         };
         let _projection_lease =
             if let ServerPayload::DerivedSnapshot { sources, .. } = &envelope.payload {
@@ -420,6 +464,7 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         }
         ensure(sequence == cursor + 1, "server sequence gap")?;
         match &envelope.payload {
+            ServerPayload::EraseWork { .. } => {}
             ServerPayload::ScheduleNotice { notice } => {
                 ensure(
                     self.role == ClientRole::Chat && notice.valid(),
@@ -540,7 +585,7 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                             <= 64 * 1024 * 1024,
                     "result outbox capacity unavailable",
                 )?;
-                if permitted && lease && epoch == message_epoch {
+                if permitted && lease && epoch == message_epoch && !source_erased {
                     sqlx::query("INSERT INTO local_work VALUES(?,?,'accepted')")
                         .bind(operation_id)
                         .bind(serde_json::to_string(envelope)?)
@@ -577,6 +622,8 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         Ok(true)
     }
     pub async fn take_work(&self) -> Result<Option<Envelope<ServerPayload>>> {
+        let _lifecycle = self.memory_lifecycle.lock().await;
+        self.replay_worker_erasure_rules().await?;
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query("SELECT id,envelope FROM local_work WHERE state='accepted' LIMIT 1")
             .fetch_optional(&mut *tx)
@@ -606,7 +653,8 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         outcome: ReadOutcome,
         image: Option<crate::artifact::CapturedImage>,
     ) -> Result<()> {
-        ensure(outcome.valid(), "invalid result")?;
+        let _lifecycle = self.memory_lifecycle.lock().await;
+        self.replay_worker_erasure_rules().await?;
         if let ServerPayload::Read {
             operation_id,
             task_id,
@@ -620,6 +668,16 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                     .bind(operation_id)
                     .fetch_optional(&mut *tx)
                     .await?;
+            if matches!(state.as_deref(), Some("erasing" | "erased")) {
+                sqlx::query("UPDATE local_work SET state='erased',envelope='null' WHERE id=?")
+                    .bind(operation_id)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                self.flush_memory().await?;
+                return Ok(());
+            }
+            ensure(outcome.valid(), "invalid result")?;
             ensure(
                 matches!(state.as_deref(), Some("accepted" | "running")),
                 "work already finished or missing",

@@ -23,6 +23,7 @@ mod derived_results;
 mod revocations;
 pub(super) mod task_sources;
 mod withdrawals;
+mod worker_copy;
 pub use backup::{BackupCheck, Maintenance};
 pub use checkpoint::truncate as truncate_wal;
 pub use copy::MemoryCopyChange;
@@ -46,6 +47,8 @@ struct Restrictions {
     copy: Option<copy::CopyFence>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     withdrawals: BTreeMap<String, withdrawals::Withdrawal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worker: Option<worker_copy::WorkerCopy>,
 }
 
 pub(super) struct MemoryGuard {
@@ -177,7 +180,11 @@ impl MemoryGuard {
         let value: Restrictions = serde_json::from_slice(&bytes)
             .map_err(|_| Error::Rejected("invalid memory restrictions".into()))?;
         require(
-            (1..=4).contains(&value.format)
+            (1..=5).contains(&value.format)
+                && value
+                    .worker
+                    .as_ref()
+                    .is_none_or(|w| value.format >= 5 && w.valid())
                 && uuid::Uuid::parse_str(&value.keeper).is_ok()
                 && value.removed.len() <= 20_100
                 && revocations::valid(&value)
@@ -259,6 +266,7 @@ impl Store {
                             cancellations: BTreeMap::new(),
                             copy: None,
                             withdrawals: BTreeMap::new(),
+                            worker: None,
                         };
                         self.memory_guard.write(&manifest)?;
                         manifest

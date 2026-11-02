@@ -17,6 +17,7 @@ use std::sync::Arc;
 pub enum Delivery {
     Data(Box<Envelope<ServerPayload>>),
     Erased(pulse_core::ErasedProjection),
+    ErasedWork(Box<pulse_core::WorkerErasure>),
 }
 
 #[derive(Clone)]
@@ -27,6 +28,92 @@ pub struct Hub {
     pub(crate) human: Arc<tokio::sync::Mutex<()>>,
 }
 impl Hub {
+    pub async fn worker_erasure_ready(&self, device: &str, epoch: u64, time: i64) -> Result<()> {
+        let count=sqlx::query("UPDATE link_device SET worker_erasure=1 WHERE id=? AND role='local_executor' AND epoch=? AND revoked=0 AND lease_until>?").bind(device).bind(epoch as i64).bind(time).execute(&self.db).await?.rows_affected();
+        ensure(count == 1, "worker erasure requires current local lease")?;
+        self.notify_change();
+        Ok(())
+    }
+    pub async fn flush_worker_erasures(&self, device: &str, epoch: u64) -> Result<()> {
+        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+        let ready:i64=sqlx::query_scalar("SELECT count(*) FROM link_device WHERE id=? AND epoch=? AND worker_erasure=1 AND role='local_executor' AND revoked=0 AND lease_until>?").bind(device).bind(epoch as i64).bind(now()).fetch_one(&mut *tx).await?;
+        if ready == 0 {
+            return Ok(());
+        }
+        let contexts:Vec<String>=sqlx::query_scalar("SELECT e.context FROM memory_erased_reads e JOIN link_reads r ON r.id=e.id WHERE r.device=? AND e.context IS NOT NULL AND NOT EXISTS(SELECT 1 FROM link_worker_fences f WHERE f.operation_id=e.id) LIMIT 8").bind(device).fetch_all(&mut *tx).await?;
+        for data in contexts {
+            let context: pulse_core::WorkerErasure = serde_json::from_str(&data)?;
+            Self::enqueue(
+                &mut tx,
+                device,
+                epoch,
+                ServerPayload::EraseWork {
+                    context: context.clone(),
+                },
+            )
+            .await?;
+            sqlx::query("INSERT INTO link_worker_fences SELECT ?,device,sequence FROM link_outbox WHERE device=? ORDER BY sequence DESC LIMIT 1").bind(&context.operation_id).bind(device).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+    pub async fn receive_erased_worker(
+        &self,
+        device: &str,
+        header: &pulse_core::ErasedProjection,
+        operation_id: &str,
+        source_id: &str,
+    ) -> Result<()> {
+        ensure(
+            header.valid() && header.device == device,
+            "invalid erased worker header",
+        )?;
+        let _source = self
+            .core
+            .lease_read_source_state(operation_id, now())
+            .await?;
+        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+        let row=sqlx::query("SELECT r.device,r.epoch,e.context,d.in_cursor,d.role,d.revoked FROM link_reads r JOIN memory_erased_reads e ON e.id=r.id JOIN link_device d ON d.id=r.device WHERE r.id=?").bind(operation_id).fetch_one(&mut *tx).await?;
+        let context: pulse_core::WorkerErasure =
+            serde_json::from_str(&row.get::<String, _>("context"))?;
+        ensure(
+            context.valid()
+                && row.get::<String, _>("device") == device
+                && row.get::<String, _>("role") == "local_executor"
+                && row.get::<i64, _>("revoked") == 0
+                && row.get::<i64, _>("epoch").to_string() == header.epoch
+                && context.source_id == source_id,
+            "erased worker source mismatch",
+        )?;
+        let sequence = number(&header.sequence)?;
+        let cursor = row.get::<i64, _>("in_cursor") as u64;
+        if let Some(row) =
+            sqlx::query("SELECT id,digest FROM link_inbox WHERE device=? AND sequence=?")
+                .bind(device)
+                .bind(sequence as i64)
+                .fetch_optional(&mut *tx)
+                .await?
+        {
+            ensure(
+                row.get::<String, _>("id") == header.id
+                    && row.get::<String, _>("digest") == header.binding_digest,
+                "erased worker replay conflict",
+            )?;
+        } else {
+            ensure(sequence == cursor + 1, "erased worker sequence gap")?;
+            sqlx::query("INSERT INTO link_inbox(device,sequence,id,digest,outcome) VALUES(?,?,?,?,'source_erased')").bind(device).bind(sequence as i64).bind(&header.id).bind(&header.binding_digest).execute(&mut *tx).await?;
+        }
+        if sequence > cursor {
+            ensure(sequence == cursor + 1, "erased worker sequence gap")?;
+            sqlx::query("UPDATE link_device SET in_cursor=? WHERE id=?")
+                .bind(sequence as i64)
+                .bind(device)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
     pub async fn projection_erasure_ready(
         &self,
         device: &str,
@@ -191,7 +278,7 @@ impl Hub {
         Ok(())
     }
     pub async fn recover(&self) -> Result<()> {
-        sqlx::query("UPDATE link_device SET projection_erasure=0,schedule_notices=0,lease_until=0,epoch=epoch+1")
+        sqlx::query("UPDATE link_device SET worker_erasure=0,projection_erasure=0,schedule_notices=0,lease_until=0,epoch=epoch+1")
             .execute(&self.db)
             .await?;
         let devices: Vec<String> = sqlx::query_scalar("SELECT id FROM link_device")
@@ -205,7 +292,7 @@ impl Hub {
     }
     pub async fn end(&self, device: &str, epoch: u64) -> Result<()> {
         let changed = sqlx::query(
-            "UPDATE link_device SET projection_erasure=0,schedule_notices=0,lease_until=0 WHERE id=? AND epoch=?",
+            "UPDATE link_device SET worker_erasure=0,projection_erasure=0,schedule_notices=0,lease_until=0 WHERE id=? AND epoch=?",
         )
         .bind(device)
         .bind(epoch as i64)
@@ -226,7 +313,7 @@ impl Hub {
                 .fetch_one(&mut *tx)
                 .await?;
         ensure(cursor <= max as u64, "resume cursor exceeds sent data")?;
-        let row=sqlx::query("UPDATE link_device SET projection_erasure=0,schedule_notices=0,epoch=epoch+1,lease_until=? WHERE id=? AND revoked=0 RETURNING epoch").bind(time+LEASE_MS).bind(device).fetch_optional(&mut *tx).await?.ok_or_else(||crate::Error::Rejected("device revoked".into()))?;
+        let row=sqlx::query("UPDATE link_device SET worker_erasure=0,projection_erasure=0,schedule_notices=0,epoch=epoch+1,lease_until=? WHERE id=? AND revoked=0 RETURNING epoch").bind(time+LEASE_MS).bind(device).fetch_optional(&mut *tx).await?.ok_or_else(||crate::Error::Rejected("device revoked".into()))?;
         let epoch: i64 = row.get("epoch");
         sqlx::query("UPDATE link_outbox SET acknowledged=1 WHERE device=? AND sequence<=?")
             .bind(device)
@@ -521,13 +608,13 @@ impl Hub {
         for item in self.deliveries(device).await? {
             match item {
                 Delivery::Data(envelope) => output.push(*envelope),
-                Delivery::Erased(_) => break,
+                Delivery::Erased(_) | Delivery::ErasedWork(_) => break,
             }
         }
         Ok(output)
     }
     pub async fn deliveries(&self, device: &str) -> Result<Vec<Delivery>> {
-        let rows=sqlx::query("SELECT o.data,e.data AS erased FROM link_outbox o LEFT JOIN link_erased_frames e ON e.device=o.device AND e.sequence=o.sequence WHERE o.device=? AND o.acknowledged=0 ORDER BY o.sequence LIMIT 100").bind(device).fetch_all(&self.db).await?;
+        let rows=sqlx::query("SELECT o.data,e.data AS erased,w.context AS erased_work FROM link_outbox o LEFT JOIN link_erased_frames e ON e.device=o.device AND e.sequence=o.sequence LEFT JOIN link_erased_work w ON w.device=o.device AND w.sequence=o.sequence WHERE o.device=? AND o.acknowledged=0 ORDER BY o.sequence LIMIT 100").bind(device).fetch_all(&self.db).await?;
         let ready: i64 = sqlx::query_scalar("SELECT schedule_notices FROM link_device WHERE id=?")
             .bind(device)
             .fetch_one(&self.db)
@@ -538,7 +625,25 @@ impl Hub {
                 .bind(device)
                 .fetch_one(&self.db)
                 .await?;
+        let worker_ready: i64 =
+            sqlx::query_scalar("SELECT worker_erasure FROM link_device WHERE id=?")
+                .bind(device)
+                .fetch_one(&self.db)
+                .await?;
         for row in rows {
+            if let Some(data) = row.get::<Option<String>, _>("erased_work") {
+                if worker_ready == 0 {
+                    break;
+                }
+                let context: pulse_core::WorkerErasure = serde_json::from_str(&data)?;
+                ensure(
+                    context.valid() && context.device == device,
+                    "invalid erased work context",
+                )?;
+                ensure(context.read_header.is_some(), "missing erased work header")?;
+                outgoing.push(Delivery::ErasedWork(Box::new(context)));
+                continue;
+            }
             if let Some(data) = row.get::<Option<String>, _>("erased") {
                 if erased_ready == 0 {
                     break;
@@ -552,6 +657,24 @@ impl Hub {
                 continue;
             }
             let envelope: Envelope<ServerPayload> = parse(row.get::<String, _>("data").as_bytes())?;
+            if let ServerPayload::Read {
+                task_id, revision, ..
+            } = &envelope.payload
+            {
+                let bound: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM task_memory_sources WHERE task_id=? AND task_revision=?",
+                )
+                .bind(task_id)
+                .bind(revision)
+                .fetch_one(&self.db)
+                .await?;
+                if bound > 0 && worker_ready == 0 {
+                    break;
+                }
+            }
+            if worker_ready == 0 && matches!(envelope.payload, ServerPayload::EraseWork { .. }) {
+                break;
+            }
             if ready == 0 && matches!(envelope.payload, ServerPayload::ScheduleNotice { .. }) {
                 break;
             }
@@ -570,15 +693,38 @@ impl Hub {
         epoch: u64,
         time: i64,
     ) -> Result<bool> {
-        if let ServerPayload::Read {
-            task_id, revision, ..
-        } = &envelope.payload
-        {
-            let _memory = match self.core.lease_task_memory(task_id, time).await {
+        let _source = if let ServerPayload::Read { operation_id, .. } = &envelope.payload {
+            match self.core.lease_read_source_state(operation_id, time).await {
                 Ok(lease) => lease,
                 Err(pulse_core::Error::Rejected(_)) => return Ok(false),
                 Err(error) => return Err(error.into()),
-            };
+            }
+        } else {
+            None
+        };
+        self.permitted_current(envelope, epoch, time).await
+    }
+    async fn permitted_current(
+        &self,
+        envelope: &Envelope<ServerPayload>,
+        epoch: u64,
+        time: i64,
+    ) -> Result<bool> {
+        if let ServerPayload::Read {
+            task_id,
+            revision,
+            operation_id,
+            ..
+        } = &envelope.payload
+        {
+            let erased: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM memory_erased_reads WHERE id=?")
+                    .bind(operation_id)
+                    .fetch_one(&self.db)
+                    .await?;
+            if erased == 1 {
+                return Ok(false);
+            }
             let task = self.core.task(task_id).await?;
             let mut db = self.db.acquire().await?;
             match pulse_core::Store::validate_task_memory_in(&mut db, &task.id, task.revision, time)
@@ -1441,11 +1587,24 @@ async fn session(hub: Arc<Hub>, device: String, mut socket: WebSocket) {
             }
             _=ticker.tick()=>{
                 ensure(hub.live(&device,epoch,now()).await?,"revoked, expired or superseded connection")?;
+                match hub.flush_worker_erasures(&device,epoch).await {Ok(())|Err(crate::Error::Capacity)=>{},Err(error)=>return Err(error)}
                 for delivery in hub.deliveries(&device).await? {
                     match delivery {
+                        Delivery::ErasedWork(context)=>{let header=context.read_header.clone().ok_or_else(||crate::Error::Rejected("missing erased work header".into()))?;send(&mut socket,&ServerWire::ErasedWork{header,context}).await?;},
                         Delivery::Erased(header)=>send(&mut socket,&ServerWire::ErasedProjection{header}).await?,
                         Delivery::Data(envelope)=>{
-                            if let ServerPayload::DerivedSnapshot{sources,..}=&envelope.payload {
+                            if let ServerPayload::Read{operation_id,..}=&envelope.payload {
+                                let _source=hub.core.lease_read_source_state(operation_id,now()).await?;
+                                let context:Option<String>=sqlx::query_scalar("SELECT context FROM memory_erased_reads WHERE id=?").bind(operation_id).fetch_optional(&hub.db).await?;
+                                if let Some(data)=context {
+                                    let context:pulse_core::WorkerErasure=serde_json::from_str(&data)?;
+                                    let header=context.read_header.clone().ok_or_else(||crate::Error::Rejected("erased work header missing".into()))?;
+                                    send(&mut socket,&ServerWire::ErasedWork{header,context:Box::new(context)}).await?;
+                                } else {
+                                    let permitted=hub.permitted_current(&envelope,epoch,now()).await?;
+                                    send(&mut socket,&ServerWire::Data{envelope,permitted}).await?;
+                                }
+                            } else if let ServerPayload::DerivedSnapshot{sources,..}=&envelope.payload {
                                 match hub.core.lease_projection_sources(sources,now()).await {
                                     Ok(_lease)=>send(&mut socket,&ServerWire::Data{envelope,permitted:true}).await?,
                                     Err(pulse_core::Error::Rejected(reason))=>{
@@ -1468,6 +1627,8 @@ async fn session(hub: Arc<Hub>, device: String, mut socket: WebSocket) {
                         ClientWire::Heartbeat{epoch:claimed}=>{ensure(number(&claimed)?==epoch,"heartbeat epoch")?;hub.renew(&device,epoch,now()).await?;send(&mut socket,&ServerWire::Renewed{epoch:epoch.to_string(),lease_ms:LEASE_MS as u32}).await?;}
                         ClientWire::Hello{..}=>return Err(crate::Error::Rejected("duplicate hello".into())),
                         ClientWire::ScheduleReady=>hub.schedule_ready(&device,epoch,now()).await?,
+                        ClientWire::WorkerErasureReady=>hub.worker_erasure_ready(&device,epoch,now()).await?,
+                        ClientWire::ErasedData{header,operation_id,source_id}=>{hub.receive_erased_worker(&device,&header,&operation_id,&source_id).await?;send(&mut socket,&ServerWire::Ack{sequence:header.sequence,id:header.id}).await?;}
                         ClientWire::ProjectionErasureReady=>hub.projection_erasure_ready(&device,epoch,now()).await?,
                         ClientWire::ComputerReady{permits,interactions}=>hub.set_computer_capability(&device,epoch,permits,interactions,now()).await?,
                         ClientWire::BrowserReady{fixture_origin}=>hub.browser_ready(&device,epoch,fixture_origin.as_deref(),now()).await?,

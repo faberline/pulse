@@ -25,6 +25,7 @@ mod remote_io;
 mod schedule_chat;
 pub mod schedules;
 pub mod server;
+pub mod worker_erasure;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

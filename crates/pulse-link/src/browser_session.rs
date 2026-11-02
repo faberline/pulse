@@ -144,6 +144,13 @@ pub(crate) fn evidence(
     })
 }
 impl BrowserRuntime {
+    pub(crate) async fn invalidate_source(&self, task: &str, revision: &str) {
+        self.sessions
+            .lock()
+            .await
+            .retain(|_, s| s.task_id != task || s.revision != revision);
+    }
+
     pub async fn inspect(&self, url: &Url, binding: &WorkBinding) -> Result<ExecutedRead> {
         ensure(self.interactions, "browser interaction not configured")?;
         self.artifact_room()?;

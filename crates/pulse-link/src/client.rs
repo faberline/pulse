@@ -619,7 +619,10 @@ async fn connected(
                         computer_checked = Instant::now();
                         if computer_checks.is_empty() { let executor=executor.clone(); computer_checks.spawn(async move { executor.computer_capabilities().await }); }
                     }
-                    for envelope in journal.outgoing().await? {wire(&mut socket,&ClientWire::Data{envelope:Box::new(envelope)}).await?;}
+                    for item in journal.deliveries().await? {match item {
+                        crate::worker_erasure::DeviceDelivery::Data(envelope)=>wire(&mut socket,&ClientWire::Data{envelope}).await?,
+                        crate::worker_erasure::DeviceDelivery::Erased(item)=>wire(&mut socket,&ClientWire::ErasedData{header:item.header,operation_id:item.operation_id,source_id:item.source_id}).await?,
+                    }}
                 }
             }
             result=computer_checks.join_next(), if !computer_checks.is_empty()=>{
@@ -637,6 +640,7 @@ async fn connected(
                             ensure(epoch.is_none()&&device==journal.device&&lease_ms>0&&lease_ms<=LEASE_MS as u32,"invalid welcome")?;
                             let value=number(&wire_epoch)?;epoch=Some(value);lease.send_replace(Lease{epoch:value,until:Some(started+Duration::from_millis(lease_ms.into()))});state.send_replace(LinkState{connected:true,credential_rejected:false});
                             if journal.role==ClientRole::Chat {wire(&mut socket,&ClientWire::ScheduleReady).await?;}
+                            else {wire(&mut socket,&ClientWire::WorkerErasureReady).await?;}
                             if let Some(fixture_origin)=browser.clone(){wire(&mut socket,&ClientWire::BrowserReady{fixture_origin}).await?;}
                             if interactions && let Some(fixture_origin)=browser.clone(){wire(&mut socket,&ClientWire::BrowserInteractionReady{fixture_origin}).await?;}
                         }
@@ -648,7 +652,14 @@ async fn connected(
                         ServerWire::Data{envelope,permitted}=>{
                             let current=lease.borrow().clone();ensure(epoch.is_some()&&current.live(),"data without live session")?;
                             journal.accept(&envelope,permitted,current.epoch,current.live()&&!journal.stopped().await?).await?;
+                            if let ServerPayload::EraseWork{context}=&envelope.payload && let Some(executor)=&executor {executor.invalidate_source(context).await;}
                             wire(&mut socket,&ClientWire::Ack{sequence:envelope.sequence,id:envelope.id}).await?;
+                        }
+                        ServerWire::ErasedWork{header,context}=>{
+                            ensure(epoch.is_some() && lease.borrow().live(),"work erasure without live session")?;
+                            journal.accept_worker_erasure(&header,&context).await?;
+                            if let Some(executor)=&executor {executor.invalidate_source(&context).await;}
+                            wire(&mut socket,&ClientWire::Ack{sequence:header.sequence,id:header.id}).await?;
                         }
                         ServerWire::ErasedProjection{header}=>{
                             ensure(epoch.is_some()&&lease.borrow().live(),"erasure without live session")?;
@@ -696,7 +707,13 @@ async fn work(journal: Journal, executor: Executor, lease: watch::Receiver<Lease
             let current = lease.borrow().clone();
             let allowed = current.live()
                 && number(&envelope.epoch)? == current.epoch
-                && !journal.stopped().await?;
+                && !journal.stopped().await?
+                && match &envelope.payload {
+                    ServerPayload::Read { operation_id, .. } => {
+                        !journal.work_erased(operation_id).await?
+                    }
+                    _ => false,
+                };
             let outcome = if allowed {
                 match &envelope.payload {
                     ServerPayload::Read {
@@ -726,7 +743,7 @@ async fn work(journal: Journal, executor: Executor, lease: watch::Receiver<Lease
                                     let view = journal.view().await?;
                                     let obsolete = view.tasks.iter().find(|t| t.id == *task_id)
                                         .is_some_and(|t| t.revision.to_string() != *revision || t.cancel_requested || t.state.terminal());
-                                    if !live.live() || live.epoch != current.epoch || journal.stopped().await? || obsolete || !executor.computer_permitted(operation,task_id,revision) {
+                                    if !live.live() || live.epoch != current.epoch || journal.stopped().await? || journal.work_erased(&binding.operation_id).await? || obsolete || !executor.computer_permitted(operation,task_id,revision) {
                                         break crate::artifact::ExecutedRead {outcome:ReadOutcome::Unknown { reason: "local read interrupted by stop, revision, cancellation or expired session".into() },image:None};
                                     }
                                 }
@@ -749,4 +766,16 @@ async fn work(journal: Journal, executor: Executor, lease: watch::Receiver<Lease
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+#[cfg(test)]
+pub(crate) fn test_live_worker(
+    journal: Journal,
+    executor: Executor,
+    epoch: u64,
+) -> tokio::task::JoinHandle<Result<()>> {
+    let (_tx, rx) = watch::channel(Lease {
+        epoch,
+        until: Some(Instant::now() + Duration::from_secs(60)),
+    });
+    tokio::spawn(work(journal, executor, rx))
 }

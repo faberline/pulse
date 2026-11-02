@@ -15,6 +15,16 @@ pub struct Executor {
     computer: Option<crate::computer_runtime::ComputerRuntime>,
 }
 impl Executor {
+    pub(crate) async fn invalidate_source(&self, context: &pulse_core::WorkerErasure) {
+        if let Some(browser) = &self.browser {
+            browser
+                .invalidate_source(&context.task_id, &context.revision)
+                .await;
+        }
+        if let Some(computer) = &self.computer {
+            computer.invalidate_source(&context.task_id, &context.revision);
+        }
+    }
     pub fn new(root: &Path) -> Result<Self> {
         ensure(
             !std::fs::symlink_metadata(root)?.file_type().is_symlink(),

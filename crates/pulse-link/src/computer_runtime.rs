@@ -401,6 +401,16 @@ impl ComputerRuntime {
             entries.retain(|entry| entry != permit);
         }
     }
+    pub(crate) fn invalidate_source(&self, task: &str, revision: &str) {
+        if let Ok(mut permits) = self.permits.lock() {
+            permits.retain(|p| p.task_id != task || p.revision != revision);
+        }
+        if let Ok(mut observations) = self.observations.lock() {
+            observations.retain(|o| {
+                o.binding.task_id != task || o.binding.revision.to_string() != revision
+            });
+        }
+    }
     pub(crate) fn maintain(&self, tasks: &[pulse_core::Task]) {
         if let Ok(mut entries) = self.permits.lock() {
             entries.retain(|entry| {

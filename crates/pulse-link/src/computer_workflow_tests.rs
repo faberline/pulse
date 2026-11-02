@@ -45,6 +45,11 @@ async fn pair(hub: &Hub, role: ClientRole, device: String) -> (Credential, u64) 
         .begin(&credential.device, 0, crate::now())
         .await
         .unwrap();
+    if role == ClientRole::LocalExecutor {
+        hub.worker_erasure_ready(&credential.device, epoch, crate::now())
+            .await
+            .unwrap();
+    }
     (credential, epoch)
 }
 fn reply(operation: ReadOp, id: &str) -> Reply {
@@ -792,6 +797,115 @@ async fn native_source_erasure_discards_late_images_without_inventing_a_known_ef
     .unwrap();
     assert!(!latest.contains("source_operation_id"));
     assert!(!latest.contains("png_digest"));
+}
+
+#[tokio::test]
+async fn native_worker_erasure_cancels_an_active_child_and_revokes_cached_selection() {
+    let mut f = Fixture::setup_with_memory("action-hang", true).await;
+    let request = f.propose().await;
+    f.decide(&request, true).await;
+    assert!(
+        f.hub
+            .dispatch_approved_action(&remote::versions(), crate::now())
+            .await
+            .unwrap()
+    );
+    for frame in f.hub.outgoing(&f.journal.device).await.unwrap() {
+        f.journal.accept(&frame, true, f.epoch, true).await.unwrap();
+        f.hub
+            .ack(
+                &f.journal.device,
+                number(&frame.sequence).unwrap(),
+                &frame.id,
+            )
+            .await
+            .unwrap();
+    }
+    let worker = crate::client::test_live_worker(f.journal.clone(), f.executor.clone(), f.epoch);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while f.effects() == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(f.effects(), 1);
+    let memory = f
+        .hub
+        .core
+        .list_memories(crate::now())
+        .await
+        .unwrap()
+        .remove(0);
+    f.hub
+        .core
+        .change_memory(
+            Origin::Human,
+            &pulse_core::MemoryRequest {
+                source_id: uuid::Uuid::new_v4().to_string(),
+                source_at: crate::now(),
+                command: pulse_core::MemoryCommand::Forget {
+                    id: memory.id,
+                    revision: memory.revision,
+                },
+            },
+            crate::now(),
+        )
+        .await
+        .unwrap();
+    let operation = format!("approved:{}", request.proposal.id);
+    let stored: String = sqlx::query_scalar("SELECT data FROM operations WHERE id=?")
+        .bind(&operation)
+        .fetch_one(&f.hub.db)
+        .await
+        .unwrap();
+    let stored: Operation = serde_json::from_str(&stored).unwrap();
+    assert_eq!(stored.intent, json!({"source_erased":true}));
+    let proposal: String = sqlx::query_scalar("SELECT data FROM operation_requests WHERE id=?")
+        .bind(&request.proposal.id)
+        .fetch_one(&f.hub.db)
+        .await
+        .unwrap();
+    let proposal: OperationRequest = serde_json::from_str(&proposal).unwrap();
+    assert_eq!(proposal.proposal.intent, json!({"source_erased":true}));
+    let context: pulse_core::WorkerErasure = serde_json::from_str(
+        &sqlx::query_scalar::<_, String>("SELECT context FROM memory_erased_reads WHERE id=?")
+            .bind(&operation)
+            .fetch_one(&f.hub.db)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    f.journal
+        .accept_worker_erasure(context.read_header.as_ref().unwrap(), &context)
+        .await
+        .unwrap();
+    f.executor.invalidate_source(&context).await;
+    crate::computer_runtime::tests::assert_reaped(&f.runtime).await;
+    assert_eq!(f.effects(), 1);
+    assert!(!f.runtime.permitted("task", "1", &f.observation.selection()));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let state: String = sqlx::query_scalar("SELECT state FROM local_work WHERE id=?")
+                .bind(&operation)
+                .fetch_one(&f.journal.db)
+                .await
+                .unwrap();
+            if state == "erased" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(f.journal.deliveries().await.unwrap().is_empty());
+    assert_eq!(
+        f.hub.core.task("task").await.unwrap().state,
+        State::OutcomeUnknown
+    );
+    worker.abort();
+    let _ = worker.await;
 }
 
 #[tokio::test]

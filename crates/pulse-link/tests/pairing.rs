@@ -25,7 +25,7 @@ async fn schema_ten_upgrade_preserves_identity_and_seeds_existing_token_history(
     let mut db = sqlx::SqliteConnection::connect_with(&options)
         .await
         .unwrap();
-    db.execute("DROP TABLE memory_erased_reads; DROP TABLE memory_derived_messages; DROP TABLE link_erased_frames; ALTER TABLE link_device DROP COLUMN projection_erasure; DROP TABLE task_memory_sources; DROP TABLE local_schedule_delivery; ALTER TABLE link_device DROP COLUMN schedule_notices; DROP TABLE schedules; DROP TABLE local_schedule_notices; DROP TABLE local_schedule_inputs; DROP TABLE link_pair_claims; DROP TABLE link_pair_tokens; DROP INDEX link_credential_digest; DELETE FROM _sqlx_migrations WHERE version IN (11,12,13,14,15,16); PRAGMA user_version=10;").await.unwrap();
+    db.execute("DROP TABLE link_worker_fences; DROP TABLE link_erased_work; ALTER TABLE link_device DROP COLUMN worker_erasure; DROP TABLE memory_erased_reads; DROP TABLE memory_derived_messages; DROP TABLE link_erased_frames; ALTER TABLE link_device DROP COLUMN projection_erasure; DROP TABLE task_memory_sources; DROP TABLE local_schedule_delivery; ALTER TABLE link_device DROP COLUMN schedule_notices; DROP TABLE schedules; DROP TABLE local_schedule_notices; DROP TABLE local_schedule_inputs; DROP TABLE link_pair_claims; DROP TABLE link_pair_tokens; DROP INDEX link_credential_digest; DELETE FROM _sqlx_migrations WHERE version IN (11,12,13,14,15,16,17); PRAGMA user_version=10;").await.unwrap();
     db.close().await.unwrap();
     let hub = Hub::new(
         Store::open(dir.path().join("server.db"), "owner")

@@ -334,6 +334,9 @@ impl<T: Serialize> Envelope<T> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerPayload {
+    EraseWork {
+        context: pulse_core::WorkerErasure,
+    },
     DerivedSnapshot {
         tasks: Vec<pulse_core::Task>,
         messages: Vec<ChatMessage>,
@@ -376,6 +379,12 @@ pub struct ChatMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientWire {
+    WorkerErasureReady,
+    ErasedData {
+        header: pulse_core::ErasedProjection,
+        operation_id: String,
+        source_id: String,
+    },
     ProjectionErasureReady,
     ScheduleReady,
     ComputerReady {
@@ -407,6 +416,10 @@ pub enum ClientWire {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerWire {
+    ErasedWork {
+        header: pulse_core::ErasedProjection,
+        context: Box<pulse_core::WorkerErasure>,
+    },
     ErasedProjection {
         header: pulse_core::ErasedProjection,
     },

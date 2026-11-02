@@ -449,11 +449,23 @@ async fn tool_source_failed_sql_erasure_denies_download_and_new_result_until_rec
 }
 
 #[tokio::test]
-async fn tool_source_schema15_restore_backfills_then_scrubs_untagged_evidence() {
+async fn tool_source_schema15_and16_restore_backfills_then_scrubs_evidence() {
     use sqlx::{Connection, Executor};
-    for invalidated in [false, true] {
+    for (schema, invalidated) in [(15, false), (15, true), (16, false), (16, true)] {
         let (root, hub, memory) = setup().await;
         let read = read(&hub).await;
+        // Both previous schemas retained command bodies and original frames.
+        let request: String = sqlx::query_scalar("SELECT request FROM link_reads WHERE id=?")
+            .bind(&read.id)
+            .fetch_one(&hub.core.application_pool())
+            .await
+            .unwrap();
+        let frames: Vec<(i64, String)> = sqlx::query_as("SELECT sequence,data FROM link_outbox WHERE device=? AND json_extract(data,'$.payload.operation_id')=?")
+            .bind(&read.worker)
+            .bind(&read.id)
+            .fetch_all(&hub.core.application_pool())
+            .await
+            .unwrap();
         let encoded = serde_json::to_string(&ReadOutcome::text(PRIVATE.into(), false)).unwrap();
         send(&hub, &read, 1, ReadOutcome::text(PRIVATE.into(), false)).await;
         if invalidated {
@@ -466,24 +478,46 @@ async fn tool_source_schema15_restore_backfills_then_scrubs_untagged_evidence() 
         ))
         .await
         .unwrap();
-        db.execute("DROP TABLE memory_erased_reads; DELETE FROM _sqlx_migrations WHERE version=16; PRAGMA user_version=15").await.unwrap();
-        sqlx::query("DELETE FROM memory_derived_messages WHERE id=?")
+        db.execute("DROP TABLE link_worker_fences; DROP TABLE link_erased_work; ALTER TABLE link_device DROP COLUMN worker_erasure").await.unwrap();
+        if schema == 15 {
+            db.execute("DROP TABLE memory_erased_reads; DELETE FROM _sqlx_migrations WHERE version IN (16,17); PRAGMA user_version=15").await.unwrap();
+        } else {
+            db.execute("ALTER TABLE memory_erased_reads DROP COLUMN context; DELETE FROM _sqlx_migrations WHERE version=17; PRAGMA user_version=16").await.unwrap();
+        }
+        if schema == 15 {
+            sqlx::query("DELETE FROM memory_derived_messages WHERE id=?")
+                .bind(&read.id)
+                .execute(&mut db)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE link_reads SET state='completed',result=? WHERE id=?")
+                .bind(encoded)
+                .bind(&read.id)
+                .execute(&mut db)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE link_chat SET body=? WHERE id=?")
+                .bind(PRIVATE)
+                .bind(&read.id)
+                .execute(&mut db)
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE link_reads SET request=? WHERE id=?")
+            .bind(request)
             .bind(&read.id)
             .execute(&mut db)
             .await
             .unwrap();
-        sqlx::query("UPDATE link_reads SET state='completed',result=? WHERE id=?")
-            .bind(encoded)
-            .bind(&read.id)
-            .execute(&mut db)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE link_chat SET body=? WHERE id=?")
-            .bind(PRIVATE)
-            .bind(&read.id)
-            .execute(&mut db)
-            .await
-            .unwrap();
+        for (sequence, data) in frames {
+            sqlx::query("UPDATE link_outbox SET data=? WHERE device=? AND sequence=?")
+                .bind(data)
+                .bind(&read.worker)
+                .bind(sequence)
+                .execute(&mut db)
+                .await
+                .unwrap();
+        }
         db.close().await.unwrap();
         let hub = Hub::new(Store::open(root.path().join("db"), "owner").await.unwrap());
         assert_eq!(
@@ -494,6 +528,22 @@ async fn tool_source_schema15_restore_backfills_then_scrubs_untagged_evidence() 
             forget(&hub, &memory).await;
         }
         assert_eq!(saved(&hub, &read).await, ("discarded".into(), None));
+        let context: String =
+            sqlx::query_scalar("SELECT context FROM memory_erased_reads WHERE id=?")
+                .bind(&read.id)
+                .fetch_one(&hub.core.application_pool())
+                .await
+                .unwrap();
+        let context: pulse_core::WorkerErasure = serde_json::from_str(&context).unwrap();
+        assert!(!context.is_effect);
+        assert!(context.read_header.is_some());
+        hub.worker_erasure_ready(&read.worker, read.epoch, pulse_link::now())
+            .await
+            .unwrap();
+        assert!(matches!(
+            hub.deliveries(&read.worker).await.unwrap()[0],
+            pulse_link::server::Delivery::ErasedWork(_)
+        ));
         let body: String = sqlx::query_scalar("SELECT body FROM link_chat WHERE id=?")
             .bind(&read.id)
             .fetch_one(&hub.core.application_pool())

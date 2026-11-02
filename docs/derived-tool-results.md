@@ -2,8 +2,8 @@
 
 這是 D06 的前置工作。模型仍不會收到記憶正文。
 Swift 只處理介面。來源核對、保存、清除與恢復由 Rust 處理。
-schema 為 16，remote workflow 為 `pulse-remote-16`。
-policy 為 `approved-effects-memory-fences-4`。
+schema 為 17，remote workflow 為 `pulse-remote-17`。
+policy 為 `approved-effects-memory-fences-5`。
 
 ## 保存與清除
 
@@ -17,7 +17,8 @@ policy 為 `approved-effects-memory-fences-4`。
 聊天副本沿用沒有正文的清除通知，保留原確認識別。
 批准卡片也會追蹤來源。清除後的卡片不再附帶提議或圖片資料。
 
-`memory_erased_reads` 只保存被清除的 read 識別。
+`memory_erased_reads` 保存被清除的 read 識別與沒有正文的工作來源資料。
+原派工、操作 intent 與地端 journal 的清除見 [地端工作清除](worker-source-erasure.md)。
 已知結果改為內部的 `discarded` 狀態，表示證據已丟棄。
 它不是成功回報，也不是可供任務驗收的證據。
 
@@ -48,6 +49,6 @@ schema 15 升級會補上舊工具聊天及批准卡片的來源關聯。
 
 ## 尚未完成
 
-操作帳本中的 intent、read 要求、executor 派工訊息與地端工作／結果／圖片副本仍須完整清除。
-在途工作停止、provider 送出核對、子任務來源繼承、關閉副本及正式還原也未完成。
+runtime 的 PNG 與瀏覽器 profile 檔案仍須完整清除。
+實際程序停止證據、provider 送出核對與在途取消、子任務來源繼承、關閉副本及正式還原也未完成。
 這個候選不開啟模型記憶，不代表 D06、D08、K15 或實機操作已接受。
