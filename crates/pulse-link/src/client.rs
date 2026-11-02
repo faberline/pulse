@@ -358,7 +358,11 @@ impl Device {
                 }
             }
             _=ticker.tick()=>{
+                if self.journal.role==ClientRole::Chat && credential.is_some() && link_rx.borrow().connected {
+                    self.journal.offer_desktop_notification(crate::now()).await?;
+                }
                 let mut state=self.journal.view().await?;state.server=self.config.server.to_string();state.paired=credential.is_some();state.connected=link_rx.borrow().connected;state.message=message.clone();
+                if !state.connected || !state.paired {state.desktop_notifications.current=None;}
                 state.input_failure=input_failure.clone();
                 if self.journal.role==ClientRole::Chat && state.connected && memory_sync.is_none() && Instant::now()>=memory_retry && self.journal.memory_dirty().await?.is_some() && let Some(credential)=credential.clone() {
                     let config=self.config.clone();let journal=self.journal.clone();memory_sync=Some(tokio::spawn(async move{crate::memory_chat::client::sync(&config,&journal,&credential).await}));
@@ -376,6 +380,16 @@ impl Device {
             done=&mut worker=>{done.map_err(|_|crate::Error::Rejected("local worker stopped".into()))??;return Err(crate::Error::Rejected("local worker stopped".into()));}
             command=commands.recv()=>{
                 match command {
+                    Some(NativeCommand::SetDesktopNotifications{enabled})=>{
+                        self.journal.set_desktop_notifications(enabled,crate::now()).await?;
+                    }
+                    Some(NativeCommand::DesktopNotificationResult{attempt_id,outcome})=>{
+                        match self.journal.desktop_notification_result(&attempt_id,outcome).await {
+                            Ok(())=>{},
+                            Err(crate::Error::Rejected(_))=>message="通知回覆無法核對；提醒仍保存在對話中。".into(),
+                            Err(e)=>return Err(e),
+                        }
+                    }
                     Some(NativeCommand::CancelComputerWindows{request_id})=>{
                         ensure(self.journal.role==ClientRole::Chat,"window picker requires Human chat")?;
                         if windows.as_ref().is_some_and(|s|s.request_id==request_id) {

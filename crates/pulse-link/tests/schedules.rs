@@ -438,6 +438,95 @@ async fn a_quiet_chat_drains_more_than_one_notice_batch_without_new_input() {
 }
 
 #[tokio::test]
+async fn rust_native_contract_offers_one_notification_and_persists_platform_receipt() {
+    let mut f = Fixture::new().await;
+    drop(f.journal.take());
+    drop(f.lock.take());
+    let vault = Arc::new(TestVault(
+        Mutex::new(Some(f.credential.clone())),
+        Mutex::new(None),
+    ));
+    let device = Device::open_chat(f.config.clone(), vault).await.unwrap();
+    let (tx, rx) = mpsc::channel(8);
+    let (state, mut view) = watch::channel(NativeState::default());
+    let running = tokio::spawn(device.run(rx, state));
+    let driver = tokio::spawn(pulse_link::schedules::run(f.hub.clone()));
+    tx.send(NativeCommand::SetDesktopNotifications { enabled: true })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if view.borrow().connected && view.borrow().desktop_notifications.enabled {
+                break;
+            }
+            view.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    tx.send(NativeCommand::Action {
+        source_id: uuid::Uuid::new_v4().to_string(),
+        action: HumanAction::Submit {
+            id: uuid::Uuid::new_v4().to_string(),
+            goal: "1秒後提醒我喝水".into(),
+        },
+    })
+    .await
+    .unwrap();
+    let offer = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Some(offer) = view.borrow().desktop_notifications.current.clone() {
+                break offer;
+            }
+            view.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(offer.body.contains("喝水"));
+    assert!(offer.body.contains("Asia/Taipei"));
+    tx.send(NativeCommand::DesktopNotificationResult {
+        attempt_id: offer.attempt_id.clone(),
+        outcome: DesktopNotificationOutcome::Submitted,
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if view.borrow().desktop_notifications.current.is_none() {
+                break;
+            }
+            view.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    tx.send(NativeCommand::Shutdown).await.unwrap();
+    running.await.unwrap().unwrap();
+    let (journal, _lock) = Journal::open_role(
+        &f.config.data_dir,
+        f.config.server.as_str(),
+        &f.config.repo,
+        ClientRole::Chat,
+    )
+    .await
+    .unwrap();
+    journal
+        .offer_desktop_notification(pulse_link::now())
+        .await
+        .unwrap();
+    let state = journal.view().await.unwrap();
+    assert!(state.desktop_notifications.enabled);
+    assert!(state.desktop_notifications.current.is_none());
+    assert_eq!(state.desktop_notifications.uncertain, 0);
+    assert_eq!(state.schedule_notices.len(), 1);
+    assert_eq!(f.count("SELECT count(*) FROM tasks").await, 0);
+    assert_eq!(f.count("SELECT count(*) FROM budget").await, 0);
+    driver.abort();
+    let _ = driver.await;
+}
+
+#[tokio::test]
 async fn timed_work_uses_existing_remote_executor_and_unconfigured_provider_cannot_claim_success() {
     let f = Fixture::new().await;
     let source = uuid::Uuid::new_v4().to_string();

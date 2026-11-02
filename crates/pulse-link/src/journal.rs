@@ -155,6 +155,11 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         let device: String = sqlx::query_scalar("SELECT value FROM local_meta WHERE key='device'")
             .fetch_one(&mut *tx)
             .await?;
+        // A previous frontend may have posted before its reply was lost. Do not
+        // repeat that effect after reopening, even if the OS banner was dismissed.
+        sqlx::query("UPDATE local_schedule_delivery SET state='unknown' WHERE state='offered'")
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         let journal = Self {
             core,
@@ -399,6 +404,7 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                         .bind(crate::now())
                         .execute(&mut *tx)
                         .await?;
+                    crate::desktop_notifications::received(&mut tx, notice, crate::now()).await?;
                 }
             }
             ServerPayload::SetStopped { stopped } => {
@@ -716,6 +722,7 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         }
         state.pending = self.pending().await?;
         if self.role == ClientRole::Chat {
+            state.desktop_notifications = self.desktop_notifications().await?;
             let rows:Vec<String>=sqlx::query_scalar("SELECT data FROM local_schedule_notices ORDER BY received_at DESC,id DESC LIMIT 20").fetch_all(&self.db).await?;
             for row in rows.into_iter().rev() {
                 let notice: pulse_core::ScheduleNotice = serde_json::from_str(&row)?;

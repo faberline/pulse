@@ -29,6 +29,10 @@ final class ChatModel: ObservableObject {
   @Published private(set) var pending: PendingSubmit?
   private var activeBinding: [String]?
   private var generation = UUID()
+  private let notificationPresenter = DesktopNotificationPresenter()
+  private var notificationAuthorization = UUID()
+  @Published private(set) var authorizingNotifications = false
+  @Published var notificationNotice = ""
   private lazy var transport = ChatTransport(
     onState: { [weak self] id, state in
       Task { @MainActor in self?.receive(state, generation: id) }
@@ -36,6 +40,7 @@ final class ChatModel: ObservableObject {
     onExit: { [weak self] id in
       Task { @MainActor in
         guard let self, self.generation == id else { return }
+        self.notificationPresenter.cancelPending()
         self.state.connected = false
         self.state.memories = []; self.state.memory_synced_at = nil
         self.notice = "對話連線已停止。草稿會保留，可在設定重新連線。"
@@ -69,6 +74,9 @@ final class ChatModel: ObservableObject {
       browserImages = [:]; browserImageDigests = [:]; loadingBrowserImages = []; requestedBrowserImages = []; failedBrowserImages = []; imageRequestInFlight = nil
     }
     activeBinding = settings.binding
+    notificationPresenter.reset()
+    notificationAuthorization = UUID()
+    authorizingNotifications = false
     state.memories = []; state.memory_synced_at = nil
     generation = UUID()
     transport.start(arguments: settings.arguments, generation: generation)
@@ -76,7 +84,26 @@ final class ChatModel: ObservableObject {
     notice = switched ? "連線已切換。舊連線的待送訊息須另行確認，草稿會保留。" : "正在連線…"
     if save { settings.save() }
   }
-  func stop() { transport.stop() }
+  func stop() { notificationPresenter.cancelPending(); transport.stop() }
+  func setDesktopNotifications(_ enabled: Bool) {
+    let request = UUID()
+    notificationAuthorization = request
+    guard enabled else {
+      authorizingNotifications = false
+      notificationPresenter.cancelPending()
+      send(["kind":"set_desktop_notifications", "enabled":false])
+      return
+    }
+    let currentGeneration = generation
+    authorizingNotifications = true
+    Task {
+      let allowed = await notificationPresenter.authorize()
+      guard generation == currentGeneration, notificationAuthorization == request else { return }
+      authorizingNotifications = false
+      notificationNotice = allowed ? "" : "通知尚未啟用。請在 macOS 系統設定核對 Pulse 通知權限。"
+      if allowed { send(["kind":"set_desktop_notifications", "enabled":true]) }
+    }
+  }
   @discardableResult
   private func send(_ command: [String: Any]) -> Bool {
     guard transport.send(command, generation: generation) else {
@@ -116,6 +143,12 @@ final class ChatModel: ObservableObject {
   func receive(_ value: NativeState, generation id: UUID) {
     guard generation == id else { return }
     state = value
+    if let offer = value.desktop_notifications?.current {
+      notificationPresenter.present(offer) { [weak self] outcome in
+        guard let self, self.generation == id else { return }
+        self.send(["kind":"desktop_notification_result", "attempt_id":offer.attempt_id, "outcome":outcome])
+      }
+    } else { notificationPresenter.cancelPending() }
     if value.connected && value.computer_failure == nil { notice = "" }
     else if !value.paired { notice = "請到設定完成對話框配對。" }
     browserDecisionPending = value.connected ? browserDecisionPending.filter { id, previous in value.messages.first(where: { $0.approval?.proposal.id == id })?.approval?.state == previous } : [:]

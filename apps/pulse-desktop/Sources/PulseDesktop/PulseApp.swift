@@ -207,6 +207,17 @@ struct SettingsView: View {
       }
       TextField("HTTPS 伺服器位址", text: $model.settings.server).textFieldStyle(.roundedBorder)
       Button("儲存並連線") { model.connect(save: true) }.disabled(!model.settings.valid)
+      Toggle("在這部 Mac 顯示提醒通知", isOn: Binding(
+        get: { model.state.desktop_notifications?.enabled == true },
+        set: { model.setDesktopNotifications($0) }
+      )).disabled(model.authorizingNotifications)
+      Text("只顯示啟用後到期、24 小時內的提醒。原文會保存在對話中。")
+        .font(.caption).foregroundStyle(.secondary)
+      if let notifications = model.state.desktop_notifications, notifications.uncertain > 0 || notifications.failed > 0 {
+        Text("有 \(notifications.uncertain) 筆通知待核對、\(notifications.failed) 筆未確認送出。請回對話查看提醒。")
+          .font(.caption).foregroundStyle(.secondary)
+      }
+      if !model.notificationNotice.isEmpty { Text(model.notificationNotice).font(.caption).foregroundStyle(.secondary) }
       Divider()
       Text("對話框配對").font(.headline)
       Text("配對碼只使用一次。密鑰由 Rust 傳輸程序存入 Keychain。").font(.caption).foregroundStyle(.secondary)

@@ -12,6 +12,7 @@ pub mod computer_runtime;
 pub mod computer_selection;
 mod computer_transport;
 mod conversation;
+pub mod desktop_notifications;
 pub mod executor;
 pub mod journal;
 mod operation_orchestration;

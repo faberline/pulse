@@ -480,6 +480,13 @@ pub(crate) fn secret() -> crate::Result<String> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeCommand {
+    SetDesktopNotifications {
+        enabled: bool,
+    },
+    DesktopNotificationResult {
+        attempt_id: String,
+        outcome: DesktopNotificationOutcome,
+    },
     ListComputerWindows {
         request_id: String,
     },
@@ -516,8 +523,42 @@ pub enum NativeCommand {
     },
     Shutdown,
 }
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopNotificationOutcome {
+    Submitted,
+    Failed,
+    Denied,
+}
+impl DesktopNotificationOutcome {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Submitted => "submitted",
+            Self::Failed => "failed",
+            Self::Denied => "denied",
+        }
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DesktopNotification {
+    pub attempt_id: String,
+    pub identifier: String,
+    pub title: String,
+    pub body: String,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DesktopNotifications {
+    pub enabled: bool,
+    pub current: Option<DesktopNotification>,
+    pub uncertain: u32,
+    pub failed: u32,
+}
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NativeState {
+    #[serde(default)]
+    pub desktop_notifications: DesktopNotifications,
     #[serde(default)]
     pub schedule_notices: Vec<pulse_core::ScheduleNotice>,
     #[serde(default)]

@@ -25,7 +25,7 @@ async fn schema_ten_upgrade_preserves_identity_and_seeds_existing_token_history(
     let mut db = sqlx::SqliteConnection::connect_with(&options)
         .await
         .unwrap();
-    db.execute("ALTER TABLE link_device DROP COLUMN schedule_notices; DROP TABLE schedules; DROP TABLE local_schedule_notices; DROP TABLE local_schedule_inputs; DROP TABLE link_pair_claims; DROP TABLE link_pair_tokens; DROP INDEX link_credential_digest; DELETE FROM _sqlx_migrations WHERE version IN (11,12); PRAGMA user_version=10;").await.unwrap();
+    db.execute("DROP TABLE local_schedule_delivery; ALTER TABLE link_device DROP COLUMN schedule_notices; DROP TABLE schedules; DROP TABLE local_schedule_notices; DROP TABLE local_schedule_inputs; DROP TABLE link_pair_claims; DROP TABLE link_pair_tokens; DROP INDEX link_credential_digest; DELETE FROM _sqlx_migrations WHERE version IN (11,12,13); PRAGMA user_version=10;").await.unwrap();
     db.close().await.unwrap();
     let hub = Hub::new(
         Store::open(dir.path().join("server.db"), "owner")
