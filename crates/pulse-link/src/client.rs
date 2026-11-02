@@ -111,46 +111,11 @@ pub fn validate_server(value: &str, dev: bool) -> Result<Url> {
     Ok(url)
 }
 
-/// Implementations must keep credentials outside application databases and IPC.
-pub trait Vault: Send + Sync + 'static {
-    fn load(&self, account: &str) -> Result<Option<Credential>>;
-    fn save(&self, account: &str, credential: &Credential) -> Result<()>;
-}
-pub struct NativeVault;
-#[cfg(target_os = "macos")]
-impl Vault for NativeVault {
-    fn load(&self, account: &str) -> Result<Option<Credential>> {
-        match security_framework::passwords::get_generic_password(
-            "com.faberline.pulse.device",
-            account,
-        ) {
-            Ok(bytes) => Ok(Some(parse(&bytes)?)),
-            Err(error) if error.code() == -25300 => Ok(None),
-            Err(_) => Err(crate::Error::Rejected("Keychain access failed".into())),
-        }
-    }
-    fn save(&self, account: &str, credential: &Credential) -> Result<()> {
-        security_framework::passwords::set_generic_password(
-            "com.faberline.pulse.device",
-            account,
-            &serde_json::to_vec(credential)?,
-        )
-        .map_err(|_| crate::Error::Rejected("Keychain save failed".into()))
-    }
-}
-#[cfg(not(target_os = "macos"))]
-impl Vault for NativeVault {
-    fn load(&self, _: &str) -> Result<Option<Credential>> {
-        Err(crate::Error::Rejected(
-            "native credential storage is only implemented on macOS".into(),
-        ))
-    }
-    fn save(&self, _: &str, _: &Credential) -> Result<()> {
-        Err(crate::Error::Rejected(
-            "native credential storage is only implemented on macOS".into(),
-        ))
-    }
-}
+mod vault;
+pub use vault::{NativeVault, Vault};
+mod pairing;
+#[cfg(test)]
+mod pairing_tests;
 
 #[derive(Clone, Default)]
 struct Lease {
@@ -232,9 +197,19 @@ impl Device {
         };
         let vault = self.vault.clone();
         let account = self.account.clone();
-        let mut credential = tokio::task::spawn_blocking(move || vault.load(&account))
-            .await
-            .map_err(|_| crate::Error::Rejected("Keychain worker failed".into()))??;
+        let (mut credential, pending) = tokio::task::spawn_blocking(move || {
+            Ok::<_, crate::Error>((vault.load(&account)?, vault.pending(&account)?))
+        })
+        .await
+        .map_err(|_| crate::Error::Rejected("Keychain worker failed".into()))??;
+        if let Some(claim) = &pending {
+            ensure(
+                claim.valid()
+                    && claim.device == self.journal.device
+                    && claim.role == self.journal.role,
+                "pending pairing identity mismatch",
+            )?;
+        }
         if let Some(value) = &credential {
             ensure(
                 value.device == self.journal.device
@@ -248,7 +223,8 @@ impl Device {
         }
         let (lease_tx, lease_rx) = watch::channel(Lease::default());
         let (link_tx, mut link_rx) = watch::channel(LinkState::default());
-        let mut connection = credential.clone().map(|c| {
+        let recovering = pending.is_some();
+        let mut connection = credential.clone().filter(|_| !recovering).map(|c| {
             tokio::spawn(reconnect(
                 self.config.clone(),
                 self.journal.clone(),
@@ -268,8 +244,22 @@ impl Device {
             }
         });
         let mut ticker = tokio::time::interval(Duration::from_millis(250));
-        let mut message = "配對後可在對話框提出需求。".to_string();
-        let mut pairing: Option<tokio::task::JoinHandle<Result<Credential>>> = None;
+        let mut message = if recovering {
+            "正在接續已保存的配對。"
+        } else {
+            "配對後可在對話框提出需求。"
+        }
+        .to_string();
+        let mut pairing: Option<tokio::task::JoinHandle<Result<Credential>>> =
+            pending.map(|claim| {
+                tokio::spawn(pairing::recover(
+                    self.config.clone(),
+                    self.journal.clone(),
+                    self.vault.clone(),
+                    self.account.clone(),
+                    claim,
+                ))
+            });
         let mut artifact_download: Option<
             tokio::task::JoinHandle<Result<crate::artifact::LocalArtifact>>,
         > = None;
@@ -357,13 +347,13 @@ impl Device {
                         connection=Some(tokio::spawn(reconnect(self.config.clone(),self.journal.clone(),value.clone(),lease_tx.clone(),link_tx.clone(),self.executor.clone())));
                         credential=Some(value);message="配對完成。密鑰已存入 Keychain。".into();
                     }
-                    _=>{
+                    failure=>{
                         if let Some(old)=credential.as_ref() {
                             if self.journal.bind_memory_credential(old).await? {
                                 connection=Some(tokio::spawn(reconnect(self.config.clone(),self.journal.clone(),old.clone(),lease_tx.clone(),link_tx.clone(),self.executor.clone())));
                             } else {credential=None;}
                         }
-                        message="配對未完成。請核對伺服器、一次性配對碼及 Keychain 權限。若已兌換但尚未存入 Keychain，須由操作員撤銷再重試。".into();
+                        message=if matches!(failure,Ok(Err(crate::Error::PairingRejected))) {"配對已拒絕。請核對配對碼；已有使用中身分時，須先由操作員撤銷。"}else{"配對尚未完成。請檢查網路與 Keychain 權限。已保存的嘗試會在重開後核對，也可用同一配對碼重試。"}.into();
                     }
                 }
             }
@@ -454,15 +444,8 @@ impl Device {
                         if let Some(task)=connection.take(){task.abort();let _=task.await;}
                         if let Some(task)=memory_sync.take(){task.abort();let _=task.await;}
                         link_tx.send_replace(LinkState::default());
-                        let request=PairRequest{device:self.journal.device.clone(),code,role:self.journal.role};
-                        let config=self.config.clone();let vault=self.vault.clone();let account=self.account.clone();let journal=self.journal.clone();
-                        pairing=Some(tokio::spawn(async move {
-                            let value=redeem(&config,&request).await?;
-                            ensure(value.device==request.device&&value.token.len()==64&&value.role==request.role,"pair response identity")?;
-                            journal.prepare_memory_pairing(&value).await?;
-                            let copy=value.clone();tokio::task::spawn_blocking(move||vault.save(&account,&copy)).await.map_err(|_|crate::Error::Rejected("Keychain worker failed".into()))??;
-                            Ok(value)
-                        }));message="正在配對。本機停止工具仍可用。".into();
+                        pairing=Some(tokio::spawn(pairing::begin(self.config.clone(),self.journal.clone(),self.vault.clone(),self.account.clone(),code)));
+                        message="正在配對。本機停止工具仍可用。".into();
                     }
                 }
             }
@@ -497,35 +480,6 @@ impl Device {
         let _ = worker.await;
         result
     }
-}
-async fn redeem(config: &Config, request: &PairRequest) -> Result<Credential> {
-    ensure(
-        request.code.len() == 64 && request.code.bytes().all(|b| b.is_ascii_hexdigit()),
-        "invalid pairing code",
-    )?;
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|_| crate::Error::Rejected("HTTP setup failed".into()))?;
-    let mut response = client
-        .post(config.server.join("v1/device-pairings/redeem")?)
-        .json(request)
-        .send()
-        .await
-        .map_err(|_| crate::Error::Rejected("pair request failed".into()))?;
-    ensure(response.status().is_success(), "pair rejected")?;
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| crate::Error::Rejected("pair response failed".into()))?
-    {
-        ensure(bytes.len() + chunk.len() <= 4096, "pair response size")?;
-        bytes.extend_from_slice(&chunk);
-    }
-    parse(&bytes)
 }
 async fn reconnect(
     config: Config,

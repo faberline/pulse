@@ -428,6 +428,47 @@ pub struct Credential {
     pub role: ClientRole,
 }
 
+/// Secret pending claim. Keep it in the vault, never a journal or UI state.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairClaim {
+    pub code: String,
+    pub attempt_id: String,
+    pub device: String,
+    pub role: ClientRole,
+    pub token: String,
+}
+impl PairClaim {
+    pub fn valid(&self) -> bool {
+        uuid::Uuid::parse_str(&self.device).is_ok_and(|v| v.to_string() == self.device)
+            && uuid::Uuid::parse_str(&self.attempt_id)
+                .is_ok_and(|v| v.to_string() == self.attempt_id)
+            && [&self.code, &self.token]
+                .iter()
+                .all(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+    }
+    pub fn credential(&self) -> Credential {
+        Credential {
+            device: self.device.clone(),
+            role: self.role,
+            token: self.token.clone(),
+        }
+    }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairIdentity {
+    pub device: String,
+    pub role: ClientRole,
+}
+
+pub(crate) fn secret() -> crate::Result<String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|_| crate::Error::Rejected("randomness unavailable".into()))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeCommand {

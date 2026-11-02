@@ -15,6 +15,7 @@ mod conversation;
 pub mod executor;
 pub mod journal;
 mod operation_orchestration;
+mod pairing;
 pub mod protocol;
 pub mod provider;
 pub mod remote;
@@ -43,6 +44,8 @@ pub enum Error {
     CredentialRejected,
     #[error("credential rejected; local memory cleanup failed: {0}")]
     CredentialCleanup(#[source] Box<Error>),
+    #[error("pairing claim rejected")]
+    PairingRejected,
 }
 pub type Result<T> = std::result::Result<T, Error>;
 pub(crate) fn ensure(ok: bool, why: &str) -> Result<()> {

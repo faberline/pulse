@@ -94,7 +94,7 @@ v0.5 以前，真實寫入 adapter 不存在或停用。v0.5 必測模擬寫入�
 
 ## K06：HTTP、WSS 與桌面程序介面
 
-以下是 v1 語意介面，尚未實作。
+以下保留 v1 語意介面規格。已實作的配對入口見 [配對恢復候選](pairing-recovery.md)。其他介面不因列在此表而視為已交付。
 
 | 介面 | 行為 |
 |---|---|
@@ -102,6 +102,8 @@ v0.5 以前，真實寫入 adapter 不存在或停用。v0.5 必測模擬寫入�
 | GET /v1/tasks、GET /v1/tasks/{id} | 游標分頁或單項目前狀態、revision、證據與等待原因；不啟動新工作 |
 | GET /v1/timeline | 按游標讀對話與任務投影，標明最後同步位置 |
 | POST /v1/device-pairings/redeem | 兌換單次配對碼；不可用此介面產生新配對碼 |
+| POST /v1/device-pairings/claim | 新版 Rust 先保存候選密鑰，再以同一 claim 重試；不復活已撤銷身分或延長碼期限 |
+| GET /v1/device-pairings/identity | 以候選 bearer token 核對目前 device／role；不改 lease 或 epoch |
 | GET /v1/devices/connect | 經認證升級為 WSS；握手交換 schema version、device ID、capabilities 與 resume cursors |
 | GET /health/live、GET /health/ready | 無模型檢查；公開回應不含任務或身份；詳細健康資料須認證 |
 

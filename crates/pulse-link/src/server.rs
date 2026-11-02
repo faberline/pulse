@@ -116,53 +116,6 @@ impl Hub {
             .await?;
         Ok(code)
     }
-    pub async fn redeem(&self, request: PairRequest, time: i64) -> Result<Credential> {
-        ensure(
-            uuid::Uuid::parse_str(&request.device).is_ok() && request.code.len() == 64,
-            "invalid pairing",
-        )?;
-        let token = secret()?;
-        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
-        let active: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM link_device WHERE revoked=0 AND role=?")
-                .bind(request.role.as_str())
-                .fetch_one(&mut *tx)
-                .await?;
-        ensure(
-            active == 0,
-            "an active device already exists; operator revocation is required",
-        )?;
-        let changed = sqlx::query(
-            "UPDATE link_pairings SET used=1 WHERE digest=? AND used=0 AND expires>? AND role=?",
-        )
-        .bind(hash_bytes(request.code.as_bytes()))
-        .bind(time)
-        .bind(request.role.as_str())
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-        ensure(changed == 1, "pairing expired, invalid or already used")?;
-        // A stable client ID never changes roles, including after revocation.
-        let old_role: Option<String> =
-            sqlx::query_scalar("SELECT role FROM link_device WHERE id=?")
-                .bind(&request.device)
-                .fetch_optional(&mut *tx)
-                .await?;
-        ensure(
-            old_role
-                .as_deref()
-                .is_none_or(|role| role == request.role.as_str()),
-            "client role is immutable",
-        )?;
-        sqlx::query("INSERT INTO link_device(id,token_digest,role) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET token_digest=excluded.token_digest,revoked=0,epoch=epoch+1,lease_until=0")
-            .bind(&request.device).bind(hash_bytes(token.as_bytes())).bind(request.role.as_str()).execute(&mut *tx).await?;
-        tx.commit().await?;
-        Ok(Credential {
-            device: request.device,
-            token,
-            role: request.role,
-        })
-    }
     pub async fn authenticate(&self, token: &str) -> Result<String> {
         ensure(token.len() == 64, "invalid device credential")?;
         sqlx::query_scalar("SELECT id FROM link_device WHERE token_digest=? AND revoked=0")
@@ -1068,6 +1021,11 @@ pub fn router(hub: Hub) -> Router {
     Router::new()
         .route("/health/live", get(|| async { "live" }))
         .route("/v1/device-pairings/redeem", post(pair))
+        .route("/v1/device-pairings/claim", post(crate::pairing::claim))
+        .route(
+            "/v1/device-pairings/identity",
+            get(crate::pairing::identity),
+        )
         .route("/v1/devices/connect", get(upgrade))
         .route("/v1/tasks", get(tasks))
         .route(
@@ -1249,12 +1207,6 @@ async fn send(socket: &mut WebSocket, message: &ServerWire) -> Result<()> {
     .await
     .map_err(|_| crate::Error::Rejected("socket write timeout".into()))?
     .map_err(|_| crate::Error::Rejected("socket write failed".into()))
-}
-fn secret() -> Result<String> {
-    let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes)
-        .map_err(|_| crate::Error::Rejected("secure randomness unavailable".into()))?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 fn short(s: &str, limit: usize) -> String {
     let mut end = s.len().min(limit);

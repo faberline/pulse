@@ -848,13 +848,27 @@ async fn legacy_memory_text_never_falls_through_to_a_task_or_echoed_history() {
 }
 
 #[derive(Default)]
-struct MemoryVault(std::sync::Mutex<Option<Credential>>);
+struct MemoryVault(
+    std::sync::Mutex<Option<Credential>>,
+    std::sync::Mutex<Option<PairClaim>>,
+);
 impl crate::client::Vault for MemoryVault {
     fn load(&self, _: &str) -> crate::Result<Option<Credential>> {
         Ok(self.0.lock().unwrap().clone())
     }
     fn save(&self, _: &str, value: &Credential) -> crate::Result<()> {
         *self.0.lock().unwrap() = Some(value.clone());
+        Ok(())
+    }
+    fn pending(&self, _: &str) -> crate::Result<Option<PairClaim>> {
+        Ok(self.1.lock().unwrap().clone())
+    }
+    fn save_pending(&self, _: &str, claim: &PairClaim) -> crate::Result<()> {
+        *self.1.lock().unwrap() = Some(claim.clone());
+        Ok(())
+    }
+    fn clear_pending(&self, _: &str) -> crate::Result<()> {
+        *self.1.lock().unwrap() = None;
         Ok(())
     }
 }

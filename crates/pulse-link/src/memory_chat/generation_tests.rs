@@ -409,7 +409,10 @@ async fn native_restart_finishes_a_pair_whose_credential_was_already_saved() {
         .unwrap();
     journal.prepare_memory_pairing(&value).await.unwrap();
     // Match the real vault-save -> process-exit boundary. Activation is omitted.
-    let vault = Arc::new(MemoryVault(std::sync::Mutex::new(Some(value))));
+    let vault = Arc::new(MemoryVault(
+        std::sync::Mutex::new(Some(value)),
+        std::sync::Mutex::new(None),
+    ));
     journal.db.close().await;
     drop(journal);
     drop(lock);

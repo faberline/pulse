@@ -702,13 +702,24 @@ async fn read_policy_rejects_escape_and_executes_no_shell() {
 }
 
 #[derive(Default)]
-struct MemoryVault(Mutex<Option<Credential>>);
+struct MemoryVault(Mutex<Option<Credential>>, Mutex<Option<PairClaim>>);
 impl Vault for MemoryVault {
     fn load(&self, _: &str) -> pulse_link::Result<Option<Credential>> {
         Ok(self.0.lock().unwrap().clone())
     }
     fn save(&self, _: &str, credential: &Credential) -> pulse_link::Result<()> {
         *self.0.lock().unwrap() = Some(credential.clone());
+        Ok(())
+    }
+    fn pending(&self, _: &str) -> pulse_link::Result<Option<PairClaim>> {
+        Ok(self.1.lock().unwrap().clone())
+    }
+    fn save_pending(&self, _: &str, claim: &PairClaim) -> pulse_link::Result<()> {
+        *self.1.lock().unwrap() = Some(claim.clone());
+        Ok(())
+    }
+    fn clear_pending(&self, _: &str) -> pulse_link::Result<()> {
+        *self.1.lock().unwrap() = None;
         Ok(())
     }
 }
@@ -1021,11 +1032,17 @@ async fn server_restart_fences_pending_work_and_late_result_is_only_evidence() {
 async fn pairing_timeout_does_not_block_native_stop() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let signal = entered.clone();
     let app = axum::Router::new().route(
-        "/v1/device-pairings/redeem",
-        axum::routing::post(|| async {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            axum::http::StatusCode::FORBIDDEN
+        "/v1/device-pairings/identity",
+        axum::routing::get(move || {
+            let signal = signal.clone();
+            async move {
+                signal.notify_one();
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                axum::http::StatusCode::SERVICE_UNAVAILABLE
+            }
         }),
     );
     let server = tokio::spawn(axum::serve(listener, app).into_future());
@@ -1052,6 +1069,9 @@ async fn pairing_timeout_does_not_block_native_stop() {
     })
     .await
     .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("pairing request must be pending before the stop command");
     tx.send(NativeCommand::KillSwitch { stopped: true })
         .await
         .unwrap();
