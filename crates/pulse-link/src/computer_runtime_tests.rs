@@ -4,10 +4,15 @@ use std::{os::unix::fs::PermissionsExt, time::Instant};
 
 const FIXTURE: &str = r#"#!/usr/bin/python3
 import base64,hashlib,json,os,pathlib,sys,time
+if sys.argv[1:]==['--fixture-ready']:sys.exit(0)
 script=pathlib.Path(__file__)
 mode=script.stem
-script.with_suffix('.stage').write_text(mode)
-script.with_suffix('.pid').write_text(str(os.getpid()))
+def publish(path,text):
+ staging=path.with_name(path.name+'.'+str(os.getpid())+'.tmp')
+ staging.write_text(text)
+ os.replace(staging,path)
+publish(script.with_suffix('.stage'),mode)
+publish(script.with_suffix('.pid'),str(os.getpid()))
 # Apple's /usr/bin/python3 launcher adds SDK variables even after env -i.
 assert set(os.environ)<= {'PATH','HOME','LC_CTYPE','CPATH','LIBRARY_PATH','MANPATH','SDKROOT','__CF_USER_TEXT_ENCODING','PULSE_COMPUTER_BUNDLE_ID','PULSE_COMPUTER_PID','PULSE_COMPUTER_WINDOW_ID'}
 if 'PULSE_COMPUTER_PID' in os.environ:
@@ -26,7 +31,7 @@ if sys.argv[1:]==['--list']:
  if mode=='list-error':response['error']='permissions_required'
  if mode=='list-version':response['version']='old-helper'
  if mode=='list-hang':time.sleep(60)
- print(json.dumps(response));script.with_suffix('.done').write_text('response constructed');sys.exit(0)
+ print(json.dumps(response));publish(script.with_suffix('.done'),'response constructed');sys.exit(0)
 if mode=='version':response['version']='unknown-helper'
 if mode=='extra':response['grant']='forged'
 if sys.argv[1:]!=['--status']:
@@ -36,7 +41,7 @@ if sys.argv[1:]!=['--status']:
   if mode=='action-rejected':
    response['action']['state']='not_executed';response['error']='target_changed';print(json.dumps(response));sys.exit(0)
   counter=script.with_suffix('.effects')
-  counter.write_text(str(int(counter.read_text())+1 if counter.exists() else 1))
+  publish(counter,str(int(counter.read_text())+1 if counter.exists() else 1))
   if mode=='action-hang':time.sleep(60)
   if mode=='action-unknown':response['action']['state']='unknown';response['error']='accessibility_unavailable';print(json.dumps(response));sys.exit(0)
   if mode=='action-binding':response['action']['binding']['task_id']='other'
@@ -48,7 +53,7 @@ if sys.argv[1:]!=['--status']:
   response['selection']={'target':{'bundle_id':args['--bundle-id'],'pid':int(args['--pid']),'window_id':int(args['--window-id'])},'process_launched_at':int(request['expected_process_launched_at'])}
   if mode=='probe-other':response['selection']['target']['window_id']+=1
   if mode=='permission':response['permissions']['accessibility']=False
-  print(json.dumps(response));script.with_suffix('.done').write_text('probe constructed');sys.exit(0)
+  print(json.dumps(response));publish(script.with_suffix('.done'),'probe constructed');sys.exit(0)
  cache=pathlib.Path(args['--cache'])
  png=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=')
  digest=hashlib.sha256(png).hexdigest()
@@ -79,14 +84,48 @@ if sys.argv[1:]!=['--status']:
  if mode!='no-observation':response['observation']=observation
  if mode=='error':response['error']='permissions_required'
 print(json.dumps(response))
-script.with_suffix('.done').write_text('response constructed')
+publish(script.with_suffix('.done'),'response constructed')
 "#;
+
+pub(crate) fn publish_helper(helper: &Path, script: &str) {
+    let staging = tempfile::tempdir_in(helper.parent().unwrap()).unwrap();
+    let source = staging.path().join("source");
+    let image = staging.path().join("image");
+    std::fs::write(&source, script).unwrap();
+    // A concurrent fork can briefly inherit a writable descriptor, even with
+    // CLOEXEC. Create the executable inode in a separate, joined process so no
+    // test thread can inherit its writer and cause Linux ETXTBSY at spawn.
+    let status = std::process::Command::new("/bin/cp")
+        .arg(&source)
+        .arg(&image)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // Existing children keep their old inode; the next spawn sees a complete
+    // executable with no open writer. Never truncate a running helper in place.
+    std::fs::rename(image, helper).unwrap();
+    // macOS can defer the first launch of each newly published script. Finish
+    // fixture setup before the timed request. This mode emits no request/PID/
+    // effect marker, so all real calls still have to prove they actually started.
+    #[cfg(target_os = "macos")]
+    {
+        let ready = std::process::Command::new(helper)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .arg("--fixture-ready")
+            .output()
+            .unwrap();
+        assert!(ready.status.success());
+        assert!(ready.stdout.is_empty() && ready.stderr.is_empty());
+    }
+}
 
 pub(crate) fn fixture(mode: &str) -> (tempfile::TempDir, ComputerRuntime) {
     let dir = tempfile::tempdir().unwrap();
     let helper = dir.path().join(format!("{mode}.py"));
-    // Resolve Apple's SDK launcher outside the measured native-child deadlines. The
-    // actual Python runtime runs the fixture; production still uses its fixed helper.
+    // Resolve Apple's SDK launcher outside the measured native-child deadlines.
+    // Production runs a Rust binary and has no Python launcher/import cost.
     #[cfg(target_os = "macos")]
     let script = {
         static PYTHON: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -103,9 +142,8 @@ pub(crate) fn fixture(mode: &str) -> (tempfile::TempDir, ComputerRuntime) {
         FIXTURE.replacen("#!/usr/bin/python3", &format!("#!{python}"), 1)
     };
     #[cfg(not(target_os = "macos"))]
-    let script = FIXTURE;
-    std::fs::write(&helper, script).unwrap();
-    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let script = FIXTURE.to_owned();
+    publish_helper(&helper, &script);
     let target = ComputerTarget {
         bundle_id: "com.faberline.PulseComputerFixture".into(),
         pid: 42,
@@ -124,6 +162,31 @@ fn binding() -> ComputerBinding {
         epoch: 2,
     }
 }
+
+#[tokio::test]
+async fn fixture_replacement_can_spawn_while_the_old_inode_has_a_writer() {
+    use std::os::unix::fs::MetadataExt;
+
+    let (_root, runtime) = fixture("version");
+    let mut old = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&runtime.helper)
+        .unwrap();
+    let original = std::fs::read_to_string(&runtime.helper).unwrap();
+    let replacement = original.replace("mode=script.stem", "mode='good'");
+    publish_helper(&runtime.helper, &replacement);
+    assert_ne!(
+        old.metadata().unwrap().ino(),
+        std::fs::metadata(&runtime.helper).unwrap().ino()
+    );
+    let mut retained = String::new();
+    std::io::Read::read_to_string(&mut old, &mut retained).unwrap();
+    assert_eq!(retained, original);
+    assert!(runtime.permissions().await.unwrap().can_observe());
+    assert_reaped(&runtime).await;
+}
+
 pub(crate) async fn assert_reaped(runtime: &ComputerRuntime) {
     let pid = std::fs::read_to_string(runtime.helper.with_extension("pid"))
         .unwrap()
@@ -357,10 +420,24 @@ async fn native_output_exit_and_timeout_are_bounded_and_reaped() {
         let (_dir, mut runtime) = fixture(mode);
         runtime.timeout = Duration::from_millis(1500);
         let start = Instant::now();
-        assert!(runtime.permissions().await.is_err(), "{mode}");
+        let result = runtime.permissions().await;
+        let expected = match mode {
+            "oversize" => "native output limit",
+            "stderr" => "native diagnostics limit",
+            "exit" => "native helper exited without a valid result",
+            "invalid" => "invalid native helper response",
+            "hang" => "native helper timed out",
+            _ => unreachable!(),
+        };
+        assert!(
+            matches!(&result, Err(crate::Error::Rejected(reason)) if reason == expected),
+            "{mode}: {result:?}"
+        );
         assert!(start.elapsed() < Duration::from_secs(4));
         assert_eq!(
-            std::fs::read_to_string(runtime.helper.with_extension("stage")).unwrap(),
+            std::fs::read_to_string(runtime.helper.with_extension("stage")).unwrap_or_else(
+                |error| panic!("{mode} fixture stage missing: {error}; {result:?}")
+            ),
             mode
         );
         assert_reaped(&runtime).await;

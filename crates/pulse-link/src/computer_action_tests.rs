@@ -1,6 +1,6 @@
 //! Mock native children verify dispatch boundaries. They are not actual AX effects.
 use super::*;
-use crate::computer_runtime::tests::{assert_reaped, fixture};
+use crate::computer_runtime::tests::{assert_reaped, fixture, publish_helper};
 use pulse_core::{ComputerEffect, ComputerPermit, OperationProposal, Token};
 use serde_json::json;
 
@@ -189,11 +189,10 @@ async fn native_rejection_is_distinct_from_unknown_and_neither_replays() {
         .await;
         if mode == "action-bad-image" {
             let code = std::fs::read_to_string(&runtime.helper).unwrap();
-            std::fs::write(
+            publish_helper(
                 &runtime.helper,
-                code.replace("mode=script.stem", "mode='action-bad-image'"),
-            )
-            .unwrap();
+                &code.replace("mode=script.stem", "mode='action-bad-image'"),
+            );
         }
         let result = runtime.act(&binding, &grant).await;
         if mode == "action-rejected" {
