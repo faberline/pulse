@@ -464,6 +464,12 @@ pub enum NativeCommand {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NativeState {
     #[serde(default)]
+    pub memories: Vec<pulse_core::Memory>,
+    #[serde(default)]
+    pub memory_synced_at: Option<i64>,
+    #[serde(default)]
+    pub input_failure: Option<String>,
+    #[serde(default)]
     pub computer_selections: Vec<crate::computer_selection::SelectionStatus>,
     #[serde(default)]
     pub computer_selecting: Option<String>,

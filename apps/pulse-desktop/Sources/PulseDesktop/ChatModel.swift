@@ -143,7 +143,7 @@ final class ChatModel: ObservableObject {
         draft = remaining
         if selectedComputer?.selection == pending.computer { selectedComputer = nil }
         self.pending = nil
-      } else if value.computer_failure == pending.sourceID {
+      } else if value.computer_failure == pending.sourceID || value.input_failure == pending.sourceID {
         self.pending = nil; notice = value.message
       } else if pending.binding == activeBinding {
         // A restart retries the original IDs, never a second task.

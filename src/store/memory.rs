@@ -94,7 +94,7 @@ impl MemoryGuard {
                 }
                 Err(std::fs::TryLockError::WouldBlock) => {
                     if started.elapsed() >= std::time::Duration::from_millis(250) {
-                        return Err(Error::Rejected("memory storage is busy".into()));
+                        return Err(Error::Busy);
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
@@ -418,6 +418,10 @@ impl Store {
 
     /// Bounded live projection. Expired and redacted source text is never returned.
     pub async fn list_memories(&self, now: i64) -> Result<Vec<Memory>> {
+        Ok(self.memory_view(now).await?.memories)
+    }
+
+    pub async fn memory_view(&self, now: i64) -> Result<crate::MemoryView> {
         require(now >= 0, "invalid memory clock")?;
         let _lease = self.memory_guard.lease().await?;
         let mut restrictions = self
@@ -443,19 +447,27 @@ impl Store {
                 expires_at: row.get("expires_at"),
             })
             .collect();
+        let redacted_sources = sqlx::query_scalar("SELECT source_id FROM memory_events WHERE fingerprint IS NULL ORDER BY source_id LIMIT 10100")
+            .fetch_all(&mut *tx).await?;
         tx.commit().await?;
         self.checkpoint_memory_redaction().await?;
-        Ok(memories)
+        Ok(crate::MemoryView {
+            keeper: restrictions.keeper,
+            epoch: restrictions.epoch,
+            memories,
+            redacted_sources,
+        })
     }
 
     async fn checkpoint_memory_redaction(&self) -> Result<()> {
         let row = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
             .fetch_one(&self.pool)
             .await?;
-        require(
-            row.get::<i64, _>(0) == 0,
-            "memory redaction checkpoint is busy; retry required",
-        )
+        if row.get::<i64, _>(0) == 0 {
+            Ok(())
+        } else {
+            Err(Error::Busy)
+        }
     }
 
     async fn expire_memory_in(

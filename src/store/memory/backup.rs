@@ -297,7 +297,8 @@ impl Store {
         require(
             bytes.starts_with(b"SQLite format 3\0")
                 && bytes.len() >= 100
-                && u32::from_be_bytes(bytes[60..64].try_into().unwrap()) == 6,
+                && u32::from_be_bytes(bytes[60..64].try_into().unwrap())
+                    == crate::store::SCHEMA as u32,
             "backup schema incompatible",
         )?;
         // SQLite header offset60 is user_version. Quarantine BEFORE any plaintext

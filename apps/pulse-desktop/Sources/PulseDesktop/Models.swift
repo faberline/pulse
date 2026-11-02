@@ -52,7 +52,7 @@ struct PulseTask: Decodable, Identifiable, Sendable {
 }
 struct NativeState: Decodable, Sendable {
   enum CodingKeys: String, CodingKey {
-    case server, connected, stopped, paired, message, pending, tasks, messages, artifacts, artifact_loading, artifact_failure, computer_selecting, computer_failure, computer_selections
+    case server, connected, stopped, paired, message, pending, tasks, messages, artifacts, artifact_loading, artifact_failure, computer_selecting, computer_failure, computer_selections, memories, memory_synced_at, input_failure
     case localConnected = "local_connected"
     case syncedAt = "synced_at"
   }
@@ -66,6 +66,9 @@ struct NativeState: Decodable, Sendable {
   var syncedAt: Int64?
   var tasks: [PulseTask] = []
   var messages: [ChatMessage] = []
+  var memories: [PulseMemory]?
+  var memory_synced_at: Int64?
+  var input_failure: String?
   var artifacts: [LocalBrowserArtifact]?
   var artifact_loading: String?
   var artifact_failure: String?
@@ -74,6 +77,17 @@ struct NativeState: Decodable, Sendable {
   var computer_selections: [ComputerSelectionStatus]?
 }
 struct ComputerSelectionStatus: Decodable, Sendable {let source_id: String;let task_id: String;let revision: String;let state: String}
+struct PulseMemory: Decodable, Identifiable, Sendable {
+  let id: String
+  let revision: UInt64
+  let label: String
+  let body: String
+  let source_id: String
+  let source_at: Int64
+  let expires_at: Int64
+  var controlName: String { (try? JSONEncoder().encode(label)).flatMap {String(data: $0, encoding: .utf8)} ?? "" }
+  func live(at now: Int64) -> Bool {source_at >= 0 && revision > 0 && source_at <= now && expires_at > now && expires_at - source_at == 90 * 24 * 60 * 60 * 1000}
+}
 struct ConnectionSettings: Codable, Equatable {
   var server = ""
   var dataDir = FileManager.default.homeDirectoryForCurrentUser
@@ -139,8 +153,7 @@ struct PendingSubmit {
       return ["kind":"submit_computer", "source_id":sourceID,"id":taskID,"goal":text,
         "selection":computer.wireValue,"selected_at":selectedAt]
     }
-    return
-    [
+    return [
       "kind": "action", "source_id": sourceID,
       "action": ["kind": "submit", "id": taskID, "goal": text],
     ]

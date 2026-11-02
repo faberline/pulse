@@ -17,6 +17,24 @@ pub struct Memory {
     pub expires_at: i64,
 }
 
+impl std::fmt::Debug for Memory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Memory")
+            .field("id", &self.id)
+            .field("revision", &self.revision)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryView {
+    pub keeper: String,
+    pub epoch: u64,
+    pub memories: Vec<Memory>,
+    pub redacted_sources: Vec<String>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MemoryCommand {

@@ -78,6 +78,27 @@ struct ChatView: View {
                       in: RoundedRectangle(cornerRadius: 12))
                   }.id(message.id)
                 }
+                if let memories = model.state.memories, model.state.memory_synced_at != nil {
+                  VStack(alignment: .leading, spacing: 12) {
+                    Text(model.state.connected ? "目前記憶" : "記憶快取・離線時可能已變更").font(.headline)
+                    if memories.isEmpty {Text("目前沒有有效記憶。").foregroundStyle(.secondary)}
+                    ForEach(memories.filter { $0.live(at: Int64(Date().timeIntervalSince1970 * 1000)) }) { memory in
+                      VStack(alignment: .leading, spacing: 5) {
+                        Text(memory.label).font(.headline)
+                        Text(memory.body).textSelection(.enabled)
+                        Text("來源：你的明確要求・\(Date(timeIntervalSince1970: Double(memory.source_at) / 1000).formatted(date: .abbreviated, time: .shortened))")
+                          .font(.caption).foregroundStyle(.secondary)
+                        Text("到期：\(Date(timeIntervalSince1970: Double(memory.expires_at) / 1000).formatted(date: .abbreviated, time: .omitted))")
+                          .font(.caption).foregroundStyle(.secondary)
+                        HStack {
+                          Button("修正") {model.draft = "更正記憶 \(memory.controlName)："}
+                          Button("忘記") {model.draft = "忘記記憶 \(memory.controlName)"}
+                        }.disabled(!model.draft.isEmpty || model.pending != nil || memory.controlName.isEmpty)
+                      }
+                    }
+                  }.padding(14).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+                }
               }.padding()
             }.onChange(of: model.state.messages.last?.id) { _, id in
               if let id { reader.scrollTo(id, anchor: .bottom) }

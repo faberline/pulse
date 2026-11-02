@@ -152,15 +152,16 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
             .fetch_one(&mut *tx)
             .await?;
         tx.commit().await?;
-        Ok((
-            Self {
-                db,
-                device,
-                server: server.into(),
-                role,
-            },
-            DeviceLock(lock),
-        ))
+        let journal = Self {
+            db,
+            device,
+            server: server.into(),
+            role,
+        };
+        if role == ClientRole::Chat {
+            journal.reset_memory_session().await?;
+        }
+        Ok((journal, DeviceLock(lock)))
     }
     pub async fn cursor(&self) -> Result<u64> {
         let s: String = sqlx::query_scalar("SELECT value FROM local_meta WHERE key='cursor'")
@@ -233,6 +234,11 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         Ok(())
     }
     pub async fn action(&self, source_id: &str, action: HumanAction) -> Result<()> {
+        if let HumanAction::Submit { goal, .. } | HumanAction::SubmitComputer { goal, .. } = &action
+            && self.memory_control(source_id, goal, crate::now()).await?
+        {
+            return Ok(());
+        }
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
         if let HumanAction::Submit { goal, .. } | HumanAction::SubmitComputer { goal, .. } = &action
         {
@@ -246,6 +252,9 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                 .execute(&mut *tx)
                 .await?;
         }
+        sqlx::query("UPDATE local_meta SET value='false' WHERE key='memory_visible'")
+            .execute(&mut *tx)
+            .await?;
         self.enqueue_in(
             &mut tx,
             DevicePayload::Human {
@@ -335,6 +344,9 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                 synced_at,
                 local,
             } => {
+                if self.role == ClientRole::Chat {
+                    crate::memory_chat::journal::dirty(&mut tx).await?;
+                }
                 let state = NativeState {
                     tasks: tasks.clone(),
                     messages: messages.clone(),
@@ -630,6 +642,9 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
             });
         }
         state.pending = self.pending().await?;
+        if self.role == ClientRole::Chat {
+            self.memory_projection(&mut state, crate::now()).await?;
+        }
         if self.role == ClientRole::LocalExecutor {
             state.stopped = self.stopped().await?;
         }

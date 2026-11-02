@@ -14,6 +14,7 @@ const OUTBOX_LIMIT: i64 = 1_000;
 const DAY_LIMIT: i64 = 1_000_000;
 const TASK_BUDGET: i64 = 250_000;
 const DEADLINE_MS: i64 = 15 * 60 * 1_000;
+const SCHEMA: i64 = 7;
 
 mod approvals;
 mod memory;
@@ -54,7 +55,7 @@ impl Store {
             .fetch_one(&pool)
             .await?;
         require(
-            schema <= 6,
+            schema <= SCHEMA,
             "database schema is newer than this application",
         )?;
         sqlx::migrate!().run(&pool).await?;

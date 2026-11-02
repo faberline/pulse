@@ -55,3 +55,4 @@ pub mod artifact;
 pub mod artifact_client;
 mod artifact_server;
 pub mod maintenance;
+pub mod memory_chat;

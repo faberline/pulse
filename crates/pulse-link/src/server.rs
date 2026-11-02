@@ -19,7 +19,7 @@ pub struct Hub {
     pub core: Store,
     pub(crate) db: SqlitePool,
     changes: tokio::sync::watch::Sender<u64>,
-    human: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) human: Arc<tokio::sync::Mutex<()>>,
 }
 impl Hub {
     pub fn new(core: Store) -> Self {
@@ -627,6 +627,10 @@ impl Hub {
                     }],
                     HumanAction::Submit { id, goal } => {
                         ensure(
+                            crate::memory_chat::parse(goal).is_none(),
+                            "memory control requires current chat client",
+                        )?;
+                        ensure(
                             id.len() <= 128 && !goal.trim().is_empty() && goal.len() <= 4096,
                             "task size",
                         )?;
@@ -648,6 +652,10 @@ impl Hub {
                         goal,
                         selection,
                     } => {
+                        ensure(
+                            crate::memory_chat::parse(goal).is_none(),
+                            "memory control cannot create a computer task",
+                        )?;
                         ensure(
                             !id.is_empty()
                                 && id.len() <= 128
@@ -1062,6 +1070,10 @@ pub fn router(hub: Hub) -> Router {
         .route("/v1/device-pairings/redeem", post(pair))
         .route("/v1/devices/connect", get(upgrade))
         .route("/v1/tasks", get(tasks))
+        .route(
+            "/v1/memories",
+            get(crate::memory_chat::server::view).post(crate::memory_chat::server::change),
+        )
         .route("/v1/tasks/{id}", get(task))
         .route("/v1/artifacts/{id}/{digest}", get(artifact))
         .layer(DefaultBodyLimit::max(MAX_FRAME))

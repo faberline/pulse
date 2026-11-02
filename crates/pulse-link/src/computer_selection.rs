@@ -104,6 +104,11 @@ impl Journal {
         action: HumanAction,
         selected_at: i64,
     ) -> Result<()> {
+        if let HumanAction::SubmitComputer { goal, .. } = &action
+            && self.memory_control(source_id, goal, crate::now()).await?
+        {
+            return Ok(());
+        }
         let now = crate::now();
         ensure(
             self.role == ClientRole::Chat && !source_id.is_empty() && source_id.len() <= 128,

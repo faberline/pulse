@@ -264,7 +264,7 @@ impl Device {
             }
         });
         let mut ticker = tokio::time::interval(Duration::from_millis(250));
-        let mut message = "配對後可連線。模型尚未接入。".to_string();
+        let mut message = "配對後可在對話框提出需求。".to_string();
         let mut pairing: Option<tokio::task::JoinHandle<Result<Credential>>> = None;
         let mut artifact_download: Option<
             tokio::task::JoinHandle<Result<crate::artifact::LocalArtifact>>,
@@ -274,7 +274,14 @@ impl Device {
         let mut computer_selection = tokio::task::JoinSet::new();
         let mut computer_selecting: Option<String> = None;
         let mut computer_failure: Option<String> = None;
+        let mut input_failure: Option<String> = None;
+        let mut memory_sync: Option<tokio::task::JoinHandle<Result<()>>> = None;
+        let mut memory_retry = Instant::now();
         let result=async {loop {tokio::select! {
+            completed=async{match memory_sync.as_mut(){Some(task)=>task.await,None=>std::future::pending().await}}=>{
+                memory_sync=None;
+                if !matches!(completed,Ok(Ok(()))) {memory_retry=Instant::now()+Duration::from_secs(3);message="記憶仍待同步。已保留待送要求，重連後先核對刪除狀態。".into();}
+            }
             completed=computer_selection.join_next(), if !computer_selection.is_empty()=>{
                 let id=computer_selecting.take();
                 match completed {
@@ -312,6 +319,10 @@ impl Device {
             }
             _=ticker.tick()=>{
                 let mut state=self.journal.view().await?;state.server=self.config.server.to_string();state.paired=credential.is_some();state.connected=link_rx.borrow().connected;state.message=message.clone();
+                state.input_failure=input_failure.clone();
+                if self.journal.role==ClientRole::Chat && state.connected && memory_sync.is_none() && Instant::now()>=memory_retry && self.journal.memory_dirty().await?.is_some() && let Some(credential)=credential.clone() {
+                    let config=self.config.clone();let journal=self.journal.clone();memory_sync=Some(tokio::spawn(async move{crate::memory_chat::client::sync(&config,&journal,&credential).await}));
+                }
                 state.artifact_loading=artifact_loading.clone();state.artifact_failure=artifact_failure.clone();
                 if computer_selection.is_empty() && let Some(entry)=self.journal.take_computer_selection(crate::now()).await? {
                     computer_selecting=Some(entry.source_id.clone());let server=self.config.server.to_string();
@@ -325,6 +336,14 @@ impl Device {
             command=commands.recv()=>{
                 match command {
                     Some(NativeCommand::SubmitComputer{source_id,id,goal,selection,selected_at})=>{
+                        if crate::memory_chat::parse(&goal).is_some() {
+                            match self.journal.action(&source_id,HumanAction::Submit{id,goal}).await {
+                                Ok(())=>{input_failure=None;message="記憶要求已保存，等待同步。".into();},
+                                Err(crate::Error::Rejected(_)|crate::Error::Capacity)=>{input_failure=Some(source_id);message="請先查詢目前記憶，核對名稱與內容長度；草稿已保留。".into();},
+                                Err(e)=>return Err(e),
+                            }
+                            continue;
+                        }
                         match self.journal.queue_computer_selection(&source_id,HumanAction::SubmitComputer{id,goal,selection},selected_at).await {
                             Ok(())=>{computer_failure=None;message="訊息已存入本機，視窗連上後會繼續。".into();},
                             Err(crate::Error::Rejected(_)|crate::Error::Capacity)=>{computer_failure=Some(source_id);message="要求未保存。請核對視窗與佇列；草稿已保留。".into();},
@@ -359,8 +378,9 @@ impl Device {
                     }
                     Some(NativeCommand::Action{source_id,action})=>{
                         if self.journal.role != ClientRole::Chat {message="executor 不接受人類輸入。請使用對話框。".into();continue;}
+                        let memory_control=matches!(&action,HumanAction::Submit{goal,..} if crate::memory_chat::parse(goal).is_some());
                         if matches!(&action,HumanAction::Submit{..}) {computer_failure=None;}
-                        match self.journal.action(&source_id,action).await {Ok(())=>message="已存入本機待送佇列。".into(),Err(crate::Error::Rejected(_)|crate::Error::Capacity)=>message="要求未保存：內容或佇列已超過限制。".into(),Err(e)=>return Err(e)}
+                        match self.journal.action(&source_id,action).await {Ok(())=>{input_failure=None;message="已存入本機待送佇列。".into();},Err(crate::Error::Rejected(_)|crate::Error::Capacity)=>{input_failure=Some(source_id);message=if memory_control {"記憶要求未保存。請先查詢目前來源，並核對名稱及內容長度；草稿已保留。"}else{"要求未保存：內容或待送數量已超過限制；草稿已保留。"}.into();},Err(e)=>return Err(e)}
                     }
                     Some(NativeCommand::Pair{code})=>{
                         if pairing.is_some(){message="配對仍在進行。".into();continue;}
@@ -395,6 +415,10 @@ impl Device {
             let _ = task.await;
         }
         worker.abort();
+        if let Some(task) = memory_sync {
+            task.abort();
+            let _ = task.await;
+        }
         let _ = worker.await;
         result
     }

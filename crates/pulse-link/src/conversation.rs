@@ -130,7 +130,7 @@ fn create(id: String, goal: String) -> Command {
             .iter()
             .any(|prefix| request_text(request).starts_with(prefix))
     {
-        return Command::Clarify { question:"請先按對話框的「程式視窗」選擇要讀取的視窗，再傳送需求。目前只支援觀察；點擊與輸入尚未接上。".into() };
+        return Command::Clarify { question:"請先按對話框的「程式視窗」選擇要操作的視窗，再傳送需求。點擊與輸入須逐次核對並批准。".into() };
     }
     let scope =
         match browser_scope(request) {

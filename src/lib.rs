@@ -20,6 +20,8 @@ pub use store::{BackupCheck, Maintenance, Store};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("memory storage is busy; retry required")]
+    Busy,
     #[error("notification queue capacity unavailable")]
     Capacity,
     #[error("file access: {0}")]

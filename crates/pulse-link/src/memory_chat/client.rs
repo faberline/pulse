@@ -1,0 +1,96 @@
+use crate::{
+    Result,
+    client::Config,
+    ensure,
+    journal::Journal,
+    protocol::{ClientRole, Credential},
+};
+use pulse_core::{MemoryOutcome, MemoryView};
+use serde::de::DeserializeOwned;
+use std::time::Duration;
+
+async fn body<T: DeserializeOwned>(mut response: reqwest::Response) -> Result<T> {
+    let mut bytes = Vec::new();
+    while let Some(part) = response
+        .chunk()
+        .await
+        .map_err(|_| crate::Error::Rejected("memory response interrupted".into()))?
+    {
+        ensure(
+            bytes.len() + part.len() <= 1024 * 1024,
+            "memory response capacity",
+        )?;
+        bytes.extend_from_slice(&part);
+    }
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+pub async fn sync(config: &Config, journal: &Journal, credential: &Credential) -> Result<()> {
+    ensure(
+        credential.role == ClientRole::Chat
+            && journal.role == ClientRole::Chat
+            && credential.device == journal.device,
+        "memory delivery role mismatch",
+    )?;
+    let Some(generation) = journal.memory_dirty().await? else {
+        return Ok(());
+    };
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(8))
+        .build()
+        .map_err(|_| crate::Error::Rejected("memory HTTP configuration failed".into()))?;
+    let url = config.server.join("v1/memories")?;
+    let get = || async {
+        let response = client
+            .get(url.clone())
+            .bearer_auth(&credential.token)
+            .send()
+            .await
+            .map_err(|_| crate::Error::Rejected("memory sync unavailable".into()))?;
+        ensure(
+            response.status() == reqwest::StatusCode::OK,
+            "memory sync denied",
+        )?;
+        body::<MemoryView>(response).await
+    };
+    // Restrictions FIRST, before replaying any unacknowledged source payload.
+    journal
+        .apply_memory_view(&get().await?, crate::now())
+        .await?;
+    for request in journal.memory_requests().await? {
+        let response = client
+            .post(url.clone())
+            .bearer_auth(&credential.token)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|_| crate::Error::Rejected("memory delivery interrupted".into()))?;
+        match response.status() {
+            reqwest::StatusCode::OK => {
+                let outcome: MemoryOutcome = body(response).await?;
+                let phase = if matches!(outcome, MemoryOutcome::Redacted { .. }) {
+                    "redacted"
+                } else {
+                    "accepted"
+                };
+                journal.finish_memory(&request.source_id, phase).await?;
+            }
+            reqwest::StatusCode::CONFLICT | reqwest::StatusCode::BAD_REQUEST => {
+                journal
+                    .finish_memory(&request.source_id, "rejected")
+                    .await?
+            }
+            _ => {
+                return Err(crate::Error::Rejected(
+                    "memory request not acknowledged".into(),
+                ));
+            }
+        }
+    }
+    journal
+        .apply_memory_view(&get().await?, crate::now())
+        .await?;
+    journal.memory_clean(&generation).await
+}
