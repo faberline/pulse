@@ -381,6 +381,9 @@ pub struct ChatMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientWire {
+    ConversationReady {
+        version: u8,
+    },
     WorkerErasureReady,
     ErasedData {
         header: pulse_core::ErasedProjection,

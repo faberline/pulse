@@ -1,5 +1,21 @@
 use super::*;
 
+// Direct journal/server fixtures declare the current Rust chat contract.
+// The real command-loop test opens a new epoch and must declare it on the wire.
+async fn setup() -> Fixture {
+    let f = super::setup().await;
+    let epoch = f
+        .hub
+        .begin(&f.journal.device, 0, crate::now())
+        .await
+        .unwrap();
+    f.hub
+        .conversation_ready(&f.journal.device, epoch, 1, crate::now())
+        .await
+        .unwrap();
+    f
+}
+
 async fn deliver(f: &Fixture) {
     for frame in f.journal.outgoing().await.unwrap() {
         f.hub
@@ -320,6 +336,9 @@ async fn memory_topic_real_rust_command_loop_clarifies_then_revises_only_selecte
             .any(|t| t.id == "wire-task" && t.revision == 1)
     })
     .await;
+    let declared: i64 = sqlx::query_scalar("SELECT count(*) FROM settings s JOIN link_device d ON s.key='chat-context:' || d.id WHERE d.role='chat' AND d.revoked=0 AND json_extract(s.value,'$.version')=1 AND json_extract(s.value,'$.epoch')=d.epoch")
+        .fetch_one(&f.hub.core.application_pool()).await.unwrap();
+    assert_eq!(declared, 1);
     let query = uuid::Uuid::new_v4().to_string();
     commands
         .send(NativeCommand::Action {

@@ -48,6 +48,7 @@ Rust／Swift 邊界、共用本機協定與驗證缺口見 [macOS adapter](macos
 
 ## 開發進度
 
+- Rust 對話連線已加入版本 1 話題界線宣告候選。只有目前 chat 連線可取用隱含任務對象。未宣告的舊程式仍可明確控制任務；省略對象時先澄清。舊程式連線中途即使沒有送訊息，下一次連線也不能繼承舊對象。這不代表完整升級或 D02 已接受，見 [對話連線規則](conversation-followups.md#對話程式版本與連線)。
 - [PR #20](https://github.com/faberline/pulse/pull/20)：日常進度問句與明確控制，head `eb55b3afe60807e55bba7a5394afdfa0b80970df`。69 個正常 Rust 測試及六項當前 head CI 通過。D02 仍缺一般追問與完整自然語言關聯。
 - [#19](https://github.com/faberline/pulse/issues/19)：專用瀏覽器觀察基礎。75 個正常 Rust 測試與真正 Chrome fixture 通過；工具尚未暴露給模型。此項是後續產品整合的準備，仍須獨立接受。
 - [#22](https://github.com/faberline/pulse/issues/22)：持久的一次性批准核心，見 [批准基礎](v0.5-approval.md)。95 個正常 Rust 測試及 155 個 hard-exit 子程序樣本通過；真實 browser／computer 的操作卡片與派工仍待整合，D05 保持未接受。

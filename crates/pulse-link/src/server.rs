@@ -313,6 +313,7 @@ impl Hub {
                 .fetch_one(&mut *tx)
                 .await?;
         ensure(cursor <= max as u64, "resume cursor exceeds sent data")?;
+        Self::reset_conversation_capability(&mut tx, device).await?;
         let row=sqlx::query("UPDATE link_device SET worker_erasure=0,projection_erasure=0,schedule_notices=0,epoch=epoch+1,lease_until=? WHERE id=? AND revoked=0 RETURNING epoch").bind(time+LEASE_MS).bind(device).fetch_optional(&mut *tx).await?.ok_or_else(||crate::Error::Rejected("device revoked".into()))?;
         let epoch: i64 = row.get("epoch");
         sqlx::query("UPDATE link_outbox SET acknowledged=1 WHERE device=? AND sequence<=?")
@@ -1655,6 +1656,7 @@ async fn session(hub: Arc<Hub>, device: String, mut socket: WebSocket) {
                         ClientWire::Heartbeat{epoch:claimed}=>{ensure(number(&claimed)?==epoch,"heartbeat epoch")?;hub.renew(&device,epoch,now()).await?;send(&mut socket,&ServerWire::Renewed{epoch:epoch.to_string(),lease_ms:LEASE_MS as u32}).await?;}
                         ClientWire::Hello{..}=>return Err(crate::Error::Rejected("duplicate hello".into())),
                         ClientWire::ScheduleReady=>hub.schedule_ready(&device,epoch,now()).await?,
+                        ClientWire::ConversationReady{version}=>hub.conversation_ready(&device,epoch,version,now()).await?,
                         ClientWire::WorkerErasureReady=>hub.worker_erasure_ready(&device,epoch,now()).await?,
                         ClientWire::ErasedData{header,operation_id,source_id}=>{hub.receive_erased_worker(&device,&header,&operation_id,&source_id).await?;send(&mut socket,&ServerWire::Ack{sequence:header.sequence,id:header.id}).await?;}
                         ClientWire::ProjectionErasureReady=>hub.projection_erasure_ready(&device,epoch,now()).await?,

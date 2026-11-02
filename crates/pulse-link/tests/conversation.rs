@@ -22,6 +22,9 @@ async fn setup() -> (tempfile::TempDir, Hub, Credential, u64) {
         .await
         .unwrap();
     let epoch = hub.begin(&cred.device, 0, pulse_link::now()).await.unwrap();
+    hub.conversation_ready(&cred.device, epoch, 1, pulse_link::now())
+        .await
+        .unwrap();
     (dir, hub, cred, epoch)
 }
 async fn say(hub: &Hub, cred: &Credential, epoch: u64, source: &str, text: &str) {
@@ -54,6 +57,9 @@ async fn reply(hub: &Hub, source: &str) -> String {
         .await
         .unwrap()
 }
+
+#[path = "conversation/capability.rs"]
+mod capability;
 
 #[tokio::test]
 async fn unselected_computer_requests_ask_for_a_window_instead_of_reading_the_repo() {
@@ -499,6 +505,9 @@ async fn ambiguous_followup_and_human_target_survive_server_restart() {
     drop(hub);
     let hub = Hub::new(Store::open(dir.path().join("db"), "owner").await.unwrap());
     let epoch = hub.begin(&cred.device, 0, pulse_link::now()).await.unwrap();
+    hub.conversation_ready(&cred.device, epoch, 1, pulse_link::now())
+        .await
+        .unwrap();
     say(&hub, &cred, epoch, "answer", "B").await;
     let revised = hub.core.task(&b).await.unwrap();
     assert_eq!(revised.revision, 2);

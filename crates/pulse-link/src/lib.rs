@@ -12,6 +12,7 @@ pub mod computer_runtime;
 pub mod computer_selection;
 mod computer_transport;
 mod conversation;
+mod conversation_capability;
 mod conversation_context;
 mod derived_projection;
 pub mod desktop_notifications;

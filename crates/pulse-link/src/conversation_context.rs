@@ -4,7 +4,7 @@ use pulse_core::{Command, Outcome, Task};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
-const KEY: &str = "chat_conversation_context_v1";
+pub(crate) const KEY: &str = "chat_conversation_context_v1";
 const MAX_AGE_MS: i64 = 30 * 60 * 1000;
 const LOCAL_BOUNDARY: &str = "conversation_boundary_v1";
 
@@ -201,6 +201,9 @@ impl Hub {
                 .bind(KEY)
                 .fetch_optional(&self.db)
                 .await?;
+        if !self.conversation_capable(device, time).await? {
+            return Ok(None);
+        }
         let Some(data) = data.filter(|data| data.len() <= 32768) else {
             return Ok(None);
         };
@@ -282,6 +285,9 @@ impl Hub {
         pending_targets: Option<Pending>,
         time: i64,
     ) -> Result<()> {
+        if !self.conversation_capable(device, time).await? {
+            return Ok(());
+        }
         let mut source_event_id = event_id.to_owned();
         let (pending, targets) = match outcome {
             Outcome::Applied { task_ids } if !task_ids.is_empty() && task_ids.len() <= 100 => {
