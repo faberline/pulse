@@ -963,14 +963,14 @@ async fn schema_three_fixture_upgrades_without_losing_existing_task_data() {
     .await
     .unwrap();
     // Reconstruct the previous empty approval schema in this disposable fixture only.
-    db.execute("DROP TABLE memory_derived_messages; DROP TABLE link_erased_frames; ALTER TABLE link_device DROP COLUMN projection_erasure; DROP TABLE task_memory_sources; DROP TABLE local_schedule_delivery; ALTER TABLE link_device DROP COLUMN schedule_notices; DROP TABLE schedules; DROP TABLE local_schedule_notices; DROP TABLE local_schedule_inputs; DROP TABLE link_pair_claims; DROP TABLE link_pair_tokens; DROP INDEX link_credential_digest; DROP TABLE local_memory_access; DROP TABLE local_memory_queue; DROP TABLE local_memory_cache; DROP TABLE memories; DROP TABLE memory_events; DELETE FROM settings WHERE key LIKE 'memory_%'; DROP TABLE link_artifact_parts; DROP TABLE link_artifacts; DROP TABLE operation_requests; DELETE FROM _sqlx_migrations WHERE version IN (4,5,6,7,8,9,10,11,12,13,14,15); PRAGMA user_version=3;").await.unwrap();
+    db.execute("DROP TABLE memory_erased_reads; DROP TABLE memory_derived_messages; DROP TABLE link_erased_frames; ALTER TABLE link_device DROP COLUMN projection_erasure; DROP TABLE task_memory_sources; DROP TABLE local_schedule_delivery; ALTER TABLE link_device DROP COLUMN schedule_notices; DROP TABLE schedules; DROP TABLE local_schedule_notices; DROP TABLE local_schedule_inputs; DROP TABLE link_pair_claims; DROP TABLE link_pair_tokens; DROP INDEX link_credential_digest; DROP TABLE local_memory_access; DROP TABLE local_memory_queue; DROP TABLE local_memory_cache; DROP TABLE memories; DROP TABLE memory_events; DELETE FROM settings WHERE key LIKE 'memory_%'; DROP TABLE link_artifact_parts; DROP TABLE link_artifacts; DROP TABLE operation_requests; DELETE FROM _sqlx_migrations WHERE version IN (4,5,6,7,8,9,10,11,12,13,14,15,16); PRAGMA user_version=3;").await.unwrap();
     db.close().await.unwrap();
     let store = Store::open(dir.path().join("db"), "owner").await.unwrap();
     let schema: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(&store.application_pool())
         .await
         .unwrap();
-    assert_eq!(schema, 15);
+    assert_eq!(schema, 16);
     assert_eq!(
         serde_json::to_value(store.task("task").await.unwrap()).unwrap(),
         before

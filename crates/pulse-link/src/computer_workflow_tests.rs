@@ -104,6 +104,9 @@ async fn deliver(hub: &Hub, journal: &Journal, ack: bool) {
 }
 impl Fixture {
     async fn setup(mode: &str) -> Self {
+        Self::setup_with_memory(mode, false).await
+    }
+    async fn setup_with_memory(mode: &str, bound: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
         let (helper, runtime) = fixture(mode);
         let hub = Hub::new(
@@ -155,6 +158,42 @@ impl Fixture {
         hub.computer_interactive_ready(&local.device, epoch, runtime.selections(), crate::now())
             .await
             .unwrap();
+        if bound {
+            let now = crate::now();
+            hub.core
+                .change_memory(
+                    Origin::Human,
+                    &pulse_core::MemoryRequest {
+                        source_id: uuid::Uuid::new_v4().to_string(),
+                        source_at: now,
+                        command: pulse_core::MemoryCommand::Remember {
+                            label: "偏好".into(),
+                            body: "SOURCE_NATIVE_PRIVATE".into(),
+                        },
+                    },
+                    now,
+                )
+                .await
+                .unwrap();
+            let memory = hub.core.list_memories(now).await.unwrap().remove(0);
+            hub.core
+                .bind_task_memories(
+                    Origin::Human,
+                    &pulse_core::TaskMemoryRequest {
+                        source_id: uuid::Uuid::new_v4().to_string(),
+                        source_at: now,
+                        task_id: "task".into(),
+                        task_revision: 1,
+                        sources: vec![pulse_core::MemoryRef {
+                            id: memory.id,
+                            revision: memory.revision,
+                        }],
+                    },
+                    now,
+                )
+                .await
+                .unwrap();
+        }
         let run = hub
             .core
             .claim_next(&remote::versions(), crate::now())
@@ -620,6 +659,139 @@ async fn native_effect_before_server_restart_keeps_late_receipt_without_another_
     );
     assert_eq!(f.hub.core.task("task").await.unwrap().tool_calls, 2);
     assert!(f.journal.take_work().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn native_source_erasure_discards_late_images_without_inventing_a_known_effect() {
+    let mut f = Fixture::setup_with_memory("action-good", true).await;
+    f.hub
+        .core
+        .reserve(
+            &f.run.token,
+            "before-source-removal",
+            20_000,
+            "fixture",
+            crate::now(),
+        )
+        .await
+        .unwrap();
+    let request = f.propose().await;
+    f.decide(&request, true).await;
+    assert!(
+        f.hub
+            .dispatch_approved_action(&remote::versions(), crate::now())
+            .await
+            .unwrap()
+    );
+    let work = f.execute().await;
+    assert_eq!(f.effects(), 1);
+    let memory = f
+        .hub
+        .core
+        .list_memories(crate::now())
+        .await
+        .unwrap()
+        .remove(0);
+    f.hub
+        .core
+        .change_memory(
+            Origin::Human,
+            &pulse_core::MemoryRequest {
+                source_id: uuid::Uuid::new_v4().to_string(),
+                source_at: crate::now(),
+                command: pulse_core::MemoryCommand::Forget {
+                    id: memory.id,
+                    revision: memory.revision,
+                },
+            },
+            crate::now(),
+        )
+        .await
+        .unwrap();
+    let ServerPayload::Read { operation_id, .. } = &work.payload else {
+        panic!()
+    };
+    let packets = f.journal.outgoing().await.unwrap();
+    assert!(
+        packets
+            .iter()
+            .any(|e| matches!(e.payload, DevicePayload::ArtifactChunk { .. }))
+    );
+    for packet in &packets {
+        f.hub
+            .receive(&f.local.device, packet, crate::now())
+            .await
+            .unwrap();
+    }
+    for packet in &packets {
+        f.hub
+            .receive(&f.local.device, packet, crate::now())
+            .await
+            .unwrap();
+    }
+    assert_eq!(f.effects(), 1);
+    let state: (String, Option<String>) =
+        sqlx::query_as("SELECT state,result FROM link_reads WHERE id=?")
+            .bind(operation_id)
+            .fetch_one(&f.hub.db)
+            .await
+            .unwrap();
+    assert_eq!(state, ("unknown".into(), None));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM link_artifacts")
+            .fetch_one(&f.hub.db)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM link_artifact_parts")
+            .fetch_one(&f.hub.db)
+            .await
+            .unwrap(),
+        0
+    );
+    let task = f.hub.core.task("task").await.unwrap();
+    assert_eq!(task.state, State::OutcomeUnknown);
+    assert!(task.active_run.is_none());
+    assert_eq!(task.tool_calls, 2);
+    let operation: String = sqlx::query_scalar("SELECT data FROM operations WHERE id=?")
+        .bind(operation_id)
+        .fetch_one(&f.hub.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Operation>(&operation).unwrap().state,
+        pulse_core::OperationState::Unknown
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM budget WHERE call_id='before-source-removal'"
+        )
+        .fetch_one(&f.hub.db)
+        .await
+        .unwrap(),
+        "reserved"
+    );
+    assert!(
+        !f.hub
+            .dispatch_approved_action(&remote::versions(), crate::now())
+            .await
+            .unwrap()
+    );
+    f.hub
+        .snapshot(&f.chat.device, f.chat_epoch, crate::now())
+        .await
+        .unwrap();
+    let latest: String = sqlx::query_scalar(
+        "SELECT data FROM link_outbox WHERE device=? ORDER BY sequence DESC LIMIT 1",
+    )
+    .bind(&f.chat.device)
+    .fetch_one(&f.hub.db)
+    .await
+    .unwrap();
+    assert!(!latest.contains("source_operation_id"));
+    assert!(!latest.contains("png_digest"));
 }
 
 #[tokio::test]

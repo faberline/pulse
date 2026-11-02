@@ -3,6 +3,7 @@
 這是 D06 的候選。已接進單一 SwiftUI 對話框與 Rust 傳送程序，尚未將記憶加入模型回答。
 Rust Core 的任務來源關聯、撤銷與本機提交核對候選見 [任務記憶來源](task-memory-sources.md)。它不是開啟模型記憶的許可。
 模型聊天的來源追蹤與副本清除候選見 [衍生聊天清除](derived-chat-erasure.md)。
+工具結果與 server 圖片的來源清除候選見 [工具結果來源清除](derived-tool-results.md)。
 它不代表 D06 已通過。
 
 ## 已實作

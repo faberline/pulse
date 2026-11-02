@@ -2,7 +2,7 @@
 
 這是 D06 的必要前置工作。它不開啟模型記憶，也不代表 D06、D08 或 K15 已接受。
 Swift 沒有新增任務或記憶規則。這些規則由 Rust Core 處理。
-schema 為 15。remote workflow 為 `pulse-remote-15`，policy 為 `approved-effects-memory-fences-3`。
+schema 為 16。remote workflow 為 `pulse-remote-16`，policy 為 `approved-effects-memory-fences-4`。
 模型聊天的來源追蹤與清除候選見 [衍生聊天清除](derived-chat-erasure.md)。
 版本不符的舊 run 需重新核對，不能自動視為新規則已驗收。
 
@@ -25,7 +25,7 @@ Core 以目前修訂的 run、operation 與地端讀取紀錄核對尚未開工�
 記憶來源移除時，Core 在同一來源清除交易使對應關聯失效。
 若任務仍在使用該修訂，舊 run 失去執行權限；執行 checkpoint 與任務 evidence 清空，待批准／已批准要求失效。
 任務改為需核對來源。若操作結果仍未知，保留未知狀態與原操作帳本，不冒稱取消成功。
-晚到結果可保存原操作的證據，但不能恢復舊 run 或驗收任務。
+已失去記憶來源的傳輸結果不再保存正文。未知操作仍保留未知，不能恢復舊 run 或驗收任務；見 [工具結果來源清除](derived-tool-results.md)。
 
 修正記憶不會讓任務自動改用新版。須先由 Human 修訂任務，再明確採用新的來源。
 先前保留或未知的費用仍保留，已發生的費用仍可核對結算。
@@ -54,5 +54,5 @@ context／回覆／提議、手動讀取與傳輸允許入口也已取得這個�
 開啟前仍須完成：所有 adapter 的限制鎖與送出前核對、在途工作停止、子任務來源繼承、完整衍生聊天／提議／附件清除、地端及關閉副本清理與正式還原。
 也需要兩家 provider 的完整流程與實機驗收。
 
-checkpoint、task evidence 與模型聊天已有清除候選。原操作帳本保留，提議、讀取結果、圖片與 executor 副本仍未完整接上來源追蹤。
+checkpoint、task evidence、模型／工具聊天、提議事件與 server 圖片已有清除候選。原操作帳本保留，操作 intent、派工內容與 executor 副本仍未完整清除。
 不能把這個候選當作已可安全將記憶加入模型提示的證據。

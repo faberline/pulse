@@ -72,11 +72,42 @@ impl Hub {
         self.notify_change();
         Ok(())
     }
-    pub(crate) async fn project_action_approvals(&self, _time: i64) -> Result<()> {
-        // Also recovers the post-commit chat projection gap without another model call.
-        let changed=sqlx::query("INSERT OR IGNORE INTO link_chat(id,body,created_at) SELECT id,CASE WHEN json_extract(data,'$.proposal.target') LIKE 'computer:%' THEN '程式視窗操作提議。請核對畫面、目標與效果。' ELSE '瀏覽器操作提議。請核對畫面、目標與效果。' END,json_extract(data,'$.proposal.intent.observation.observed_at') FROM operation_requests WHERE (json_extract(data,'$.proposal.target') LIKE 'browser:%' OR json_extract(data,'$.proposal.target') LIKE 'computer:%') ORDER BY json_extract(data,'$.proposal.intent.observation.observed_at'),id")
-            .execute(&self.db).await?.rows_affected();
-        if changed > 0 {
+    pub(crate) async fn project_action_approvals(&self, time: i64) -> Result<()> {
+        // Recover the projection gap and register source lineage atomically.
+        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+        let rows:Vec<String>=sqlx::query_scalar("SELECT r.data FROM operation_requests r WHERE (json_extract(r.data,'$.proposal.target') LIKE 'browser:%' OR json_extract(r.data,'$.proposal.target') LIKE 'computer:%') AND (NOT EXISTS(SELECT 1 FROM link_chat c WHERE c.id=r.id) OR (EXISTS(SELECT 1 FROM task_memory_sources b WHERE b.task_id=r.task_id AND b.task_revision=json_extract(r.data,'$.proposal.token.revision')) AND NOT EXISTS(SELECT 1 FROM memory_derived_messages d WHERE d.id=r.id))) AND NOT EXISTS(SELECT 1 FROM task_memory_sources b WHERE b.task_id=r.task_id AND b.task_revision=json_extract(r.data,'$.proposal.token.revision') AND json_extract(b.data,'$.invalidated')=1) ORDER BY r.rowid").fetch_all(&mut *tx).await?;
+        let mut changed = false;
+        for data in rows {
+            let request: OperationRequest = serde_json::from_str(&data)?;
+            let body = if request.proposal.target.starts_with("computer:") {
+                "程式視窗操作提議。請核對畫面、目標與效果。"
+            } else {
+                "瀏覽器操作提議。請核對畫面、目標與效果。"
+            };
+            let created = request.proposal.intent["observation"]["observed_at"]
+                .as_i64()
+                .ok_or_else(|| {
+                    crate::Error::Rejected("proposal observation time missing".into())
+                })?;
+            changed |= sqlx::query("INSERT OR IGNORE INTO link_chat VALUES(?,?,?)")
+                .bind(&request.proposal.id)
+                .bind(body)
+                .bind(created)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                > 0;
+            Store::track_memory_message_in(
+                &mut tx,
+                &request.proposal.token.task_id,
+                request.proposal.token.revision,
+                &request.proposal.id,
+                time,
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        if changed {
             self.notify_change();
         }
         Ok(())

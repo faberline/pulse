@@ -113,6 +113,7 @@ pub(super) async fn erase_invalidated(db: &mut SqliteConnection) -> Result<()> {
 }
 
 pub(super) async fn erase(db: &mut SqliteConnection, task: &str, revision: u64) -> Result<()> {
+    sqlx::query("INSERT OR IGNORE INTO memory_derived_messages(id,task_id,task_revision,redacted) SELECT c.id,r.task_id,?,1 FROM link_chat c JOIN operation_requests r ON r.id=c.id WHERE r.task_id=? AND json_extract(r.data,'$.proposal.token.revision')=?").bind(revision.to_string()).bind(task).bind(revision.to_string()).execute(&mut *db).await?;
     sqlx::query(
         "UPDATE memory_derived_messages SET redacted=1 WHERE task_id=? AND task_revision=?",
     )

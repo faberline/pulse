@@ -4,8 +4,8 @@
 Swift 只顯示 Rust 回傳的狀態。來源核對、清除、重送與恢復都由 Rust 處理。
 其他介面可以使用同一套 Rust 命令與狀態契約。
 
-資料庫 schema 為 15。remote workflow 為 `pulse-remote-15`。
-policy 為 `approved-effects-memory-fences-3`。不相容的舊 run 仍須重新核對。
+資料庫 schema 為 16。remote workflow 為 `pulse-remote-16`。
+policy 為 `approved-effects-memory-fences-4`。不相容的舊 run 仍須重新核對。
 
 ## 保存與移除
 
@@ -40,8 +40,9 @@ SQLite 清除提交後，必須完成 WAL 清除才會回覆確認。
 
 ## 尚未完成
 
-這個候選只追蹤模型聊天與其傳輸、地端聊天快取。
-提議、讀取結果、圖片、executor 工作與結果副本仍須完整接上來源清除。
+這個候選追蹤模型聊天與其傳輸、地端聊天快取。
+工具結果、事件、卡片與 server 圖片的清除候選見 [工具結果來源清除](derived-tool-results.md)。
+操作要求、派工訊息、executor 工作與結果副本仍須完整清除。
 子任務繼承、provider 送出核對、在途工作停止、關閉副本與正式還原仍待完成。
 兩家 provider 的完整流程及實機驗收也尚未完成。
 不能用這個候選宣告 D06、D08、K15 或整體 Dot 目標完成。

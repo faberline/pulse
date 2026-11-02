@@ -379,6 +379,22 @@ impl Hub {
         let mut memory_sources = std::collections::BTreeMap::new();
         for row in rows {
             let id: String = row.get("id");
+            let redacted: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM memory_derived_messages WHERE id=? AND redacted=1",
+            )
+            .bind(&id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if redacted == 1 {
+                messages.push(ChatMessage {
+                    id,
+                    body: row.get("body"),
+                    approval: None,
+                    artifact: None,
+                    artifact_operation_id: None,
+                });
+                continue;
+            }
             let lineage:Option<String>=sqlx::query_scalar("SELECT b.data FROM memory_derived_messages d JOIN task_memory_sources b ON b.task_id=d.task_id AND b.task_revision=d.task_revision WHERE d.id=? AND d.redacted=0").bind(&id).fetch_optional(&mut *tx).await?;
             if let Some(lineage) = lineage {
                 if erasure_ready == 0 {
@@ -1091,6 +1107,10 @@ impl Hub {
                 outcome,
             } => {
                 ensure(outcome.valid(), "invalid device result")?;
+                let _source = self
+                    .core
+                    .lease_read_source_state(operation_id, time)
+                    .await?;
                 let row = sqlx::query(
                     "SELECT device,epoch,task_id,task_revision,request,result FROM link_reads WHERE id=?",
                 )
@@ -1105,6 +1125,18 @@ impl Hub {
                         && row.get::<String, _>("task_revision") == *revision,
                     "result binding mismatch",
                 )?;
+                let mut erased_tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+                if Store::discard_erased_read_result_in(
+                    &mut erased_tx,
+                    operation_id,
+                    matches!(outcome, ReadOutcome::Unknown { .. }),
+                )
+                .await?
+                {
+                    erased_tx.commit().await?;
+                    return Ok(());
+                }
+                erased_tx.rollback().await?;
                 let encoded = serde_json::to_string(outcome)?;
                 let operation: ReadOp = serde_json::from_str(&row.get::<String, _>("request"))?;
                 let artifact = if operation.computer_selection().is_some()
@@ -1206,7 +1238,6 @@ impl Hub {
                             .await?;
                     ensure(stored == encoded, "result conflict")?;
                 }
-                tx.commit().await?;
                 let evidence_label = if operation.is_effect() {
                     "操作工具結果"
                 } else {
@@ -1239,7 +1270,21 @@ impl Hub {
                     ReadOutcome::Rejected { reason } => format!("本機拒絕：{reason}"),
                     ReadOutcome::Unknown { reason } => format!("結果未知：{reason}"),
                 };
-                self.chat(operation_id, &body, time).await?;
+                sqlx::query("INSERT OR IGNORE INTO link_chat VALUES(?,?,?)")
+                    .bind(operation_id)
+                    .bind(short(&body, 8192))
+                    .bind(time)
+                    .execute(&mut *tx)
+                    .await?;
+                Store::track_memory_message_in(
+                    &mut tx,
+                    task_id,
+                    number(revision)?,
+                    operation_id,
+                    time,
+                )
+                .await?;
+                tx.commit().await?;
             }
         }
         Ok(())

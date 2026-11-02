@@ -2,6 +2,8 @@ use pulse_core::*;
 use pulse_link::{protocol::*, provider::Reply, remote, server::Hub};
 use serde_json::json;
 const BODY: &str = "private source body remains outside provider prompts";
+#[path = "task_memory_sources/tool_erasure.rs"]
+mod tool_erasure;
 async fn setup() -> (tempfile::TempDir, Hub, Memory) {
     let root = tempfile::tempdir().unwrap();
     let hub = Hub::new(Store::open(root.path().join("db"), "owner").await.unwrap());
@@ -472,7 +474,7 @@ async fn schema14_upgrade_backfills_model_provenance_before_replaying_withdrawal
         ))
         .await
         .unwrap();
-        db.execute("DROP TABLE memory_derived_messages; DROP TABLE link_erased_frames; ALTER TABLE link_device DROP COLUMN projection_erasure; DELETE FROM _sqlx_migrations WHERE version=15; PRAGMA user_version=14").await.unwrap();
+        db.execute("DROP TABLE memory_erased_reads; DROP TABLE memory_derived_messages; DROP TABLE link_erased_frames; ALTER TABLE link_device DROP COLUMN projection_erasure; DELETE FROM _sqlx_migrations WHERE version IN (15,16); PRAGMA user_version=14").await.unwrap();
         // Reconstruct a schema14 body which had no derived-content purge.
         sqlx::query("UPDATE link_chat SET body=? WHERE id=?")
             .bind(DERIVED)

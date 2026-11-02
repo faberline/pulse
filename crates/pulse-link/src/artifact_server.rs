@@ -13,6 +13,10 @@ impl Hub {
     ) -> Result<()> {
         let bytes = artifact.chunk(index, data)?;
         let metadata = serde_json::to_string(artifact)?;
+        let _source = self
+            .core
+            .lease_read_source_state(operation_id, crate::now())
+            .await?;
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query(
             "SELECT device,epoch,task_id,task_revision,request FROM link_reads WHERE id=?",
@@ -21,19 +25,30 @@ impl Hub {
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| crate::Error::Rejected("artifact has no read intent".into()))?;
-        let operation: ReadOp = serde_json::from_str(&row.get::<String, _>("request"))?;
         ensure(
             row.get::<String, _>("device") == device
                 && row.get::<i64, _>("epoch") as u64 == epoch
                 && row.get::<String, _>("task_id") == artifact.task_id
-                && row.get::<String, _>("task_revision") == artifact.revision
-                && crate::computer_transport::valid_chunk_source(
-                    &operation,
-                    artifact,
-                    operation_id,
-                    device,
-                    epoch,
-                ),
+                && row.get::<String, _>("task_revision") == artifact.revision,
+            "artifact source binding mismatch",
+        )?;
+        let erased: i64 = sqlx::query_scalar("SELECT count(*) FROM memory_erased_reads WHERE id=?")
+            .bind(operation_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if erased == 1 {
+            tx.commit().await?;
+            return Ok(());
+        }
+        let operation: ReadOp = serde_json::from_str(&row.get::<String, _>("request"))?;
+        ensure(
+            crate::computer_transport::valid_chunk_source(
+                &operation,
+                artifact,
+                operation_id,
+                device,
+                epoch,
+            ),
             "artifact source binding mismatch",
         )?;
         if let Some(row) =
@@ -115,6 +130,10 @@ impl Hub {
             digest_id(digest) && operation_id.len() <= 256,
             "invalid artifact identity",
         )?;
+        let _source = self
+            .core
+            .lease_read_source_state(operation_id, time)
+            .await?;
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
         let allowed:i64=sqlx::query_scalar("SELECT COUNT(*) FROM link_device WHERE id=? AND role='chat' AND revoked=0 AND lease_until>?").bind(device).bind(time).fetch_one(&mut *tx).await?;
         ensure(allowed == 1, "artifact requires live chat role")?;

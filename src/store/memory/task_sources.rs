@@ -309,6 +309,7 @@ pub(super) async fn redact_missing(db: &mut SqliteConnection) -> Result<()> {
             .execute(&mut *db)
             .await?;
         let mut task: Task = load(db, "tasks", &binding.request.task_id).await?;
+        super::derived_results::erase(db, &task.id, binding.request.task_revision).await?;
         super::derived_messages::erase(db, &task.id, binding.request.task_revision).await?;
         let runs:Vec<String>=sqlx::query_scalar("SELECT data FROM runs WHERE json_extract(data,'$.token.task_id')=? AND json_extract(data,'$.token.revision')=?").bind(&task.id).bind(binding.request.task_revision.to_string()).fetch_all(&mut *db).await?;
         for data in runs {
@@ -333,5 +334,6 @@ pub(super) async fn redact_missing(db: &mut SqliteConnection) -> Result<()> {
         task.reason = Some("memory_source_withdrawn".into());
         put(db, "tasks", &task.id, &task).await?;
     }
+    super::derived_results::erase_invalidated(db).await?;
     super::derived_messages::erase_invalidated(db).await
 }

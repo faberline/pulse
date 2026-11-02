@@ -14,7 +14,7 @@ const OUTBOX_LIMIT: i64 = 1_000;
 const DAY_LIMIT: i64 = 1_000_000;
 const TASK_BUDGET: i64 = 250_000;
 const DEADLINE_MS: i64 = 15 * 60 * 1_000;
-const SCHEMA: i64 = 15;
+const SCHEMA: i64 = 16;
 
 mod approvals;
 mod memory;
@@ -1350,9 +1350,10 @@ async fn reconcile_read(
     task.state = State::Reconciling;
     put(db, "tasks", id, &task).await?;
     let rows = sqlx::query(
-        "SELECT id,task_revision,state,result FROM link_reads WHERE task_id=? ORDER BY rowid",
+        "SELECT r.id,r.task_revision,r.state,r.result FROM link_reads r WHERE r.task_id=? AND NOT(r.state='discarded' AND CAST(r.task_revision AS INTEGER)<? AND EXISTS(SELECT 1 FROM memory_erased_reads e WHERE e.id=r.id)) ORDER BY r.rowid",
     )
     .bind(id)
+    .bind(revision as i64)
     .fetch_all(&mut *db)
     .await?;
     require(!rows.is_empty(), "no durable local receipt")?;
