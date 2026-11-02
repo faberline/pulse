@@ -213,6 +213,10 @@ impl ReadOp {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HumanAction {
+    Schedule {
+        request: pulse_core::ScheduleRequest,
+        text: String,
+    },
     DecideOperation {
         binding: pulse_core::OperationBinding,
         approve: bool,
@@ -330,6 +334,9 @@ impl<T: Serialize> Envelope<T> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerPayload {
+    ScheduleNotice {
+        notice: pulse_core::ScheduleNotice,
+    },
     Snapshot {
         tasks: Vec<pulse_core::Task>,
         messages: Vec<ChatMessage>,
@@ -362,6 +369,7 @@ pub struct ChatMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientWire {
+    ScheduleReady,
     ComputerReady {
         permits: Vec<pulse_core::ComputerPermit>,
         #[serde(default)]
@@ -510,6 +518,8 @@ pub enum NativeCommand {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NativeState {
+    #[serde(default)]
+    pub schedule_notices: Vec<pulse_core::ScheduleNotice>,
     #[serde(default)]
     pub computer_windows: Option<ComputerWindowList>,
     #[serde(default)]

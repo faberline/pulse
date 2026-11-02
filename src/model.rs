@@ -144,6 +144,17 @@ pub struct Task {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    Schedule {
+        request: crate::ScheduleRequest,
+    },
+    CancelSchedule {
+        id: String,
+        #[serde(with = "decimal")]
+        expected_revision: u64,
+    },
+    QuerySchedules {
+        ids: Vec<String>,
+    },
     Create {
         id: String,
         goal: String,
@@ -242,9 +253,19 @@ pub struct OperationBinding {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Outcome {
-    Applied { task_ids: Vec<String> },
-    Rejected { reason: String },
-    Clarification { question: String },
+    Applied {
+        task_ids: Vec<String>,
+    },
+    Schedules {
+        task_ids: Vec<String>,
+        schedule_ids: Vec<String>,
+    },
+    Rejected {
+        reason: String,
+    },
+    Clarification {
+        question: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

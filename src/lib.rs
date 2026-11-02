@@ -6,6 +6,7 @@ mod computer_operation;
 mod memory;
 mod model;
 mod read;
+mod schedule;
 mod scope;
 mod store;
 
@@ -15,6 +16,7 @@ pub use computer_operation::*;
 pub use memory::*;
 pub use model::*;
 pub use read::*;
+pub use schedule::*;
 pub use scope::*;
 pub use store::{
     BackupCheck, Maintenance, MemoryCopyChange, MemoryWithdrawalRules, Store, truncate_wal,

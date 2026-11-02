@@ -248,7 +248,42 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
             return Ok(());
         }
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
-        if let HumanAction::Submit { goal, .. } | HumanAction::SubmitComputer { goal, .. } = &action
+        let mut action = action;
+        if let HumanAction::Submit { id, goal } = &action {
+            let prior: Option<(String, String)> =
+                sqlx::query_as("SELECT text,request FROM local_schedule_inputs WHERE source_id=?")
+                    .bind(source_id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            let request = if let Some((text, request)) = prior {
+                ensure(text == *goal, "schedule source conflict")?;
+                Some(serde_json::from_str(&request)?)
+            } else if let Some(Ok(request)) = crate::schedule_chat::prepare(id, goal, crate::now())
+            {
+                let count: i64 = sqlx::query_scalar("SELECT count(*) FROM local_schedule_inputs")
+                    .fetch_one(&mut *tx)
+                    .await?;
+                ensure(count < 1000, "schedule source capacity")?;
+                sqlx::query("INSERT INTO local_schedule_inputs VALUES(?,?,?)")
+                    .bind(source_id)
+                    .bind(goal)
+                    .bind(serde_json::to_string(&request)?)
+                    .execute(&mut *tx)
+                    .await?;
+                Some(request)
+            } else {
+                None
+            };
+            if let Some(request) = request {
+                action = HumanAction::Schedule {
+                    request,
+                    text: goal.clone(),
+                };
+            }
+        }
+        if let HumanAction::Submit { goal, .. }
+        | HumanAction::SubmitComputer { goal, .. }
+        | HumanAction::Schedule { text: goal, .. } = &action
         {
             ensure(
                 !goal.trim().is_empty() && goal.len() <= 4096,
@@ -336,6 +371,36 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         }
         ensure(sequence == cursor + 1, "server sequence gap")?;
         match &envelope.payload {
+            ServerPayload::ScheduleNotice { notice } => {
+                ensure(
+                    self.role == ClientRole::Chat && notice.valid(),
+                    "invalid schedule notice or role",
+                )?;
+                let prior: Option<String> =
+                    sqlx::query_scalar("SELECT data FROM local_schedule_notices WHERE id=?")
+                        .bind(&notice.id)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                if let Some(prior) = prior {
+                    ensure(
+                        hash(&serde_json::from_str::<pulse_core::ScheduleNotice>(&prior)?)?
+                            == hash(notice)?,
+                        "schedule notice conflict",
+                    )?;
+                } else {
+                    let count: i64 =
+                        sqlx::query_scalar("SELECT count(*) FROM local_schedule_notices")
+                            .fetch_one(&mut *tx)
+                            .await?;
+                    ensure(count < 1000, "schedule notice capacity")?;
+                    sqlx::query("INSERT INTO local_schedule_notices VALUES(?,?,?)")
+                        .bind(&notice.id)
+                        .bind(serde_json::to_string(notice)?)
+                        .bind(crate::now())
+                        .execute(&mut *tx)
+                        .await?;
+                }
+            }
             ServerPayload::SetStopped { stopped } => {
                 ensure(
                     self.role == ClientRole::LocalExecutor,
@@ -651,6 +716,23 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         }
         state.pending = self.pending().await?;
         if self.role == ClientRole::Chat {
+            let rows:Vec<String>=sqlx::query_scalar("SELECT data FROM local_schedule_notices ORDER BY received_at DESC,id DESC LIMIT 20").fetch_all(&self.db).await?;
+            for row in rows.into_iter().rev() {
+                let notice: pulse_core::ScheduleNotice = serde_json::from_str(&row)?;
+                state.schedule_notices.push(notice.clone());
+                state.messages.push(ChatMessage {
+                    id: notice.id,
+                    body: format!(
+                        "{} · {}\n{}",
+                        notice.label,
+                        pulse_core::schedule_time_label(notice.due_at, &notice.timezone),
+                        notice.message
+                    ),
+                    artifact: None,
+                    artifact_operation_id: None,
+                    approval: None,
+                });
+            }
             self.memory_projection(&mut state, crate::now()).await?;
         }
         if self.role == ClientRole::LocalExecutor {

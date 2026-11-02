@@ -373,6 +373,7 @@ impl Store {
         let guard = super::MemoryGuard::new(&database)?;
         guard.write(&manifest)?;
         let candidate = Store {
+            schedule_wake: tokio::sync::watch::channel(0).0,
             pool,
             memory_guard: Arc::new(guard),
         };

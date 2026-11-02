@@ -88,12 +88,14 @@ async fn run() -> Result<()> {
             );
             let remote = pulse_link::remote::run(hub.clone());
             let maintenance = pulse_link::maintenance::run(hub.core.clone());
+            let schedules = pulse_link::schedules::run(hub.clone());
             let server = axum::serve(listener, router(hub)).with_graceful_shutdown(async {
                 let _ = tokio::signal::ctrl_c().await;
             });
             tokio::select! {
                 result = remote => result?,
                 result = maintenance => result?,
+                result = schedules => result?,
                 result = server => result?,
             }
         }

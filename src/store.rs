@@ -14,16 +14,18 @@ const OUTBOX_LIMIT: i64 = 1_000;
 const DAY_LIMIT: i64 = 1_000_000;
 const TASK_BUDGET: i64 = 250_000;
 const DEADLINE_MS: i64 = 15 * 60 * 1_000;
-const SCHEMA: i64 = 11;
+const SCHEMA: i64 = 12;
 
 mod approvals;
 mod memory;
+mod schedules;
 pub use memory::{BackupCheck, Maintenance, MemoryCopyChange, MemoryWithdrawalRules, truncate_wal};
 
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
     memory_guard: std::sync::Arc<memory::MemoryGuard>,
+    schedule_wake: tokio::sync::watch::Sender<u64>,
 }
 
 impl Store {
@@ -72,6 +74,7 @@ impl Store {
         let store = Self {
             pool,
             memory_guard: std::sync::Arc::new(memory_guard),
+            schedule_wake: tokio::sync::watch::channel(0).0,
         };
         store.initialize_memory().await?;
         Ok(store)
@@ -304,6 +307,7 @@ impl Store {
         )
         .await?;
         tx.commit().await?;
+        self.wake_schedules();
         Ok(outcome)
     }
 
@@ -934,14 +938,55 @@ async fn apply(
             || commands.len() == 1,
         "clarification must be a standalone event",
     )?;
+    let schedule_control = commands.iter().any(|c| {
+        matches!(
+            c,
+            Command::Schedule { .. }
+                | Command::CancelSchedule { .. }
+                | Command::QuerySchedules { .. }
+        )
+    });
     let mut ids = Vec::new();
+    let mut schedule_ids = Vec::new();
     for command in commands {
-        let mutates = !matches!(&command, Command::Query { .. } | Command::Clarify { .. });
+        let mutates = !matches!(
+            &command,
+            Command::Query { .. } | Command::QuerySchedules { .. } | Command::Clarify { .. }
+        );
         require(
             !mutates || origin == "human",
             "only human ingress can change tasks",
         )?;
         let task_id = match command {
+            Command::Schedule { request } => {
+                schedule_ids.push(schedules::create(db, event_id, request, now).await?);
+                continue;
+            }
+            Command::CancelSchedule {
+                id,
+                expected_revision,
+            } => {
+                schedules::cancel(db, &id, expected_revision).await?;
+                schedule_ids.push(id);
+                continue;
+            }
+            Command::QuerySchedules { ids: query } => {
+                if query.is_empty() {
+                    schedule_ids.extend(
+                        schedules::list(db, 100)
+                            .await?
+                            .into_iter()
+                            .map(|s| s.request.id),
+                    );
+                } else {
+                    require(query.len() <= 100, "schedule query limit")?;
+                    for id in query {
+                        let _: Schedule = load(db, "schedules", &id).await?;
+                        schedule_ids.push(id);
+                    }
+                }
+                continue;
+            }
             Command::Create {
                 id,
                 goal,
@@ -1152,7 +1197,16 @@ async fn apply(
             .execute(&mut *db)
             .await?;
     }
-    Ok(Outcome::Applied { task_ids: ids })
+    if schedule_control {
+        let mut seen = std::collections::BTreeSet::new();
+        schedule_ids.retain(|id| seen.insert(id.clone()));
+        Ok(Outcome::Schedules {
+            task_ids: ids,
+            schedule_ids,
+        })
+    } else {
+        Ok(Outcome::Applied { task_ids: ids })
+    }
 }
 
 async fn current(db: &mut SqliteConnection, token: &Token, now: i64) -> Result<(Task, Run)> {
@@ -1359,6 +1413,7 @@ async fn load<T: DeserializeOwned>(
         "tasks" => "SELECT data FROM tasks WHERE id=?",
         "runs" => "SELECT data FROM runs WHERE id=?",
         "operations" => "SELECT data FROM operations WHERE id=?",
+        "schedules" => "SELECT data FROM schedules WHERE id=?",
         _ => return Err(Error::Rejected("invalid internal table".into())),
     };
     let text: String = sqlx::query_scalar(statement)
@@ -1384,6 +1439,9 @@ async fn put<T: Serialize>(
         }
         "operations" => {
             "INSERT INTO operations(id,data) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data"
+        }
+        "schedules" => {
+            "INSERT INTO schedules(id,data) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data"
         }
         _ => return Err(Error::Rejected("invalid internal table".into())),
     };
@@ -1474,6 +1532,6 @@ fn require(value: bool, reason: &str) -> Result<()> {
         Err(Error::Rejected(reason.into()))
     }
 }
-fn digest(value: &impl Serialize) -> Result<String> {
+pub(crate) fn digest(value: &impl Serialize) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(serde_jcs::to_vec(value)?)))
 }

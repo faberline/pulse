@@ -616,6 +616,7 @@ async fn connected(
                         ServerWire::Welcome{device,epoch:wire_epoch,lease_ms}=>{
                             ensure(epoch.is_none()&&device==journal.device&&lease_ms>0&&lease_ms<=LEASE_MS as u32,"invalid welcome")?;
                             let value=number(&wire_epoch)?;epoch=Some(value);lease.send_replace(Lease{epoch:value,until:Some(started+Duration::from_millis(lease_ms.into()))});state.send_replace(LinkState{connected:true,credential_rejected:false});
+                            if journal.role==ClientRole::Chat {wire(&mut socket,&ClientWire::ScheduleReady).await?;}
                             if let Some(fixture_origin)=browser.clone(){wire(&mut socket,&ClientWire::BrowserReady{fixture_origin}).await?;}
                             if interactions && let Some(fixture_origin)=browser.clone(){wire(&mut socket,&ClientWire::BrowserInteractionReady{fixture_origin}).await?;}
                         }

@@ -20,6 +20,8 @@ pub mod protocol;
 pub mod provider;
 pub mod remote;
 mod remote_io;
+mod schedule_chat;
+pub mod schedules;
 pub mod server;
 
 #[derive(Debug, thiserror::Error)]

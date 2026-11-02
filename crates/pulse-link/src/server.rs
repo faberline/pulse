@@ -155,7 +155,7 @@ impl Hub {
         Ok(())
     }
     pub async fn recover(&self) -> Result<()> {
-        sqlx::query("UPDATE link_device SET lease_until=0,epoch=epoch+1")
+        sqlx::query("UPDATE link_device SET schedule_notices=0,lease_until=0,epoch=epoch+1")
             .execute(&self.db)
             .await?;
         let devices: Vec<String> = sqlx::query_scalar("SELECT id FROM link_device")
@@ -168,12 +168,14 @@ impl Hub {
         Ok(())
     }
     pub async fn end(&self, device: &str, epoch: u64) -> Result<()> {
-        let changed = sqlx::query("UPDATE link_device SET lease_until=0 WHERE id=? AND epoch=?")
-            .bind(device)
-            .bind(epoch as i64)
-            .execute(&self.db)
-            .await?
-            .rows_affected();
+        let changed = sqlx::query(
+            "UPDATE link_device SET schedule_notices=0,lease_until=0 WHERE id=? AND epoch=?",
+        )
+        .bind(device)
+        .bind(epoch as i64)
+        .execute(&self.db)
+        .await?
+        .rows_affected();
         if changed == 1 {
             self.unknown_reads(device, Some(epoch)).await?;
             self.changed();
@@ -188,7 +190,7 @@ impl Hub {
                 .fetch_one(&mut *tx)
                 .await?;
         ensure(cursor <= max as u64, "resume cursor exceeds sent data")?;
-        let row=sqlx::query("UPDATE link_device SET epoch=epoch+1,lease_until=? WHERE id=? AND revoked=0 RETURNING epoch").bind(time+LEASE_MS).bind(device).fetch_optional(&mut *tx).await?.ok_or_else(||crate::Error::Rejected("device revoked".into()))?;
+        let row=sqlx::query("UPDATE link_device SET schedule_notices=0,epoch=epoch+1,lease_until=? WHERE id=? AND revoked=0 RETURNING epoch").bind(time+LEASE_MS).bind(device).fetch_optional(&mut *tx).await?.ok_or_else(||crate::Error::Rejected("device revoked".into()))?;
         let epoch: i64 = row.get("epoch");
         sqlx::query("UPDATE link_outbox SET acknowledged=1 WHERE device=? AND sequence<=?")
             .bind(device)
@@ -251,6 +253,36 @@ impl Hub {
     pub async fn snapshot(&self, device: &str, epoch: u64, time: i64) -> Result<()> {
         // Projection reads and the domain-notification handoff share one committed view.
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+        let active_chat:i64=sqlx::query_scalar("SELECT count(*) FROM link_device WHERE id=? AND role='chat' AND revoked=0 AND lease_until>?")
+            .bind(device).bind(time).fetch_one(&mut *tx).await?;
+        let notices_ready: i64 =
+            sqlx::query_scalar("SELECT schedule_notices FROM link_device WHERE id=?")
+                .bind(device)
+                .fetch_one(&mut *tx)
+                .await?;
+        let mut more_notices = false;
+        if active_chat == 1 && notices_ready == 1 {
+            let notices=sqlx::query("SELECT sequence,payload FROM outbox WHERE acknowledged=0 AND json_extract(payload,'$.kind')='schedule_due' ORDER BY sequence LIMIT 8").fetch_all(&mut *tx).await?;
+            more_notices = notices.len() == 8;
+            for row in notices {
+                let payload: serde_json::Value =
+                    serde_json::from_str(&row.get::<String, _>("payload"))?;
+                let notice: pulse_core::ScheduleNotice =
+                    serde_json::from_value(payload["notice"].clone())?;
+                ensure(notice.valid(), "invalid durable schedule notice")?;
+                Self::enqueue(
+                    &mut tx,
+                    device,
+                    epoch,
+                    ServerPayload::ScheduleNotice { notice },
+                )
+                .await?;
+                sqlx::query("UPDATE outbox SET acknowledged=1 WHERE sequence=?")
+                    .bind(row.get::<i64, _>("sequence"))
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
         let local = sqlx::query(
             "SELECT lease_until,stopped FROM link_device WHERE role='local_executor' AND revoked=0",
         )
@@ -375,18 +407,35 @@ impl Hub {
                 .fetch_one(&mut *tx)
                 .await?;
             if latest > cursor {
-                sqlx::query("UPDATE outbox SET acknowledged=1 WHERE acknowledged=0 AND sequence>? AND sequence<=?")
+                sqlx::query("UPDATE outbox SET acknowledged=1 WHERE acknowledged=0 AND sequence>? AND sequence<=? AND coalesce(json_extract(payload,'$.kind'),'')!='schedule_due'")
                     .bind(cursor).bind(latest).execute(&mut *tx).await?;
                 sqlx::query("INSERT INTO settings(key,value) VALUES('chat_core_outbox_cursor',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
                     .bind(latest.to_string()).execute(&mut *tx).await?;
             }
         }
         tx.commit().await?;
+        // Watch updates can merge many timer occurrences. Drain the next bounded
+        // batch even when no further Human input or timer event arrives.
+        if more_notices {
+            self.notify_change();
+        }
         Ok(())
     }
     pub async fn outgoing(&self, device: &str) -> Result<Vec<Envelope<ServerPayload>>> {
         let rows:Vec<String>=sqlx::query_scalar("SELECT data FROM link_outbox WHERE device=? AND acknowledged=0 ORDER BY sequence LIMIT 100").bind(device).fetch_all(&self.db).await?;
-        rows.into_iter().map(|s| parse(s.as_bytes())).collect()
+        let ready: i64 = sqlx::query_scalar("SELECT schedule_notices FROM link_device WHERE id=?")
+            .bind(device)
+            .fetch_one(&self.db)
+            .await?;
+        let mut outgoing = Vec::new();
+        for row in rows {
+            let envelope: Envelope<ServerPayload> = parse(row.as_bytes())?;
+            if ready == 0 && matches!(envelope.payload, ServerPayload::ScheduleNotice { .. }) {
+                break;
+            }
+            outgoing.push(envelope);
+        }
+        Ok(outgoing)
     }
     pub async fn permitted(
         &self,
@@ -569,6 +618,18 @@ impl Hub {
                     "source ID limit",
                 )?;
                 let commands = match action {
+                    HumanAction::Schedule { request, text } => {
+                        ensure(text.len() <= 4096, "schedule input size")?;
+                        let expected =
+                            crate::schedule_chat::prepare(&request.id, text, request.source_at)
+                                .ok_or_else(|| {
+                                crate::Error::Rejected("schedule input mismatch".into())
+                            })??;
+                        ensure(expected == *request, "schedule input mismatch")?;
+                        vec![Command::Schedule {
+                            request: request.clone(),
+                        }]
+                    }
                     HumanAction::DecideOperation { binding, approve } => vec![if *approve {
                         Command::ApproveOperation {
                             binding: binding.clone(),
@@ -597,7 +658,17 @@ impl Hub {
                             )?;
                             serde_json::from_value(payload["commands"].clone())?
                         } else {
-                            crate::conversation::plan(id, goal, &self.core.list_tasks(100).await?)
+                            if let Some(commands) =
+                                crate::schedule_chat::plan(&self.core, id, goal).await?
+                            {
+                                commands
+                            } else {
+                                crate::conversation::plan(
+                                    id,
+                                    goal,
+                                    &self.core.list_tasks(100).await?,
+                                )
+                            }
                         }
                     }
                     HumanAction::SubmitComputer {
@@ -606,7 +677,8 @@ impl Hub {
                         selection,
                     } => {
                         ensure(
-                            crate::memory_chat::parse(goal).is_none(),
+                            crate::memory_chat::parse(goal).is_none()
+                                && !crate::schedule_chat::reserved(goal),
                             "memory control cannot create a computer task",
                         )?;
                         ensure(
@@ -682,7 +754,9 @@ impl Hub {
                 let outcome = self.core.route(&event.event_id).await?;
                 if let (
                     pulse_core::Outcome::Rejected { reason },
-                    HumanAction::Submit { goal, .. } | HumanAction::SubmitComputer { goal, .. },
+                    HumanAction::Submit { goal, .. }
+                    | HumanAction::SubmitComputer { goal, .. }
+                    | HumanAction::Schedule { text: goal, .. },
                 ) = (&outcome, action)
                 {
                     let notice = match reason.as_str() {
@@ -738,7 +812,9 @@ impl Hub {
                         )
                         .await?;
                     }
-                    HumanAction::Submit { goal, .. } | HumanAction::SubmitComputer { goal, .. } => {
+                    HumanAction::Submit { goal, .. }
+                    | HumanAction::SubmitComputer { goal, .. }
+                    | HumanAction::Schedule { text: goal, .. } => {
                         let body = match &outcome {
                             pulse_core::Outcome::Clarification { question } => question.clone(),
                             pulse_core::Outcome::Applied { task_ids } => {
@@ -746,6 +822,33 @@ impl Hub {
                                 for id in task_ids {
                                     let task = self.core.task(id).await?;
                                     lines.push(crate::conversation::status(&task));
+                                }
+                                lines.join("\n")
+                            }
+                            pulse_core::Outcome::Schedules {
+                                task_ids,
+                                schedule_ids,
+                            } => {
+                                let mut lines = vec![if schedule_ids.is_empty() {
+                                    "目前沒有排程。".to_string()
+                                } else {
+                                    "排程指令已保存。".to_string()
+                                }];
+                                for id in schedule_ids.iter().take(10) {
+                                    lines.push(crate::schedule_chat::status(
+                                        &self.core.schedule(id).await?,
+                                    ));
+                                }
+                                if schedule_ids.len() > 10 {
+                                    lines.push(format!(
+                                        "另有 {} 筆；可用「查詢排程 名稱或識別」查看。",
+                                        schedule_ids.len() - 10
+                                    ));
+                                }
+                                for id in task_ids {
+                                    lines.push(crate::conversation::status(
+                                        &self.core.task(id).await?,
+                                    ));
                                 }
                                 lines.join("\n")
                             }
@@ -1177,6 +1280,7 @@ async fn session(hub: Arc<Hub>, device: String, mut socket: WebSocket) {
                         ClientWire::Ack{sequence,id}=>hub.ack(&device,number(&sequence)?,&id).await?,
                         ClientWire::Heartbeat{epoch:claimed}=>{ensure(number(&claimed)?==epoch,"heartbeat epoch")?;hub.renew(&device,epoch,now()).await?;send(&mut socket,&ServerWire::Renewed{epoch:epoch.to_string(),lease_ms:LEASE_MS as u32}).await?;}
                         ClientWire::Hello{..}=>return Err(crate::Error::Rejected("duplicate hello".into())),
+                        ClientWire::ScheduleReady=>hub.schedule_ready(&device,epoch,now()).await?,
                         ClientWire::ComputerReady{permits,interactions}=>hub.set_computer_capability(&device,epoch,permits,interactions,now()).await?,
                         ClientWire::BrowserReady{fixture_origin}=>hub.browser_ready(&device,epoch,fixture_origin.as_deref(),now()).await?,
                         ClientWire::BrowserInteractionReady{fixture_origin}=>hub.browser_interactive_ready(&device,epoch,fixture_origin.as_deref(),now()).await?,
