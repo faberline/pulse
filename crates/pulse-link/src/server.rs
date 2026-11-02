@@ -1156,12 +1156,39 @@ async fn upgrade(
     let Ok(token) = bearer(&headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    let Ok(device) = hub.authenticate(token).await else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let device = match hub.authenticate(token).await {
+        Ok(device) => device,
+        Err(error) => {
+            return authentication_response(&error, StatusCode::UNAUTHORIZED);
+        }
     };
     ws.max_message_size(MAX_FRAME)
         .max_frame_size(MAX_FRAME)
         .on_upgrade(move |socket| session(hub, device, socket))
+}
+
+/// A storage failure is not evidence that an identity was revoked. Clients may
+/// erase local source content on denial, so transient failures must remain 503.
+pub(crate) fn authentication_response(
+    error: &crate::Error,
+    denied: StatusCode,
+) -> axum::response::Response {
+    let definitive = matches!(
+        error,
+        crate::Error::Rejected(_) | crate::Error::CredentialRejected
+    );
+    let mut response = if definitive {
+        denied
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    }
+    .into_response();
+    if definitive {
+        response
+            .headers_mut()
+            .insert("x-pulse-credential-denied", "1".parse().unwrap());
+    }
+    response
 }
 async fn session(hub: Arc<Hub>, device: String, mut socket: WebSocket) {
     let mut session_epoch = None;

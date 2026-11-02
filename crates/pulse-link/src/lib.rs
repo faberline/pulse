@@ -39,6 +39,10 @@ pub enum Error {
     Rejected(String),
     #[error("queue capacity unavailable")]
     Capacity,
+    #[error("credential rejected; fresh pairing required")]
+    CredentialRejected,
+    #[error("credential rejected; local memory cleanup failed: {0}")]
+    CredentialCleanup(#[source] Box<Error>),
 }
 pub type Result<T> = std::result::Result<T, Error>;
 pub(crate) fn ensure(ok: bool, why: &str) -> Result<()> {

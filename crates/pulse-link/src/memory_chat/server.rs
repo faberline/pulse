@@ -60,12 +60,22 @@ pub async fn view(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Response {
         .get("authorization")
         .and_then(|s| s.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
-        && let Ok(device) = hub.authenticate(token).await
     {
+        let device = match hub.authenticate(token).await {
+            Ok(device) => device,
+            Err(error) => {
+                return private(crate::server::authentication_response(
+                    &error,
+                    StatusCode::FORBIDDEN,
+                ));
+            }
+        };
         return match hub.memory_view(&device, crate::now()).await {
             Ok(view) => private(axum::Json(view)),
-            Err(crate::Error::Core(_)) => private(StatusCode::SERVICE_UNAVAILABLE),
-            Err(_) => private(StatusCode::FORBIDDEN),
+            Err(error) => private(crate::server::authentication_response(
+                &error,
+                StatusCode::FORBIDDEN,
+            )),
         };
     }
     private(StatusCode::FORBIDDEN)
@@ -78,11 +88,20 @@ pub async fn change(State(hub): State<Arc<Hub>>, headers: HeaderMap, bytes: Byte
     else {
         return private(StatusCode::FORBIDDEN);
     };
-    let Ok(device) = hub.authenticate(token).await else {
-        return private(StatusCode::FORBIDDEN);
+    let device = match hub.authenticate(token).await {
+        Ok(device) => device,
+        Err(error) => {
+            return private(crate::server::authentication_response(
+                &error,
+                StatusCode::FORBIDDEN,
+            ));
+        }
     };
-    if hub.memory_identity(&device).await.is_err() {
-        return private(StatusCode::FORBIDDEN);
+    if let Err(error) = hub.memory_identity(&device).await {
+        return private(crate::server::authentication_response(
+            &error,
+            StatusCode::FORBIDDEN,
+        ));
     }
     let Ok(request) = parse::<MemoryRequest>(&bytes) else {
         return private(StatusCode::BAD_REQUEST);
@@ -94,6 +113,10 @@ pub async fn change(State(hub): State<Arc<Hub>>, headers: HeaderMap, bytes: Byte
             | pulse_core::Error::Conflict(_)
             | pulse_core::Error::Missing(_),
         )) => private(StatusCode::CONFLICT),
+        Err(error @ crate::Error::Rejected(_)) => private(crate::server::authentication_response(
+            &error,
+            StatusCode::FORBIDDEN,
+        )),
         Err(_) => private(StatusCode::SERVICE_UNAVAILABLE),
     }
 }

@@ -19,6 +19,7 @@ mod backup;
 mod checkpoint;
 mod revocations;
 pub use backup::{BackupCheck, Maintenance};
+pub use checkpoint::truncate as truncate_wal;
 
 /// This file is deliberately outside the database backup. It is restriction
 /// evidence, not another task or knowledge store. Never put source text in it.

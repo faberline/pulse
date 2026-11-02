@@ -48,7 +48,10 @@ impl Checkpoint {
     }
 }
 
-pub(super) async fn truncate(pool: &SqlitePool) -> Result<()> {
+/// Truncate a Store-owned pool's WAL with a 250 ms checkpoint wait.
+/// Preserve the normal writer timeout. Close a modified connection if cancelled.
+/// A busy checkpoint requires retry; it is not successful physical cleanup.
+pub async fn truncate(pool: &SqlitePool) -> Result<()> {
     let mut guard = Checkpoint::begin(pool).await?;
     let result = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
         .fetch_one(&mut *guard.connection)

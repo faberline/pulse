@@ -165,6 +165,7 @@ impl Lease {
 #[derive(Clone, Default)]
 struct LinkState {
     connected: bool,
+    credential_rejected: bool,
 }
 
 pub struct Device {
@@ -243,7 +244,7 @@ impl Device {
             )?;
         }
         let (lease_tx, lease_rx) = watch::channel(Lease::default());
-        let (link_tx, link_rx) = watch::channel(LinkState::default());
+        let (link_tx, mut link_rx) = watch::channel(LinkState::default());
         let mut connection = credential.clone().map(|c| {
             tokio::spawn(reconnect(
                 self.config.clone(),
@@ -282,6 +283,28 @@ impl Device {
         > = None;
         let mut windows: Option<ComputerWindowList> = None;
         let result=async {loop {tokio::select! {
+            changed=link_rx.changed()=>{
+                changed.map_err(|_|crate::Error::Rejected("connection state stopped".into()))?;
+                let denied=link_rx.borrow().credential_rejected;
+                if denied {
+                    credential=None;
+                    lease_tx.send_replace(Lease::default());
+                    let mut cleared=states.borrow().clone();
+                    cleared.connected=false;cleared.paired=false;cleared.memories.clear();cleared.memory_synced_at=None;
+                    cleared.message="對話身分已失效，正在清除本機記憶。請重新配對。".into();
+                    states.send_replace(cleared);
+                    if let Some(task)=connection.take(){task.abort();let _=task.await;}
+                    if let Some(task)=memory_sync.take(){task.abort();let _=task.await;}
+                    if let Some(task)=artifact_download.take(){task.abort();let _=task.await;}
+                    artifact_loading=None;
+                    if let Some(task)=window_list.take(){task.abort();let _=task.await;}
+                    windows=None;
+                    computer_selection.abort_all();while computer_selection.join_next().await.is_some(){}
+                    computer_selecting=None;
+                    self.journal.deny_memory_access().await?;
+                    message=if self.journal.role==ClientRole::Chat {"連線身分已失效。本機記憶與待送正文已清除，請重新配對。"} else {"連線身分已失效，請重新配對。"}.into();
+                }
+            }
             completed=async {match window_list.as_mut(){Some(task)=>task.await,None=>std::future::pending().await}}=>{
                 window_list=None;
                 if let Some(state)=windows.as_mut() {
@@ -291,7 +314,9 @@ impl Device {
             }
             completed=async{match memory_sync.as_mut(){Some(task)=>task.await,None=>std::future::pending().await}}=>{
                 memory_sync=None;
-                if !matches!(completed,Ok(Ok(()))) {memory_retry=Instant::now()+Duration::from_secs(3);message="記憶仍待同步。已保留待送要求，重連後先核對刪除狀態。".into();}
+                if matches!(completed,Ok(Err(crate::Error::CredentialRejected|crate::Error::CredentialCleanup(_)))) {
+                    link_tx.send_replace(LinkState{connected:false,credential_rejected:true});
+                } else if !matches!(completed,Ok(Ok(()))) {memory_retry=Instant::now()+Duration::from_secs(3);message="記憶仍待同步。已保留待送要求，重連後先核對刪除狀態。".into();}
             }
             completed=computer_selection.join_next(), if !computer_selection.is_empty()=>{
                 let id=computer_selecting.take();
@@ -320,8 +345,13 @@ impl Device {
                 pairing=None;
                 match completed {
                     Ok(Ok(value))=>{
-                        lease_tx.send_replace(Lease::default());link_tx.send_replace(LinkState::default());
+                        lease_tx.send_replace(Lease::default());
                         if let Some(task)=connection.take(){task.abort();let _=task.await;}
+                        if let Some(task)=memory_sync.take(){task.abort();let _=task.await;}
+                        if credential.is_some() {self.journal.deny_memory_access().await?;}
+                        self.journal.allow_memory_access().await?;
+                        // Old workers must be joined before clearing their rejection signal.
+                        link_tx.send_replace(LinkState::default());
                         connection=Some(tokio::spawn(reconnect(self.config.clone(),self.journal.clone(),value.clone(),lease_tx.clone(),link_tx.clone(),self.executor.clone())));
                         credential=Some(value);message="配對完成。密鑰已存入 Keychain。".into();
                     }
@@ -407,7 +437,7 @@ impl Device {
                         if self.journal.role != ClientRole::Chat {message="executor 不接受人類輸入。請使用對話框。".into();continue;}
                         let memory_control=matches!(&action,HumanAction::Submit{goal,..} if crate::memory_chat::parse(goal).is_some());
                         if matches!(&action,HumanAction::Submit{..}) {computer_failure=None;}
-                        match self.journal.action(&source_id,action).await {Ok(())=>{input_failure=None;message="已存入本機待送佇列。".into();},Err(crate::Error::Rejected(_)|crate::Error::Capacity)=>{input_failure=Some(source_id);message=if memory_control {"記憶要求未保存。請先查詢目前來源，並核對名稱及內容長度；草稿已保留。"}else{"要求未保存：內容或待送數量已超過限制；草稿已保留。"}.into();},Err(e)=>return Err(e)}
+                        match self.journal.action(&source_id,action).await {Ok(())=>{input_failure=None;message="已存入本機待送佇列。".into();},Err(crate::Error::CredentialRejected)=>{input_failure=Some(source_id);message="記憶要求未保存，草稿已保留。請重新配對。".into();},Err(crate::Error::Rejected(_)|crate::Error::Capacity)=>{input_failure=Some(source_id);message=if memory_control {"記憶要求未保存。請先查詢目前來源，並核對名稱及內容長度；草稿已保留。"}else{"要求未保存：內容或待送數量已超過限制；草稿已保留。"}.into();},Err(e)=>return Err(e)}
                     }
                     Some(NativeCommand::Pair{code})=>{
                         if pairing.is_some(){message="配對仍在進行。".into();continue;}
@@ -494,7 +524,7 @@ async fn reconnect(
     let mut delay = 1;
     loop {
         let started = Instant::now();
-        let _ = connected(
+        let result = connected(
             &config,
             &journal,
             &credential,
@@ -504,6 +534,13 @@ async fn reconnect(
         )
         .await;
         lease.send_replace(Lease::default());
+        if matches!(result, Err(crate::Error::CredentialRejected)) {
+            state.send_replace(LinkState {
+                connected: false,
+                credential_rejected: true,
+            });
+            return;
+        }
         state.send_replace(LinkState::default());
         if started.elapsed() > Duration::from_secs(30) {
             delay = 1;
@@ -559,7 +596,18 @@ async fn connected(
     )
     .await
     .map_err(|_| crate::Error::Rejected("connect timeout".into()))?
-    .map_err(|_| crate::Error::Rejected("socket connect failed".into()))?;
+    .map_err(|error| match error {
+        tokio_tungstenite::tungstenite::Error::Http(response)
+            if matches!(response.status().as_u16(), 401 | 403)
+                && response
+                    .headers()
+                    .get("x-pulse-credential-denied")
+                    .is_some_and(|v| v == "1") =>
+        {
+            crate::Error::CredentialRejected
+        }
+        _ => crate::Error::Rejected("socket connect failed".into()),
+    })?;
     wire(
         &mut socket,
         &ClientWire::Hello {
@@ -599,7 +647,7 @@ async fn connected(
                     Message::Text(text)=>match parse::<ServerWire>(text.as_bytes())? {
                         ServerWire::Welcome{device,epoch:wire_epoch,lease_ms}=>{
                             ensure(epoch.is_none()&&device==journal.device&&lease_ms>0&&lease_ms<=LEASE_MS as u32,"invalid welcome")?;
-                            let value=number(&wire_epoch)?;epoch=Some(value);lease.send_replace(Lease{epoch:value,until:Some(started+Duration::from_millis(lease_ms.into()))});state.send_replace(LinkState{connected:true});
+                            let value=number(&wire_epoch)?;epoch=Some(value);lease.send_replace(Lease{epoch:value,until:Some(started+Duration::from_millis(lease_ms.into()))});state.send_replace(LinkState{connected:true,credential_rejected:false});
                             if let Some(fixture_origin)=browser.clone(){wire(&mut socket,&ClientWire::BrowserReady{fixture_origin}).await?;}
                             if interactions && let Some(fixture_origin)=browser.clone(){wire(&mut socket,&ClientWire::BrowserInteractionReady{fixture_origin}).await?;}
                         }

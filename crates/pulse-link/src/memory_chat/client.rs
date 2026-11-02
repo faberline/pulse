@@ -9,6 +9,24 @@ use pulse_core::{MemoryOutcome, MemoryView};
 use serde::de::DeserializeOwned;
 use std::time::Duration;
 
+async fn check_access(journal: &Journal, response: &reqwest::Response) -> Result<()> {
+    if matches!(
+        response.status(),
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) && response
+        .headers()
+        .get("x-pulse-credential-denied")
+        .is_some_and(|v| v == "1")
+    {
+        journal
+            .deny_memory_access()
+            .await
+            .map_err(|error| crate::Error::CredentialCleanup(Box::new(error)))?;
+        return Err(crate::Error::CredentialRejected);
+    }
+    Ok(())
+}
+
 async fn body<T: DeserializeOwned>(mut response: reqwest::Response) -> Result<T> {
     let mut bytes = Vec::new();
     while let Some(part) = response
@@ -32,6 +50,9 @@ pub async fn sync(config: &Config, journal: &Journal, credential: &Credential) -
             && credential.device == journal.device,
         "memory delivery role mismatch",
     )?;
+    if !journal.memory_access_allowed().await? {
+        return Err(crate::Error::CredentialRejected);
+    }
     let Some(generation) = journal.memory_dirty().await? else {
         return Ok(());
     };
@@ -49,6 +70,7 @@ pub async fn sync(config: &Config, journal: &Journal, credential: &Credential) -
             .send()
             .await
             .map_err(|_| crate::Error::Rejected("memory sync unavailable".into()))?;
+        check_access(journal, &response).await?;
         ensure(
             response.status() == reqwest::StatusCode::OK,
             "memory sync denied",
@@ -77,6 +99,7 @@ pub async fn sync(config: &Config, journal: &Journal, credential: &Credential) -
             .send()
             .await
             .map_err(|_| crate::Error::Rejected("memory delivery interrupted".into()))?;
+        check_access(journal, &response).await?;
         match response.status() {
             reqwest::StatusCode::OK => {
                 let outcome: MemoryOutcome = body(response).await?;

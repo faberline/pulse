@@ -10,6 +10,47 @@ use pulse_core::{
 use sqlx::Row;
 
 impl Journal {
+    pub(crate) async fn memory_access_allowed(&self) -> Result<bool> {
+        Ok(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT denied FROM local_memory_access WHERE singleton=1",
+            )
+            .fetch_one(&self.db)
+            .await?
+                == 0,
+        )
+    }
+    pub(crate) async fn deny_memory_access(&self) -> Result<()> {
+        if self.role != ClientRole::Chat {
+            return Ok(());
+        }
+        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query("UPDATE local_memory_access SET denied=1 WHERE singleton=1")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM local_memory_cache")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE local_memory_queue SET request=NULL,phase='access_denied' WHERE request IS NOT NULL")
+            .execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM local_meta WHERE key IN ('memory_synced_at','memory_dirty')")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(pulse_core::truncate_wal(&self.db).await?)
+    }
+    /// Called only after the trusted Human pairing flow has saved fresh credentials.
+    pub(crate) async fn allow_memory_access(&self) -> Result<()> {
+        if self.role == ClientRole::Chat {
+            let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+            sqlx::query("UPDATE local_memory_access SET denied=0 WHERE singleton=1")
+                .execute(&mut *tx)
+                .await?;
+            dirty(&mut tx).await?;
+            tx.commit().await?;
+        }
+        Ok(())
+    }
     pub(crate) async fn memory_request_active(&self, request: &MemoryRequest) -> Result<bool> {
         let data:Option<String>=sqlx::query_scalar("SELECT request FROM local_memory_queue WHERE source_uuid=lower(?) AND request IS NOT NULL")
             .bind(canonical(&request.source_id)?).fetch_optional(&self.db).await?;
@@ -49,6 +90,7 @@ impl Journal {
             "invalid memory source clock",
         )?;
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+        require_access(&mut tx).await?;
         let exists: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM local_memory_queue WHERE source_uuid=lower(?)",
         )
@@ -203,6 +245,7 @@ impl Journal {
             "redacted source cannot remain visible",
         )?;
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+        require_access(&mut tx).await?;
         let keeper: Option<String> =
             sqlx::query_scalar("SELECT value FROM local_meta WHERE key='memory_keeper'")
                 .fetch_optional(&mut *tx)
@@ -332,6 +375,7 @@ impl Journal {
                     "review" => "待送來源已取消。較新的記憶已保留，請查詢後再處理。",
                     "redacted" => "舊記憶來源已清除，不再重送。",
                     "expired" => "待送記憶已到期，內容已清除。",
+                    "access_denied" => "對話身分已失效，記憶已停止使用。請重新配對。",
                     "clarify" => {
                         "可用「記住 名稱：內容」、「查詢記憶」、「更正記憶 名稱：內容」、「忘記記憶 名稱」或「取消待送記憶 名稱」。"
                     }
@@ -363,6 +407,18 @@ impl Journal {
             .fetch_one(&self.db)
             .await?;
         ensure(row.get::<i64, _>(0) == 0, "memory cache checkpoint busy")
+    }
+}
+
+async fn require_access(db: &mut sqlx::SqliteConnection) -> Result<()> {
+    let denied: i64 =
+        sqlx::query_scalar("SELECT denied FROM local_memory_access WHERE singleton=1")
+            .fetch_one(db)
+            .await?;
+    if denied == 0 {
+        Ok(())
+    } else {
+        Err(crate::Error::CredentialRejected)
     }
 }
 

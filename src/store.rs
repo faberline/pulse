@@ -14,11 +14,11 @@ const OUTBOX_LIMIT: i64 = 1_000;
 const DAY_LIMIT: i64 = 1_000_000;
 const TASK_BUDGET: i64 = 250_000;
 const DEADLINE_MS: i64 = 15 * 60 * 1_000;
-const SCHEMA: i64 = 8;
+const SCHEMA: i64 = 9;
 
 mod approvals;
 mod memory;
-pub use memory::{BackupCheck, Maintenance};
+pub use memory::{BackupCheck, Maintenance, truncate_wal};
 
 #[derive(Clone)]
 pub struct Store {

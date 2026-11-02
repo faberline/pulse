@@ -1,5 +1,7 @@
 use super::parse;
 use super::*;
+#[path = "identity_tests.rs"]
+mod identity_tests;
 use crate::{
     client::Config,
     journal::{DeviceLock, Journal},
@@ -878,7 +880,9 @@ async fn native_command_loop_syncs_memory_and_reports_unsaved_input_without_mode
         repo: PathBuf::new(),
         data_dir: f._root.path().join("native-chat"),
     };
-    let device = crate::client::Device::open_chat(config, Arc::new(MemoryVault::default()))
+    let vault = Arc::new(MemoryVault::default());
+    let local_path = config.data_dir.clone();
+    let device = crate::client::Device::open_chat(config, vault.clone())
         .await
         .unwrap();
     let (commands, receiver) = mpsc::channel(8);
@@ -955,6 +959,105 @@ async fn native_command_loop_syncs_memory_and_reports_unsaved_input_without_mode
             .unwrap()
             .is_empty()
     );
+    let revoked_source = uuid::Uuid::new_v4().to_string();
+    commands
+        .send(NativeCommand::Action {
+            source_id: revoked_source,
+            action: HumanAction::Submit {
+                id: "not-a-task".into(),
+                goal: "記住 撤銷測試：NATIVE_REVOKED_CACHE".into(),
+            },
+        })
+        .await
+        .unwrap();
+    wait("cached before revocation", &mut state, |s| {
+        s.memories.iter().any(|m| m.body == "NATIVE_REVOKED_CACHE")
+    })
+    .await;
+    // The memory HTTP loop must be idle. Revocation now has to travel through
+    // the actual WebSocket reconnect handshake, without a new memory request.
+    let reader = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(local_path.join("device.db"))
+                .read_only(true),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let dirty: Option<String> =
+                sqlx::query_scalar("SELECT value FROM local_meta WHERE key='memory_dirty'")
+                    .fetch_optional(&reader)
+                    .await
+                    .unwrap();
+            if dirty.as_deref() == Some("") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    reader.close().await;
+    let old_device = vault.0.lock().unwrap().as_ref().unwrap().device.clone();
+    f.hub.revoke(&old_device).await.unwrap();
+    wait("revoked identity clears memory", &mut state, |s| {
+        !s.paired && !s.connected && s.memories.is_empty() && s.message.contains("已清除")
+    })
+    .await;
+    let denied = uuid::Uuid::new_v4().to_string();
+    commands
+        .send(NativeCommand::Action {
+            source_id: denied.clone(),
+            action: HumanAction::Submit {
+                id: "not-a-task".into(),
+                goal: "記住 拒絕來源：NATIVE_DENIED_INPUT".into(),
+            },
+        })
+        .await
+        .unwrap();
+    wait("denied memory keeps draft", &mut state, |s| {
+        s.input_failure.as_deref() == Some(&denied)
+    })
+    .await;
+    assert_eq!(f.writes.load(Ordering::SeqCst), 3);
+    identity_tests::assert_erased(
+        &local_path,
+        &["NATIVE_REVOKED_CACHE", "NATIVE_DENIED_INPUT"],
+    );
+    let code = f.hub.pairing(ClientRole::Chat, crate::now()).await.unwrap();
+    commands.send(NativeCommand::Pair { code }).await.unwrap();
+    wait("fresh human pairing", &mut state, |s| {
+        s.connected && s.paired
+    })
+    .await;
+    commands
+        .send(NativeCommand::Action {
+            source_id: uuid::Uuid::new_v4().to_string(),
+            action: HumanAction::Submit {
+                id: "not-a-task".into(),
+                goal: "記住 新配對來源：NATIVE_FRESH_PAIRING".into(),
+            },
+        })
+        .await
+        .unwrap();
+    wait("new authorized memory", &mut state, |s| {
+        s.memories.iter().any(|m| m.body == "NATIVE_FRESH_PAIRING")
+    })
+    .await;
+    assert_eq!(f.writes.load(Ordering::SeqCst), 4);
+    assert!(
+        !f.hub
+            .core
+            .list_memories(crate::now())
+            .await
+            .unwrap()
+            .iter()
+            .any(|m| m.body == "NATIVE_DENIED_INPUT")
+    );
+    assert!(f.hub.core.list_tasks(100).await.unwrap().is_empty());
     commands.send(NativeCommand::Shutdown).await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(3), worker)
         .await
