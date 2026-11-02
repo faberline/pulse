@@ -2,11 +2,27 @@
 use crate::{ComputerObservation, browser_input_text};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ComputerEffect {
     Press,
     SetText { text: String },
+}
+impl<'de> Deserialize<'de> for ComputerEffect {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Struct variants reject extra fields. Serde's tagged unit variant can
+        // otherwise discard them, which differs from the native command contract.
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+        enum Wire {
+            Press {},
+            SetText { text: String },
+        }
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Press {} => Self::Press,
+            Wire::SetText { text } => Self::SetText { text },
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

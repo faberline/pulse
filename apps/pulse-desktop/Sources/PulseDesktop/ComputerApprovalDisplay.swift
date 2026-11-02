@@ -1,5 +1,63 @@
 import Foundation
 
+// Approval display data and local button guards only. Rust independently
+// validates every command, source and grant before any native execution.
+enum ComputerError: Error { case invalidRequest, evidenceLimit }
+
+
+public struct ComputerTarget: Codable, Equatable, Sendable {
+  public let bundle_id: String
+  public let pid: Int32
+  public let window_id: UInt32
+  public init(bundleID: String, pid: Int32, windowID: UInt32) throws {
+    let parts = bundleID.split(separator: ".", omittingEmptySubsequences: false)
+    guard bundleID.utf8.count <= 255, parts.count >= 2, parts.allSatisfy({ !$0.isEmpty }),
+      bundleID.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 46 }),
+      pid > 0, windowID > 0 else { throw ComputerError.invalidRequest }
+    bundle_id = bundleID; self.pid = pid; window_id = windowID
+  }
+}
+
+public struct ComputerBinding: Codable, Equatable, Sendable {
+  public let operation_id: String
+  public let task_id: String
+  public let revision: String
+  public let device: String
+  public let epoch: String
+  public func validate() throws {
+    func decimal(_ value: String) -> Bool { UInt64(value).map { $0 > 0 && String($0) == value } ?? false }
+    guard !operation_id.isEmpty, operation_id.utf8.count <= 256,
+      !task_id.isEmpty, task_id.utf8.count <= 128,
+      !operation_id.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+      !task_id.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+      decimal(revision), decimal(epoch), UUID(uuidString: device) != nil
+    else { throw ComputerError.invalidRequest }
+  }
+}
+
+public struct ComputerRect: Codable, Equatable, Sendable {
+  public let x: Double
+  public let y: Double
+  public let width: Double
+  public let height: Double
+  public init(_ rect: CGRect) throws {
+    guard [rect.minX, rect.minY, rect.width, rect.height].allSatisfy({ $0.isFinite }),
+      rect.width > 0, rect.height > 0, rect.width <= 8192, rect.height <= 8192
+    else { throw ComputerError.evidenceLimit }
+    x = rect.minX; y = rect.minY; width = rect.width; height = rect.height
+  }
+}
+
+public struct ComputerElement: Codable, Equatable, Sendable {
+  public let id: String
+  public let role: String
+  public let label: String
+  public let value: String?
+  public let can_press: Bool
+  public let can_set_text: Bool
+}
+
+
 /// Path-free original view. The Rust caller must verify the durable Human grant first.
 public struct ComputerImageMetadata: Codable, Equatable, Sendable {
   public let digest: String
@@ -44,12 +102,7 @@ public struct ComputerExpectedView: Codable, Equatable, Sendable {
       else { throw ComputerError.invalidRequest }
     }
   }
-  func matches(_ current: ComputerObservation) -> Bool {
-    target == current.target && process_launched_at == current.process_launched_at
-      && title == current.title && frame == current.frame && elements == current.elements
-      && truncated == current.truncated && image.digest == current.image.digest
-      && image.length == current.image.length && image.width == current.image.width && image.height == current.image.height
-  }
+
 }
 func computerElementPath(_ value: String) -> Bool {
   let parts = value.split(separator: ".", omittingEmptySubsequences: false)
@@ -80,32 +133,6 @@ public struct ComputerActionIntent: Codable, Sendable {
         || (effect.kind == "set_text" && element.can_set_text && effect.text.map(computerInputText) == true)
     else { throw ComputerError.invalidRequest }
   }
-  static func decode(_ value: [String: Any]) throws -> Self {
-    func exact(_ value: Any?, _ keys: Set<String>) -> Bool {
-      guard let object = value as? [String: Any] else { return false }
-      return Set(object.keys) == keys
-    }
-    guard exact(value, ["observation", "element_id", "effect"]),
-      let observation = value["observation"] as? [String: Any],
-      exact(observation, ["binding", "target", "process_launched_at", "title", "frame", "elements", "truncated", "nonce", "observed_at", "expires_at", "image"]),
-      exact(observation["binding"], ["operation_id", "task_id", "revision", "device", "epoch"]),
-      exact(observation["target"], ["bundle_id", "pid", "window_id"]),
-      exact(observation["frame"], ["x", "y", "width", "height"]),
-      exact(observation["image"], ["digest", "length", "width", "height"]),
-      let elements = observation["elements"] as? [[String: Any]], elements.count <= 128,
-      elements.allSatisfy({ exact($0, ["id", "role", "label", "value", "can_press", "can_set_text"]) }),
-      let effect = value["effect"] as? [String: Any],
-      (effect["kind"] as? String == "press" && exact(effect, ["kind"]))
-        || (effect["kind"] as? String == "set_text" && exact(effect, ["kind", "text"]))
-    else { throw ComputerError.invalidRequest }
-    let result = try JSONDecoder().decode(Self.self, from: JSONSerialization.data(withJSONObject: value))
-    try result.validate(now: Int64(Date().timeIntervalSince1970 * 1000))
-    return result
-  }
+
 }
-public enum ComputerActionState: String, Codable, Sendable { case notExecuted = "not_executed", completed, unknown }
-public struct ComputerActionReceipt: Codable, Sendable {
-  public let binding: ComputerBinding
-  public let source_nonce: String
-  public let state: ComputerActionState
-}
+

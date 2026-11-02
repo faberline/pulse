@@ -277,7 +277,18 @@ impl Device {
         let mut input_failure: Option<String> = None;
         let mut memory_sync: Option<tokio::task::JoinHandle<Result<()>>> = None;
         let mut memory_retry = Instant::now();
+        let mut window_list: Option<
+            tokio::task::JoinHandle<Result<Vec<pulse_core::ComputerWindowChoice>>>,
+        > = None;
+        let mut windows: Option<ComputerWindowList> = None;
         let result=async {loop {tokio::select! {
+            completed=async {match window_list.as_mut(){Some(task)=>task.await,None=>std::future::pending().await}}=>{
+                window_list=None;
+                if let Some(state)=windows.as_mut() {
+                    state.loading=false;
+                    match completed {Ok(Ok(value))=>{state.windows=value;state.failed=false;},_=>{state.windows.clear();state.failed=true;}}
+                }
+            }
             completed=async{match memory_sync.as_mut(){Some(task)=>task.await,None=>std::future::pending().await}}=>{
                 memory_sync=None;
                 if !matches!(completed,Ok(Ok(()))) {memory_retry=Instant::now()+Duration::from_secs(3);message="記憶仍待同步。已保留待送要求，重連後先核對刪除狀態。".into();}
@@ -324,6 +335,7 @@ impl Device {
                     let config=self.config.clone();let journal=self.journal.clone();memory_sync=Some(tokio::spawn(async move{crate::memory_chat::client::sync(&config,&journal,&credential).await}));
                 }
                 state.artifact_loading=artifact_loading.clone();state.artifact_failure=artifact_failure.clone();
+                state.computer_windows=windows.clone();
                 if computer_selection.is_empty() && let Some(entry)=self.journal.take_computer_selection(crate::now()).await? {
                     computer_selecting=Some(entry.source_id.clone());let server=self.config.server.to_string();
                     computer_selection.spawn(async move {crate::computer_control::prepare(&server,entry.permit,entry.replace).await});
@@ -335,6 +347,21 @@ impl Device {
             done=&mut worker=>{done.map_err(|_|crate::Error::Rejected("local worker stopped".into()))??;return Err(crate::Error::Rejected("local worker stopped".into()));}
             command=commands.recv()=>{
                 match command {
+                    Some(NativeCommand::CancelComputerWindows{request_id})=>{
+                        ensure(self.journal.role==ClientRole::Chat,"window picker requires Human chat")?;
+                        if windows.as_ref().is_some_and(|s|s.request_id==request_id) {
+                            if let Some(task)=window_list.take(){task.abort();let _=task.await;}
+                            windows=None;
+                        }
+                    }
+                    Some(NativeCommand::ListComputerWindows{request_id})=>{
+                        ensure(self.journal.role==ClientRole::Chat && uuid::Uuid::parse_str(&request_id).is_ok(),"window picker requires Human chat")?;
+                        if windows.as_ref().is_some_and(|s|s.request_id==request_id) {continue;}
+                        if let Some(task)=window_list.take(){task.abort();let _=task.await;}
+                        windows=Some(ComputerWindowList {request_id,loading:true,failed:false,windows:vec![]});
+                        let server=self.config.server.to_string();
+                        window_list=Some(tokio::spawn(async move {crate::computer_control::list_windows(&server).await}));
+                    }
                     Some(NativeCommand::SubmitComputer{source_id,id,goal,selection,selected_at})=>{
                         if crate::memory_chat::parse(&goal).is_some() {
                             match self.journal.action(&source_id,HumanAction::Submit{id,goal}).await {
@@ -416,6 +443,10 @@ impl Device {
         }
         worker.abort();
         if let Some(task) = memory_sync {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = window_list {
             task.abort();
             let _ = task.await;
         }

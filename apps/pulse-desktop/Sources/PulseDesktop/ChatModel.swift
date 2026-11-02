@@ -104,6 +104,13 @@ final class ChatModel: ObservableObject {
     if send(pending.command) {pendingWindowReselection = pending;reselectionGeneration = generation}
     reselectingTask = nil
   }
+  func requestComputerWindows() -> String? {
+    let id = UUID().uuidString
+    return send(["kind":"list_computer_windows", "request_id":id]) ? id : nil
+  }
+  func cancelComputerWindows(_ id: String) {
+    send(["kind":"cancel_computer_windows", "request_id":id])
+  }
   func receive(_ value: NativeState, generation id: UUID) {
     guard generation == id else { return }
     state = value

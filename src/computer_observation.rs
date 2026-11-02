@@ -11,7 +11,10 @@ pub struct ComputerTarget {
 }
 impl ComputerTarget {
     pub fn valid(&self) -> bool {
-        self.pid > 0
+        // The Human approval interface cannot be a native tool target. Keep
+        // this rule in the shared core, not only in one frontend's picker.
+        self.bundle_id != "com.faberline.pulse"
+            && self.pid > 0
             && self.window_id > 0
             && self.bundle_id.len() <= 255
             && self.bundle_id.split('.').count() >= 2
@@ -29,6 +32,24 @@ impl ComputerTarget {
 pub struct ComputerSelection {
     pub target: ComputerTarget,
     pub process_launched_at: i64,
+}
+
+/// Local-only discovery for a Human picker. A choice grants no read or effect.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerWindowChoice {
+    pub selection: ComputerSelection,
+    pub app_name: String,
+    pub title: String,
+}
+impl ComputerWindowChoice {
+    pub fn valid(&self) -> bool {
+        self.selection.valid()
+            && !self.app_name.is_empty()
+            && self.app_name.len() <= 128
+            && !self.title.is_empty()
+            && self.title.len() <= 512
+    }
 }
 impl ComputerSelection {
     pub fn valid(&self) -> bool {

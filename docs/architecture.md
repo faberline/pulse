@@ -70,9 +70,12 @@ SwiftUI 是可替換的顯示與輸入層。任務關聯、記憶、批准核對
 目前 `pulse-chat` 的 JSON Lines 入口已不依賴 Swift。命令與回覆定義在 `crates/pulse-link/src/protocol.rs` 的 `NativeCommand`／`NativeState`；名稱是歷史名稱，不限制介面語言。
 這個入口使用 chat 身分，不能當作 executor 身分或新增工具授權。
 
-2026-11-02 邊界檢查：目前 `PulseComputerCore`／`PulseComputerHelper` 仍有 Swift 實作的 macOS 擷取與操作橋接；`ComputerWindowPicker` 也直接讀取系統視窗清單。
-依 U13，這些非顯示功能須移入 Rust local executor 的 macOS adapter，並由共用的本機協定供介面使用。
-這項遷移尚未完成。不能把目前 Swift helper 當作「Swift 只做 UI」已通過的證據；原有目標限縮、原圖核對、一次性批准、程序中止與未知結果限制仍須保留。
+2026-11-02 的 Rust adapter 候選已將 macOS 擷取、AX 操作與私有 PNG 儲存搬到 `crates/pulse-macos`。
+`pulse-computer` 由 Cargo 建置。舊 Swift helper 與其執行 target 已移除。
+`ComputerWindowPicker` 只透過 Rust chat 的命令查詢地端 executor，顯示回傳選項，不再直接讀取系統視窗清單。
+視窗清單只存在本機通道與短期畫面狀態，不進 server、模型、任務或 outbox。選單關閉時取消要求並終止其原生子程序。
+Swift 保留批准卡片的顯示資料與按鈕防呆；Rust 獨立核對實際來源、scope、修訂與批准，不信任 UI 已做的檢查。
+新 helper 協定是 `pulse-computer-observe-5`；Rust caller 拒絕舊版本。實機擷取／點擊／輸入仍須驗證，不能以建置或受控程序測試當成 D04／D05 的完整接受。
 
 remote executor 是 Pulse 自己的執行系統。沿用 `pulse-core::Store` 的持久任務、run token、checkpoint、重試與取消。先不增加另一套工作 DB、外部系統介面或服務。faberline/core 只在可減少重複程式時使用。模型與工具執行迴圈仍是 v0.4 工作，不能把現有狀態核心當作已完成的模型閉環。
 

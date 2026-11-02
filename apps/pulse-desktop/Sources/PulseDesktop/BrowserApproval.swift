@@ -1,5 +1,4 @@
 import SwiftUI
-import PulseComputerCore
 
 struct BrowserApproval: Decodable, Sendable {
   struct Token: Decodable, Sendable { let task_id: String; let revision: String }

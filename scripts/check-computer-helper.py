@@ -17,7 +17,7 @@ def call(arguments, payload=None):
     )
     assert len(result.stdout) <= 65_536
     value = json.loads(result.stdout)
-    assert value["version"] == "pulse-computer-observe-4"
+    assert value["version"] == "pulse-computer-observe-5"
     assert type(value["permissions"]["accessibility"]) is bool
     assert type(value["permissions"]["screen_capture"]) is bool
     assert value.get("observation") is None

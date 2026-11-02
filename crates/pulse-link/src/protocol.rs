@@ -431,6 +431,12 @@ pub struct Credential {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeCommand {
+    ListComputerWindows {
+        request_id: String,
+    },
+    CancelComputerWindows {
+        request_id: String,
+    },
     RebindComputer {
         source_id: String,
         task_id: String,
@@ -464,6 +470,8 @@ pub enum NativeCommand {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NativeState {
     #[serde(default)]
+    pub computer_windows: Option<ComputerWindowList>,
+    #[serde(default)]
     pub memories: Vec<pulse_core::Memory>,
     #[serde(default)]
     pub memory_synced_at: Option<i64>,
@@ -493,6 +501,13 @@ pub struct NativeState {
     pub synced_at: Option<i64>,
     pub tasks: Vec<pulse_core::Task>,
     pub messages: Vec<ChatMessage>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ComputerWindowList {
+    pub request_id: String,
+    pub loading: bool,
+    pub failed: bool,
+    pub windows: Vec<pulse_core::ComputerWindowChoice>,
 }
 
 pub fn hash(value: &impl Serialize) -> Result<String> {

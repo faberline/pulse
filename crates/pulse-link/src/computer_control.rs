@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
 };
 
@@ -25,6 +25,17 @@ struct SelectionRequest {
 struct SelectionResponse {
     version: u8,
     ready: bool,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum WindowRequest {
+    List { version: u8, server: String },
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WindowResponse {
+    version: u8,
+    windows: Vec<pulse_core::ComputerWindowChoice>,
 }
 
 pub(crate) struct PickerChannel {
@@ -132,13 +143,39 @@ impl PickerChannel {
     async fn handle(&self, stream: &mut UnixStream, runtime: &ComputerRuntime) -> Result<()> {
         same_user(stream)?;
         let mut bytes = Vec::new();
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            (&mut *stream).take(16_385).read_to_end(&mut bytes),
-        )
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut reader = BufReader::new(&mut *stream);
+            (&mut reader)
+                .take(16_385)
+                .read_until(b'\n', &mut bytes)
+                .await?;
+            ensure(reader.buffer().is_empty(), "extra local picker input")?;
+            Ok::<_, crate::Error>(())
+        })
         .await
         .map_err(|_| crate::Error::Rejected("local picker request timeout".into()))??;
         ensure(bytes.len() <= 16_384, "local picker request too large")?;
+        let value: serde_json::Value = parse(&bytes)?;
+        if value.get("kind").is_some() {
+            let WindowRequest::List { version, server } = parse(&bytes)?;
+            ensure(
+                version == 3 && server == self.server,
+                "invalid window list binding",
+            )?;
+            let mut extra = [0];
+            let windows = tokio::select! {
+                result=runtime.list_windows()=>result?,
+                _=stream.read(&mut extra)=>return Err(crate::Error::Rejected("window list cancelled or extra input".into())),
+            };
+            stream
+                .write_all(&serde_json::to_vec(&WindowResponse {
+                    version: 3,
+                    windows,
+                })?)
+                .await?;
+            stream.shutdown().await?;
+            return Ok(());
+        }
         let request: SelectionRequest = parse(&bytes)?;
         ensure(
             request.version == 2
@@ -173,6 +210,48 @@ impl PickerChannel {
         stream.shutdown().await?;
         Ok(())
     }
+}
+
+pub(crate) async fn list_windows(server: &str) -> Result<Vec<pulse_core::ComputerWindowChoice>> {
+    let directory = control_directory();
+    let metadata = std::fs::symlink_metadata(&directory)?;
+    ensure(
+        metadata.is_dir()
+            && !metadata.file_type().is_symlink()
+            && metadata.uid() == rustix::process::geteuid().as_raw()
+            && metadata.mode() & 0o077 == 0,
+        "private picker directory required",
+    )?;
+    let directory = directory.canonicalize()?;
+    let path = socket_path(&directory, server)?;
+    owned_socket(&path)?;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let mut stream = UnixStream::connect(&path).await?;
+        same_user(&stream)?;
+        let mut data = serde_json::to_vec(&WindowRequest::List {
+            version: 3,
+            server: server.into(),
+        })?;
+        data.push(b'\n');
+        stream.write_all(&data).await?;
+        // Keep the write half open. Full disconnect cancels the executor child.
+        let mut bytes = Vec::new();
+        stream.take(65_537).read_to_end(&mut bytes).await?;
+        ensure(bytes.len() <= 65_536, "window list response limit")?;
+        let value: WindowResponse = parse(&bytes)?;
+        ensure(
+            value.version == 3
+                && value.windows.len() <= 64
+                && value
+                    .windows
+                    .iter()
+                    .all(pulse_core::ComputerWindowChoice::valid),
+            "invalid window list",
+        )?;
+        Ok(value.windows)
+    })
+    .await
+    .map_err(|_| crate::Error::Rejected("window list timeout".into()))?
 }
 impl Drop for PickerChannel {
     fn drop(&mut self) {
@@ -235,6 +314,82 @@ async fn prepare_mode(
 mod tests {
     use super::*;
     use crate::computer_runtime::tests::fixture;
+    async fn window_stream(path: &Path, server: &str) -> UnixStream {
+        let mut stream = UnixStream::connect(path).await.unwrap();
+        let mut bytes = serde_json::to_vec(&WindowRequest::List {
+            version: 3,
+            server: server.into(),
+        })
+        .unwrap();
+        bytes.push(b'\n');
+        stream.write_all(&bytes).await.unwrap();
+        stream
+    }
+    #[tokio::test]
+    async fn frontend_neutral_local_inventory_does_not_capture_or_create_task_access() {
+        let (_fixture, runtime) = fixture("list-good");
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let directory = root.path().join("control");
+        let channel = PickerChannel::bind_at(&directory, "https://pulse.example/")
+            .await
+            .unwrap();
+        let path = channel.path.clone();
+        let worker = PickerWorker(tokio::spawn(channel.serve(runtime.clone())));
+        let stream = window_stream(&path, "https://pulse.example/").await;
+        let mut bytes = Vec::new();
+        stream.take(65537).read_to_end(&mut bytes).await.unwrap();
+        let response: WindowResponse = parse(&bytes).unwrap();
+        assert_eq!(response.version, 3);
+        assert_eq!(response.windows.len(), 1);
+        assert_eq!(
+            response.windows[0].selection.target,
+            runtime.configured_target().unwrap().clone()
+        );
+        assert!(runtime.selections().is_empty());
+        assert!(!_fixture.path().join("private/artifacts").exists());
+        worker.stop().await;
+    }
+    #[tokio::test]
+    async fn closing_window_picker_reaps_its_native_list_child_and_frees_capacity() {
+        let (fixture, runtime) = fixture("list-hang");
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let directory = root.path().join("control");
+        let channel = PickerChannel::bind_at(&directory, "https://pulse.example/")
+            .await
+            .unwrap();
+        let path = channel.path.clone();
+        let worker = PickerWorker(tokio::spawn(channel.serve(runtime.clone())));
+        let stream = window_stream(&path, "https://pulse.example/").await;
+        for _ in 0..200 {
+            if fixture.path().join("list-hang.pid").exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(fixture.path().join("list-hang.pid").exists());
+        drop(stream);
+        crate::computer_runtime::tests::assert_reaped(&runtime).await;
+        assert!(runtime.permissions().await.is_ok());
+        assert!(runtime.selections().is_empty());
+        worker.stop().await;
+    }
+    #[tokio::test]
+    async fn bad_inventory_origin_extra_authority_or_multiple_frames_never_start_a_child() {
+        let (fixture, runtime) = fixture("list-good");
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let directory = root.path().join("control");
+        let channel = PickerChannel::bind_at(&directory, "https://pulse.example/")
+            .await
+            .unwrap();
+        let path = channel.path.clone();
+        let worker = PickerWorker(tokio::spawn(channel.serve(runtime)));
+        for bytes in [b"{\"kind\":\"list\",\"version\":3,\"server\":\"https://other.example/\"}\n".as_slice(),b"{\"kind\":\"list\",\"version\":3,\"server\":\"https://pulse.example/\",\"grant\":true}\n",b"{\"kind\":\"list\",\"version\":3,\"server\":\"https://pulse.example/\"}\n{}"] {
+            let mut stream=UnixStream::connect(&path).await.unwrap();stream.write_all(bytes).await.unwrap();
+            let mut response=Vec::new();let _=stream.read_to_end(&mut response).await;assert!(response.is_empty());
+            assert!(!fixture.path().join("list-good.pid").exists());
+        }
+        worker.stop().await;
+    }
     fn permit(runtime: &ComputerRuntime, task: &str) -> ComputerPermit {
         let selected_at = crate::now();
         ComputerPermit {

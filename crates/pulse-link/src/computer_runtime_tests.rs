@@ -6,16 +6,27 @@ const FIXTURE: &str = r#"#!/usr/bin/python3
 import base64,hashlib,json,os,pathlib,sys,time
 script=pathlib.Path(__file__)
 mode=script.stem
-# Apple's /usr/bin/python3 launcher adds SDK variables even after env -i.
-assert set(os.environ)<= {'PATH','HOME','LC_CTYPE','CPATH','LIBRARY_PATH','MANPATH','SDKROOT','__CF_USER_TEXT_ENCODING'}
 script.with_suffix('.stage').write_text(mode)
 script.with_suffix('.pid').write_text(str(os.getpid()))
+# Apple's /usr/bin/python3 launcher adds SDK variables even after env -i.
+assert set(os.environ)<= {'PATH','HOME','LC_CTYPE','CPATH','LIBRARY_PATH','MANPATH','SDKROOT','__CF_USER_TEXT_ENCODING','PULSE_COMPUTER_BUNDLE_ID','PULSE_COMPUTER_PID','PULSE_COMPUTER_WINDOW_ID'}
+if 'PULSE_COMPUTER_PID' in os.environ:
+ assert os.environ['PULSE_COMPUTER_BUNDLE_ID']=='com.faberline.PulseComputerFixture' and os.environ['PULSE_COMPUTER_PID']=='42' and os.environ['PULSE_COMPUTER_WINDOW_ID']=='7'
 if mode=='hang' and not script.with_suffix('.allow').exists(): time.sleep(60)
 if mode=='oversize': print('x'*65537);sys.exit(0)
 if mode=='stderr': sys.stderr.write('x'*4097);sys.exit(0)
 if mode=='exit': sys.exit(74)
 if mode=='invalid': print('not-json');sys.exit(0)
-response={'version':'pulse-computer-observe-4','permissions':{'accessibility':True,'screen_capture':True}}
+response={'version':'pulse-computer-observe-5','permissions':{'accessibility':True,'screen_capture':True}}
+if sys.argv[1:]==['--list']:
+ response['windows']=[{'selection':{'target':{'bundle_id':'com.faberline.PulseComputerFixture','pid':42,'window_id':7},'process_launched_at':1},'app_name':'Owned fixture','title':'Only owned window'}]
+ if mode=='list-outside':response['windows'][0]['selection']['target']['pid']=43
+ if mode=='list-duplicate':response['windows']*=2
+ if mode=='list-large':response['windows']=[{'selection':{'target':{'bundle_id':'com.faberline.PulseComputerFixture','pid':42,'window_id':7+i},'process_launched_at':1},'app_name':'Owned fixture','title':'Only owned window'} for i in range(65)]
+ if mode=='list-error':response['error']='permissions_required'
+ if mode=='list-version':response['version']='old-helper'
+ if mode=='list-hang':time.sleep(60)
+ print(json.dumps(response));script.with_suffix('.done').write_text('response constructed');sys.exit(0)
 if mode=='version':response['version']='unknown-helper'
 if mode=='extra':response['grant']='forged'
 if sys.argv[1:]!=['--status']:
@@ -414,4 +425,29 @@ async fn missing_selection_invalid_binding_and_capacity_stop_before_spawn() {
     }
     assert!(runtime.observe(&binding()).await.is_err());
     assert!(!runtime.helper.with_extension("pid").exists());
+}
+
+#[tokio::test]
+async fn local_window_inventory_is_bounded_scoped_and_never_grants_a_task_permit() {
+    let (_dir, runtime) = fixture("list-good");
+    let windows = runtime.list_windows().await.unwrap();
+    assert_eq!(windows.len(), 1);
+    assert_eq!(windows[0].selection.target, runtime.target.clone().unwrap());
+    assert!(runtime.selections().is_empty());
+    assert!(!runtime.directory.exists());
+    for mode in [
+        "list-outside",
+        "list-duplicate",
+        "list-large",
+        "list-error",
+        "list-version",
+    ] {
+        let (_dir, mut runtime) = fixture(mode);
+        if mode == "list-large" {
+            runtime.target = None;
+        }
+        assert!(runtime.list_windows().await.is_err(), "{mode}");
+        assert!(runtime.selections().is_empty());
+        assert_reaped(&runtime).await;
+    }
 }

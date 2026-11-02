@@ -135,7 +135,7 @@ struct ChatView: View {
               }
               Button { model.reselectingTask = nil; model.showComputerPicker = true } label: { Label("程式視窗", systemImage: "macwindow") }
                 .disabled(model.pending != nil)
-                .sheet(isPresented: $model.showComputerPicker) { ComputerWindowPicker(taskGoal: model.reselectingTask?.goal, choose: model.chooseComputerWindow) }
+                .sheet(isPresented: $model.showComputerPicker) { ComputerWindowPicker(model: model, taskGoal: model.reselectingTask?.goal, choose: model.chooseComputerWindow) }
               Spacer()
               Text("⌘ Enter 傳送").font(.caption).foregroundStyle(.secondary)
               Button("傳送", action: model.submit).buttonStyle(.borderedProminent).disabled(

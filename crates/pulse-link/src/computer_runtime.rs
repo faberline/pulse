@@ -13,7 +13,7 @@ use tokio::{
     process::{Child, Command},
 };
 
-const VERSION: &str = "pulse-computer-observe-4";
+const VERSION: &str = "pulse-computer-observe-5";
 const RESPONSE_LIMIT: usize = 65_536;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -37,6 +37,7 @@ struct NativeResponse {
     error: Option<NativeError>,
     selection: Option<pulse_core::ComputerSelection>,
     action: Option<action::NativeActionReceipt>,
+    windows: Option<Vec<pulse_core::ComputerWindowChoice>>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -151,6 +152,39 @@ pub struct ComputerRuntime {
     observations: std::sync::Arc<std::sync::Mutex<Vec<ComputerObservation>>>,
 }
 impl ComputerRuntime {
+    pub async fn list_windows(&self) -> Result<Vec<pulse_core::ComputerWindowChoice>> {
+        let response = self.call(&["--list".into()], None, self.timeout).await?;
+        ensure(
+            response.error.is_none()
+                && response.permissions.screen_capture
+                && response.observation.is_none()
+                && response.selection.is_none()
+                && response.action.is_none(),
+            "native window list unavailable",
+        )?;
+        let windows = response
+            .windows
+            .ok_or_else(|| crate::Error::Rejected("native window list missing".into()))?;
+        ensure(
+            windows.len() <= 64
+                && windows.iter().all(|w| {
+                    w.valid()
+                        && self
+                            .target
+                            .as_ref()
+                            .is_none_or(|target| *target == w.selection.target)
+                }),
+            "native window list scope or capacity",
+        )?;
+        let mut ids = std::collections::BTreeSet::new();
+        ensure(
+            windows
+                .iter()
+                .all(|w| ids.insert(w.selection.target.window_id)),
+            "duplicate native window",
+        )?;
+        Ok(windows)
+    }
     /// A local operator's selection only. No request or model can set these values.
     pub fn from_environment(directory: &Path) -> Result<Option<Self>> {
         let bundle = std::env::var("PULSE_COMPUTER_BUNDLE_ID").ok();
@@ -565,6 +599,12 @@ impl ComputerRuntime {
             if let Some(home) = std::env::var_os("HOME") {
                 command.env("HOME", home);
             }
+            if let Some(target) = &self.target {
+                command
+                    .env("PULSE_COMPUTER_BUNDLE_ID", &target.bundle_id)
+                    .env("PULSE_COMPUTER_PID", target.pid.to_string())
+                    .env("PULSE_COMPUTER_WINDOW_ID", target.window_id.to_string());
+            }
             let child = command.spawn()?;
             let pid = child
                 .id()
@@ -622,6 +662,12 @@ impl ComputerRuntime {
                 response.version == VERSION,
                 "native helper version mismatch",
             )?;
+            if args != ["--list"] {
+                ensure(
+                    response.windows.is_none(),
+                    "unexpected native window inventory",
+                )?;
+            }
             Ok(response)
         })
         .await

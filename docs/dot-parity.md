@@ -6,7 +6,8 @@
 
 保留三個元件：server、單一 SwiftUI 對話框、executor。remote 是 Pulse 自己的 Rust 系統；local 是獨立 process。工具需要的短期子程序屬於 executor 內部，不增加另一套任務真相。
 2026-11-02 再確認：Swift 只做介面，Rust 擁有核心與共用通訊契約，供後續不同介面使用。
-現有 Swift macOS 擷取／操作橋接與視窗清單讀取尚須移到 Rust local executor；這是未完成的架構工作，不能以目前 helper 已可建置代替。
+macOS 擷取／操作與視窗清單的 Rust adapter 候選已接入 local executor；SwiftUI 只顯示與回傳人的選擇。實機擷取與操作仍未接受，不能以 helper 可建置代替。
+Rust／Swift 邊界、共用本機協定與驗證缺口見 [macOS adapter](macos-adapter.md)。
 
 | ID | 日常使用情境 | 目前狀態與完成證據 |
 |---|---|---|

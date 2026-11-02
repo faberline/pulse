@@ -1,0 +1,31 @@
+[package]
+name = "pulse-macos"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+description = "Bounded macOS native adapter for the Pulse Rust local executor"
+
+[dependencies]
+pulse-core = { path = "../.." }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+rustix = { version = "1", features = ["fs", "process"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSData", "NSDate", "NSDictionary", "NSError", "NSEnumerator", "NSRunLoop", "NSString", "NSValue"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "libc", "NSRunningApplication", "NSBitmapImageRep", "NSImageRep", "NSGraphics", "objc2-core-foundation", "objc2-core-graphics"] }
+objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = ["std", "libc", "SCShareableContent", "SCStream", "SCScreenshotManager", "block2", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media"] }
+objc2-core-foundation = { version = "0.3.2", features = ["CFArray", "CFString", "CFNumber", "CFRunLoop"] }
+objc2-core-graphics = { version = "0.3.2", features = ["CGImage", "CGDirectDisplay", "CGWindow"] }
+objc2-application-services = { version = "0.3.2", default-features = false, features = ["std", "libc", "HIServices", "AXUIElement", "AXError", "AXValue", "objc2-core-graphics"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
