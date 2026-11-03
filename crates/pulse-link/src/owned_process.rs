@@ -51,6 +51,17 @@ struct Entry {
 pub(crate) struct ProcessTracker(Arc<Mutex<State>>);
 
 impl ProcessTracker {
+    /// Callers must separately prevent new source work while using this result.
+    pub(crate) fn source_idle(&self, source: &SourceScope) -> Result<bool> {
+        let state = self
+            .0
+            .lock()
+            .map_err(|_| crate::Error::Rejected("process registry unavailable".into()))?;
+        Ok(!state
+            .entries
+            .values()
+            .any(|entry| entry.source.as_ref() == Some(source)))
+    }
     pub(crate) fn spawn(
         &self,
         command: &mut Command,

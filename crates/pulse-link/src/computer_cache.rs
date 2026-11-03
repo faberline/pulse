@@ -1,7 +1,7 @@
 //! Current-runtime image ownership. Unknown old resources are never erased.
 use crate::{Result, ensure, journal::private_dir, owned_process::SourceScope, protocol::hash};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::File,
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
@@ -9,6 +9,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
 use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 
@@ -21,6 +22,7 @@ struct Cache {
     owned: Mutex<Option<tempfile::TempDir>>,
     io: Arc<RwLock<()>>,
     blocked: AtomicBool,
+    last_used: Mutex<Instant>,
 }
 impl Drop for Cache {
     fn drop(&mut self) {
@@ -39,6 +41,16 @@ pub(crate) struct ImageLease {
     pub(crate) path: PathBuf,
     cache: Arc<Cache>,
     _read: OwnedRwLockReadGuard<()>,
+}
+impl Drop for ImageLease {
+    fn drop(&mut self) {
+        // The actual blocking reader owns this lease through its last read.
+        *self
+            .cache
+            .last_used
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Instant::now();
+    }
 }
 impl ImageLease {
     pub(crate) fn valid(&self) -> Result<()> {
@@ -61,6 +73,7 @@ impl Cache {
             owned: Mutex::new(None),
             io: Arc::new(RwLock::new(())),
             blocked: AtomicBool::new(true),
+            last_used: Mutex::new(Instant::now()),
         }
     }
     fn create(root: &Path, task: &str, revision: &str) -> Result<Self> {
@@ -97,6 +110,7 @@ impl Cache {
             owned: Mutex::new(Some(directory)),
             io: Arc::new(RwLock::new(())),
             blocked: AtomicBool::new(false),
+            last_used: Mutex::new(Instant::now()),
         })
     }
     fn validate(&self) -> Result<()> {
@@ -162,6 +176,60 @@ impl Cache {
     }
 }
 impl ImageCaches {
+    /// Expiry collection is not source erasure. Fenced revisions keep their tombstones.
+    pub(crate) fn collect_idle(
+        &self,
+        processes: &crate::owned_process::ProcessTracker,
+        protected: &BTreeSet<SourceScope>,
+        now: Instant,
+    ) -> Result<usize> {
+        let mut entries = self
+            .0
+            .lock()
+            .map_err(|_| crate::Error::Rejected("image registry unavailable".into()))?;
+        let mut removed = Vec::new();
+        let mut failure = None;
+        for (source, cache) in entries.iter() {
+            // The registry lock prevents a new acquire. A cloned cache also
+            // covers callers waiting for their read guard, not only live leases.
+            if cache.blocked.load(Ordering::Acquire)
+                || protected.contains(source)
+                || Arc::strong_count(cache) != 1
+            {
+                continue;
+            }
+            let last = *cache
+                .last_used
+                .lock()
+                .map_err(|_| crate::Error::Rejected("image activity unavailable".into()))?;
+            if now.saturating_duration_since(last) < Duration::from_secs(120) {
+                continue;
+            }
+            let Ok(_exclusive) = cache.io.try_write() else {
+                continue;
+            };
+            // A dropped future may leave a reaper running. Only an empty source
+            // registry proves its helper/group has finished successfully.
+            match processes.source_idle(source).and_then(|idle| {
+                if idle {
+                    cache.clear().map(|()| true)
+                } else {
+                    Ok(false)
+                }
+            }) {
+                Ok(true) => removed.push(source.clone()),
+                Ok(false) => {}
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
+            }
+        }
+        let count = removed.len();
+        for source in removed {
+            entries.remove(&source);
+        }
+        failure.map_or(Ok(count), Err)
+    }
     pub(crate) async fn acquire(
         &self,
         directory: &Path,
@@ -320,3 +388,6 @@ impl ImageCaches {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod expiry_tests;

@@ -109,6 +109,7 @@ async fn owned_process_failed_cleanup_is_never_a_stopped_result() {
     std::fs::write(original.join("private-profile"), b"owned source").unwrap();
     let child = hanging(&tracker, &scope, Some(directory)).await;
     let entry = child.entry.clone();
+    assert!(!tracker.source_idle(&scope).unwrap());
     // A changed directory identity must preserve the unrelated replacement.
     let moved = parent.path().join("moved-profile");
     std::fs::rename(&original, &moved).unwrap();
@@ -117,6 +118,7 @@ async fn owned_process_failed_cleanup_is_never_a_stopped_result() {
     tracker.fence(&scope).unwrap();
     drop(child);
     assert!(tracker.wait_source(&scope).await.is_err());
+    assert!(!tracker.source_idle(&scope).unwrap());
     assert_eq!(
         std::fs::read(original.join("human-file")).unwrap(),
         b"must keep"
@@ -135,6 +137,7 @@ async fn owned_process_failed_cleanup_is_never_a_stopped_result() {
     })
     .await
     .unwrap();
+    assert!(!tracker.source_idle(&scope).unwrap());
 }
 #[test]
 fn owned_process_source_requires_a_bounded_canonical_revision() {

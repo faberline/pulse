@@ -445,34 +445,59 @@ impl ComputerRuntime {
             .await?;
         self.images.clear(&self.directory, task, revision).await
     }
-    pub(crate) fn maintain(&self, tasks: &[pulse_core::Task]) {
-        if let Ok(mut entries) = self.permits.lock() {
+    pub(crate) fn maintain(&self, tasks: &[pulse_core::Task]) -> Result<()> {
+        self.maintain_at(tasks, crate::now(), std::time::Instant::now())
+    }
+    fn maintain_at(
+        &self,
+        tasks: &[pulse_core::Task],
+        now: i64,
+        idle_now: std::time::Instant,
+    ) -> Result<()> {
+        let permits = {
+            let mut entries = self
+                .permits
+                .lock()
+                .map_err(|_| crate::Error::Rejected("local selections unavailable".into()))?;
             entries.retain(|entry| {
-                entry.valid(crate::now())
+                entry.valid(now)
                     && tasks
                         .iter()
                         .find(|task| task.id == entry.task_id)
                         .is_none_or(|task| {
                             !task.state.terminal()
-                                && task.deadline > crate::now()
+                                && task.deadline > now
                                 && !task.cancel_requested
                                 && task.reason.as_deref() != Some("model_reply_ready")
                                 && task.revision.to_string() == entry.revision
                                 && entry.selection.scope().as_deref() == Some(&task.scope)
                         })
             });
-        }
-        let permits = self.selections();
-        if let Ok(mut observations) = self.observations.lock() {
+            entries.clone()
+        };
+        let protected = {
+            let mut observations = self
+                .observations
+                .lock()
+                .map_err(|_| crate::Error::Rejected("local observations unavailable".into()))?;
             observations.retain(|view| {
-                view.valid(crate::now())
+                view.valid(now)
                     && permits.iter().any(|permit| {
                         permit.task_id == view.binding.task_id
                             && permit.revision == view.binding.revision.to_string()
                             && permit.selection == view.selection()
                     })
             });
-        }
+            observations
+                .iter()
+                .map(|view| {
+                    SourceScope::new(&view.binding.task_id, &view.binding.revision.to_string())
+                })
+                .collect::<Result<std::collections::BTreeSet<_>>>()?
+        };
+        self.images
+            .collect_idle(&self.processes, &protected, idle_now)?;
+        Ok(())
     }
     pub async fn probe_selected(&self, selection: &pulse_core::ComputerSelection) -> Result<()> {
         ensure(

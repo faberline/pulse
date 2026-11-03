@@ -284,7 +284,7 @@ async fn local_selection_ends_on_reply_cancellation_or_revision_without_changing
     };
     for change in ["reply", "cancel", "revision"] {
         runtime.permit_local(permit.clone()).unwrap();
-        runtime.maintain(std::slice::from_ref(&task));
+        runtime.maintain(std::slice::from_ref(&task)).unwrap();
         assert!(runtime.permitted("task", "1", &selection));
         let mut changed = task.clone();
         match change {
@@ -292,7 +292,7 @@ async fn local_selection_ends_on_reply_cancellation_or_revision_without_changing
             "cancel" => changed.cancel_requested = true,
             _ => changed.revision += 1,
         }
-        runtime.maintain(&[changed]);
+        runtime.maintain(&[changed]).unwrap();
         assert!(!runtime.permitted("task", "1", &selection));
     }
     assert_eq!(store.task("task").await.unwrap().revision, 1);
@@ -615,5 +615,48 @@ async fn source_erasure_reaps_a_png_writer_before_removing_its_cache() {
     runtime.wait_source(&source.task_id, "1").await.unwrap();
     assert!(work.await.unwrap().is_err());
     assert!(!path.exists());
+    assert_reaped(&runtime).await;
+}
+
+#[tokio::test]
+async fn maintenance_keeps_live_approval_images_then_reclaims_expired_capacity_without_fencing() {
+    let (_root, runtime) = fixture("good");
+    let mut source = binding();
+    source.task_id = "task".into();
+    runtime.set_live(true);
+    let selection = pulse_core::ComputerSelection {
+        target: runtime.configured_target().unwrap().clone(),
+        process_launched_at: 1,
+    };
+    let now = crate::now();
+    runtime
+        .permit_local(pulse_core::ComputerPermit {
+            task_id: "task".into(),
+            revision: "1".into(),
+            selection: selection.clone(),
+            selected_at: now,
+            expires_at: now + 900_000,
+        })
+        .unwrap();
+    let evidence = runtime.observe_selected(&source, &selection).await.unwrap();
+    let lease = runtime.images.existing("task", "1").await.unwrap();
+    let path = lease.path.clone();
+    let file = path.join(format!("{}.png", evidence.observation.image.digest));
+    drop(lease);
+    let after_idle = Instant::now() + Duration::from_secs(121);
+    // A backwards wall-clock step can leave an approval live beyond monotonic TTL.
+    runtime.maintain_at(&[], crate::now(), after_idle).unwrap();
+    assert!(file.exists());
+    assert_eq!(runtime.observations.lock().unwrap().len(), 1);
+    runtime
+        .maintain_at(&[], evidence.observation.expires_at, after_idle)
+        .unwrap();
+    assert!(!path.exists());
+    assert!(runtime.observations.lock().unwrap().is_empty());
+    assert!(runtime.permitted("task", "1", &selection));
+    runtime.observe_selected(&source, &selection).await.unwrap();
+    let fresh = runtime.images.existing("task", "1").await.unwrap();
+    assert_ne!(fresh.path, path);
+    fresh.valid().unwrap();
     assert_reaped(&runtime).await;
 }

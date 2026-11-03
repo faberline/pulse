@@ -144,7 +144,7 @@ impl Executor {
     ) -> Result<()> {
         if let Some(runtime) = &self.computer {
             runtime.set_live(epoch.is_some());
-            runtime.maintain(tasks);
+            runtime.maintain(tasks)?;
         }
         if let Some(browser) = &self.browser {
             browser.maintain(epoch, tasks).await?;
