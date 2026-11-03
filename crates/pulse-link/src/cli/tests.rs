@@ -9,6 +9,48 @@ use std::{future::IntoFuture, sync::Mutex};
 #[derive(Default)]
 struct TestVault(Mutex<(Option<Credential>, Option<PairClaim>)>);
 struct FailedPendingVault(Option<i32>, &'static str);
+#[derive(Default)]
+struct PairingBoundary {
+    reached: tokio::sync::Notify,
+    released: (Mutex<bool>, std::sync::Condvar),
+}
+impl PairingBoundary {
+    fn wait(&self) -> Result<()> {
+        self.reached.notify_one();
+        let (lock, wake) = &self.released;
+        let (released, _) = wake
+            .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(30), |r| !*r)
+            .unwrap();
+        crate::ensure(*released, "fixture pairing boundary was not released")
+    }
+    fn release(&self) {
+        let (lock, wake) = &self.released;
+        *lock.lock().unwrap() = true;
+        wake.notify_all();
+    }
+}
+struct BoundaryVault {
+    inner: Arc<dyn Vault>,
+    boundary: Arc<PairingBoundary>,
+}
+impl Vault for BoundaryVault {
+    fn load(&self, account: &str) -> Result<Option<Credential>> {
+        self.inner.load(account)
+    }
+    fn pending(&self, account: &str) -> Result<Option<PairClaim>> {
+        self.inner.pending(account)
+    }
+    fn save_pending(&self, account: &str, claim: &PairClaim) -> Result<()> {
+        self.boundary.wait()?;
+        self.inner.save_pending(account, claim)
+    }
+    fn save(&self, account: &str, credential: &Credential) -> Result<()> {
+        self.inner.save(account, credential)
+    }
+    fn clear_pending(&self, account: &str) -> Result<()> {
+        self.inner.clear_pending(account)
+    }
+}
 impl Vault for FailedPendingVault {
     fn load(&self, _: &str) -> Result<Option<Credential>> {
         Ok(None)
@@ -94,19 +136,35 @@ async fn cli_pairing_failure_exits_promptly_without_echoing_secrets_or_sending_u
         };
         let before = calls.load(Ordering::SeqCst);
         let mut output = Vec::new();
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            run(
+        let boundary = Arc::new(PairingBoundary::default());
+        let vault = Arc::new(BoundaryVault {
+            inner: vault,
+            boundary: boundary.clone(),
+        });
+        let result = {
+            let running = run(
                 config,
                 Some("f".repeat(64)),
                 vault,
                 &b"must not create a task\n"[..],
                 &mut output,
                 false,
-            ),
-        )
-        .await
-        .unwrap();
+            );
+            tokio::pin!(running);
+            // Device migrations and private-cache recovery have the existing
+            // 30-second CLI startup budget. The failure deadline starts at the
+            // controlled vault boundary, not before the device exists.
+            tokio::select! {
+                _ = boundary.reached.notified() => {},
+                result = &mut running => panic!("case {index} exited before pairing: {result:?}"),
+                _ = tokio::time::sleep(Duration::from_secs(30)) => panic!("case {index} never reached pairing"),
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), before);
+            boundary.release();
+            tokio::time::timeout(Duration::from_secs(5), &mut running)
+                .await
+                .unwrap_or_else(|_| panic!("case {index} did not exit within five seconds after pairing failure injection"))
+        };
         assert!(result.is_err());
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains(expected), "{text}");
