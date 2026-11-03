@@ -14,7 +14,7 @@ const OUTBOX_LIMIT: i64 = 1_000;
 const DAY_LIMIT: i64 = 1_000_000;
 const TASK_BUDGET: i64 = 250_000;
 const DEADLINE_MS: i64 = 15 * 60 * 1_000;
-const SCHEMA: i64 = 17;
+const SCHEMA: i64 = 18;
 
 mod approvals;
 mod memory;

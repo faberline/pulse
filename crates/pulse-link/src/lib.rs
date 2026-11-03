@@ -35,6 +35,7 @@ mod server_projection;
 pub mod text_input;
 pub mod text_result;
 pub mod text_result_client;
+pub mod worker_cleanup;
 pub mod worker_erasure;
 
 #[derive(Debug, thiserror::Error)]

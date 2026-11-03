@@ -562,7 +562,7 @@ async fn schema14_upgrade_backfills_model_provenance_before_replaying_withdrawal
         ))
         .await
         .unwrap();
-        db.execute("DROP TABLE link_worker_fences; DROP TABLE link_erased_work; ALTER TABLE link_device DROP COLUMN worker_erasure; DROP TABLE memory_erased_reads; DROP TABLE memory_derived_messages; DROP TABLE link_erased_frames; ALTER TABLE link_device DROP COLUMN projection_erasure; DELETE FROM _sqlx_migrations WHERE version IN (15,16,17); PRAGMA user_version=14").await.unwrap();
+        db.execute("DROP TABLE link_worker_cleanup; ALTER TABLE link_device DROP COLUMN worker_cleanup; DROP TABLE link_worker_fences; DROP TABLE link_erased_work; ALTER TABLE link_device DROP COLUMN worker_erasure; DROP TABLE memory_erased_reads; DROP TABLE memory_derived_messages; DROP TABLE link_erased_frames; ALTER TABLE link_device DROP COLUMN projection_erasure; DELETE FROM _sqlx_migrations WHERE version IN (15,16,17,18); PRAGMA user_version=14").await.unwrap();
         // Reconstruct a schema14 body which had no derived-content purge.
         sqlx::query("UPDATE link_chat SET body=? WHERE id=?")
             .bind(DERIVED)

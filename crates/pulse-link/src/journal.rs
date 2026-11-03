@@ -109,11 +109,17 @@ CREATE TABLE IF NOT EXISTS local_inbox(sequence INTEGER PRIMARY KEY,id TEXT NOT 
 CREATE TABLE IF NOT EXISTS local_work(id TEXT PRIMARY KEY,envelope TEXT NOT NULL,state TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,accepted INTEGER NOT NULL DEFAULT 0);").execute(&db).await?;
         sqlx::raw_sql("CREATE TABLE IF NOT EXISTS local_erased_outbox(sequence INTEGER PRIMARY KEY REFERENCES local_outbox(sequence) ON DELETE CASCADE,operation_id TEXT NOT NULL,source_id TEXT NOT NULL,header TEXT NOT NULL CHECK(json_valid(header))); ").execute(&db).await?;
+        sqlx::raw_sql("CREATE TABLE IF NOT EXISTS local_worker_cleanup(operation_id TEXT PRIMARY KEY,receipt TEXT NOT NULL CHECK(json_valid(receipt)),sequence INTEGER UNIQUE REFERENCES local_outbox(sequence));").execute(&db).await?;
         let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
         let existing: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM local_meta WHERE key='device'")
                 .fetch_one(&mut *tx)
                 .await?;
+        if existing == 0 && role == ClientRole::LocalExecutor {
+            sqlx::query("INSERT INTO local_meta VALUES('worker_runtime_origin','fresh')")
+                .execute(&mut *tx)
+                .await?;
+        }
         sqlx::query("INSERT OR IGNORE INTO local_meta VALUES('role',?)")
             .bind(if existing == 0 {
                 role.as_str()
@@ -387,6 +393,12 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                 return Ok(());
             }
             let envelope: Envelope<DevicePayload> = parse(row.get::<String, _>("data").as_bytes())?;
+            if let DevicePayload::WorkerCleanup { .. } = &envelope.payload {
+                sqlx::query("DELETE FROM local_worker_cleanup WHERE sequence=?")
+                    .bind(sequence as i64)
+                    .execute(&mut *tx)
+                    .await?;
+            }
             if let DevicePayload::Human { source_id, .. } = envelope.payload {
                 sqlx::query("UPDATE local_pending SET accepted=1 WHERE id=?")
                     .bind(source_id)

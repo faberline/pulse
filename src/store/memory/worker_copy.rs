@@ -7,14 +7,30 @@ pub(super) struct WorkerCopy {
     device: String,
     server: String,
     groups: BTreeMap<String, (String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime: Option<WorkerRuntime>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkerRuntime {
+    id: String,
+    prior_clean: bool,
+    closed: bool,
 }
 impl WorkerCopy {
+    pub(super) fn compatible(&self, format: u8) -> bool {
+        format >= 5 && (self.runtime.is_none() || format >= 6) && self.valid()
+    }
     pub(super) fn valid(&self) -> bool {
         !self.device.is_empty()
             && self.device.len() <= 128
             && self.server.len() == 64
             && self.server.bytes().all(|b| b.is_ascii_hexdigit())
             && self.groups.len() <= 1000
+            && self
+                .runtime
+                .as_ref()
+                .is_none_or(|r| uuid::Uuid::parse_str(&r.id).is_ok())
             && self.groups.iter().all(|(id, (task, rev))| {
                 uuid::Uuid::parse_str(id).is_ok()
                     && !task.is_empty()
@@ -76,6 +92,114 @@ async fn replay(db: &mut SqliteConnection, copy: &WorkerCopy, opening: bool) -> 
     Ok(())
 }
 impl Store {
+    /// A fresh process does not prove that a previous process has stopped.
+    /// Keep that distinction outside SQLite so a database restore cannot clear it.
+    pub async fn begin_worker_runtime(
+        &self,
+        device: &str,
+        server: &str,
+        runtime: &str,
+        resources_absent: bool,
+    ) -> Result<()> {
+        require(
+            uuid::Uuid::parse_str(runtime).is_ok(),
+            "invalid worker runtime",
+        )?;
+        let _lease = self.memory_guard.lease().await?;
+        let mut value = self
+            .memory_guard
+            .read()?
+            .ok_or_else(|| Error::Rejected("worker restrictions missing".into()))?;
+        let mut db = self.pool.acquire().await?;
+        binding(&mut db, device, server).await?;
+        let legacy: i64 = sqlx::query_scalar("SELECT count(*) FROM local_work")
+            .fetch_one(&mut *db)
+            .await?;
+        let fresh: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM local_meta WHERE key='worker_runtime_origin' AND value='fresh'",
+        )
+        .fetch_one(&mut *db)
+        .await?;
+        let copy = value.worker.get_or_insert_with(|| WorkerCopy {
+            device: device.into(),
+            server: server.into(),
+            groups: BTreeMap::new(),
+            runtime: None,
+        });
+        require(
+            copy.device == device && copy.server == server,
+            "worker keeper changed",
+        )?;
+        if let Some(prior) = &copy.runtime
+            && prior.id == runtime
+        {
+            return require(!prior.closed, "worker runtime already closed");
+        }
+        let prior_clean = resources_absent
+            && match &copy.runtime {
+                Some(prior) => prior.prior_clean && prior.closed,
+                None => fresh == 1 && legacy == 0 && copy.groups.is_empty(),
+            };
+        copy.runtime = Some(WorkerRuntime {
+            id: runtime.into(),
+            prior_clean,
+            closed: false,
+        });
+        value.format = value.format.max(6);
+        self.memory_guard.write(&value)
+    }
+    /// Call only after the owned process groups, readers and caches have closed.
+    pub async fn close_worker_runtime(
+        &self,
+        device: &str,
+        server: &str,
+        runtime: &str,
+    ) -> Result<()> {
+        let _lease = self.memory_guard.lease().await?;
+        let mut value = self
+            .memory_guard
+            .read()?
+            .ok_or_else(|| Error::Rejected("worker restrictions missing".into()))?;
+        let mut db = self.pool.acquire().await?;
+        binding(&mut db, device, server).await?;
+        let copy = value
+            .worker
+            .as_mut()
+            .ok_or_else(|| Error::Rejected("worker runtime missing".into()))?;
+        require(
+            copy.device == device && copy.server == server,
+            "worker keeper changed",
+        )?;
+        let current = copy
+            .runtime
+            .as_mut()
+            .ok_or_else(|| Error::Rejected("worker runtime missing".into()))?;
+        require(current.id == runtime, "worker runtime changed")?;
+        current.closed = true;
+        self.memory_guard.write(&value)
+    }
+    pub async fn worker_runtime_verified(
+        &self,
+        device: &str,
+        server: &str,
+        runtime: &str,
+    ) -> Result<bool> {
+        let _lease = self.memory_guard.lease().await?;
+        let value = self
+            .memory_guard
+            .read()?
+            .ok_or_else(|| Error::Rejected("worker restrictions missing".into()))?;
+        let Some(copy) = value.worker else {
+            return Ok(false);
+        };
+        require(
+            copy.device == device && copy.server == server,
+            "worker keeper changed",
+        )?;
+        Ok(copy
+            .runtime
+            .is_some_and(|r| r.id == runtime && r.prior_clean && !r.closed))
+    }
     pub async fn record_worker_erasure(
         &self,
         context: &crate::WorkerErasure,
@@ -93,6 +217,7 @@ impl Store {
             device: context.device.clone(),
             server: server.into(),
             groups: BTreeMap::new(),
+            runtime: None,
         });
         require(
             copy.device == context.device && copy.server == server,
@@ -109,7 +234,7 @@ impl Store {
             (context.task_id.clone(), context.revision.clone()),
         );
         require(copy.valid(), "worker restriction capacity or identity")?;
-        value.format = 5;
+        value.format = value.format.max(5);
         self.memory_guard.write(&value)?;
         replay(&mut tx, value.worker.as_ref().unwrap(), false).await?;
         tx.commit().await?;

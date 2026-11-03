@@ -5,7 +5,7 @@ Swift 只處理介面與輸入。
 來源核對、清除、傳輸與取消均由 Rust 處理。
 其他介面可以使用同一套核心。
 
-資料庫 schema 為 17。
+資料庫 schema 為 18。
 remote workflow 為 `pulse-remote-22`。
 policy 為 `approved-effects-memory-fences-9`。
 
@@ -52,13 +52,38 @@ Rust 另已接上子程序退出核對與 Chrome profile 清理候選，見 [程
 `cargo test -p pulse-link --test task_memory_sources` 核對 server 的來源清除與舊 schema 升級。
 這兩組測試不會呼叫付費模型，也不會操作真實 macOS 視窗。
 
+`cargo test -p pulse-link --lib worker_cleanup` 另核對停止回報、實際測試子程序退出、圖片讀取、佇列滿載、SQL 故障、資料庫還原及真正 WebSocket／HTTP 狀態查詢。
+隔離 Chrome 的回報測試須另設 `PULSE_TEST_BROWSER_DRIVER`，再執行 `cargo test -p pulse-link --lib worker_cleanup_real_chrome_receipt -- --ignored`。
+它核對 A 的 profile 移除後才送回報，並保留 B 的 session 與 profile。
+這不是 macOS 視窗擷取、模型對話或完整日常使用驗收。
+
 ## 確認的意義與剩餘工作
 
-傳輸確認只表示持久資料已清除。
+傳輸確認只表示該訊息已完成本機持久處理。
 它不證明操作成功、未執行，或實機程序已完全停止。
 server 的未知結果與已保留預算仍保留。
 
+Rust 另有獨立的 `WorkerCleanup` 回報。
+它綁定原來源、任務修訂、裝置及已接受的清除通知標頭。
+地端核對目前持有的程序群組退出、圖片讀取結束與自有快取清除後，才保存回報。
+回報先進入最多 1,000 筆的獨立持久佇列，再排入一般傳輸佇列。
+一般佇列滿載時，已核對的回報仍會保留。
+重連與確認遺失會重送同一封回報，不重做原操作。
+
+server 以 WebSocket 升級回覆的 `x-pulse-worker-cleanup: 1` 宣告支援。
+新版地端確認支援後，才宣告版本 1 的回報能力。
+舊版連線不會新增未知 JSON 欄位或訊息。
+已配對的介面可查詢 `GET /v1/worker-cleanup/{operation_id}`。
+結果為 `owned_runtime_cleanup: verified` 或 `unverified`，沒有來源正文。
+這只表示自有 runtime 的清除核對，不表示原操作已成功或全部副本已清除。
+
+runtime 的開啟及正常關閉紀錄保存在 SQLite 以外。
+強制退出、舊版 journal、未知舊檔案或缺少正常關閉紀錄時，保持未核對。
+後續新 process 的空清單不能清除這項不確定狀態。
+只還原 SQLite 也不能將它改為已核對。
+已在先前完成核對並保存的回報仍可重送。
+
 目前 process 持有的原生 PNG 已加入分任務清除與到期容量回收候選。舊共用 PNG、舊 profile 與硬退出後的孤兒程序仍須完整處理。
-provider 已加入送出前與等待核對，模型工具派工也已加入來源限制鎖；見 [任務來源核對](task-memory-sources.md)。server 的獨立停止回報及其他 adapter 的完整在途取消仍須完成。
+provider 已加入送出前與等待核對，模型工具派工也已加入來源限制鎖；見 [任務來源核對](task-memory-sources.md)。server 的獨立自有 runtime 清除回報已有候選。其他 adapter 的完整在途取消、舊 runtime 與孤兒程序處理仍須完成。
 子任務明確採用父來源已有候選。自動規劃的完整來源繼承、關閉副本與正式還原仍未完成。
 這個候選不代表 D06、D08 或 K15 已接受。

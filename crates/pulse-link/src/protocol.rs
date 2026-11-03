@@ -270,6 +270,9 @@ pub enum HumanAction {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DevicePayload {
+    WorkerCleanup {
+        receipt: Box<crate::worker_cleanup::WorkerCleanup>,
+    },
     ArtifactChunk {
         operation_id: String,
         artifact: crate::artifact::ArtifactRef,
@@ -403,6 +406,9 @@ pub enum ClientWire {
         version: u8,
     },
     WorkerErasureReady,
+    WorkerCleanupReady {
+        version: u8,
+    },
     ErasedData {
         header: pulse_core::ErasedProjection,
         operation_id: String,

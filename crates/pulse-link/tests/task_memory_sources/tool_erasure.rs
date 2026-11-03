@@ -486,11 +486,11 @@ async fn tool_source_schema15_and16_restore_backfills_then_scrubs_evidence() {
         ))
         .await
         .unwrap();
-        db.execute("DROP TABLE link_worker_fences; DROP TABLE link_erased_work; ALTER TABLE link_device DROP COLUMN worker_erasure").await.unwrap();
+        db.execute("DROP TABLE link_worker_cleanup; ALTER TABLE link_device DROP COLUMN worker_cleanup; DROP TABLE link_worker_fences; DROP TABLE link_erased_work; ALTER TABLE link_device DROP COLUMN worker_erasure").await.unwrap();
         if schema == 15 {
-            db.execute("DROP TABLE memory_erased_reads; DELETE FROM _sqlx_migrations WHERE version IN (16,17); PRAGMA user_version=15").await.unwrap();
+            db.execute("DROP TABLE memory_erased_reads; DELETE FROM _sqlx_migrations WHERE version IN (16,17,18); PRAGMA user_version=15").await.unwrap();
         } else {
-            db.execute("ALTER TABLE memory_erased_reads DROP COLUMN context; DELETE FROM _sqlx_migrations WHERE version=17; PRAGMA user_version=16").await.unwrap();
+            db.execute("ALTER TABLE memory_erased_reads DROP COLUMN context; DELETE FROM _sqlx_migrations WHERE version IN (17,18); PRAGMA user_version=16").await.unwrap();
         }
         if schema == 15 {
             sqlx::query("DELETE FROM memory_derived_messages WHERE id=?")

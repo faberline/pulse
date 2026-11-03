@@ -45,7 +45,8 @@ Git 與原生 helper 會收到停止要求，並核對子程序回收與程序�
 直接中止 `Device::run` future 或強制終止程序，不會完成這個正常關閉流程。
 瀏覽器 runtime 已停止新增獨立成果 PNG；原圖仍交給 journal 與 server 保存，見 [瀏覽器交接](browser-chat.md#boundaries)。
 舊的瀏覽器成果 PNG、server／chat 副本、舊 runtime 的檔案、孤兒程序與正式恢復仍須另行處理。
-這個結果也不是 server 的獨立停止回報，不能代替完整來源清除或實機接受。
+server 另已加入獨立的自有 runtime 清除回報候選，見 [地端來源清除](worker-source-erasure.md)。
+它仍不能代替完整來源清除或實機接受。
 
 ## 私有檔案
 

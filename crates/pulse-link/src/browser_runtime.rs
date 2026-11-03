@@ -32,6 +32,9 @@ pub struct BrowserRuntime {
     pub(crate) processes: ProcessTracker,
 }
 impl BrowserRuntime {
+    pub(crate) fn prior_resources_absent(&self) -> bool {
+        crate::worker_cleanup::resources_absent(&self.directory, false)
+    }
     pub fn from_environment(directory: &Path) -> Result<Option<Self>> {
         let Some(driver) = std::env::var_os("PULSE_BROWSER_DRIVER") else {
             return Ok(None);

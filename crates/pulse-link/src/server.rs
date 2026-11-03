@@ -295,7 +295,7 @@ impl Hub {
         Ok(())
     }
     pub async fn recover(&self) -> Result<()> {
-        sqlx::query("UPDATE link_device SET worker_erasure=0,projection_erasure=0,schedule_notices=0,lease_until=0,epoch=epoch+1")
+        sqlx::query("UPDATE link_device SET worker_cleanup=0,worker_erasure=0,projection_erasure=0,schedule_notices=0,lease_until=0,epoch=epoch+1")
             .execute(&self.db)
             .await?;
         let devices: Vec<String> = sqlx::query_scalar("SELECT id FROM link_device")
@@ -309,7 +309,7 @@ impl Hub {
     }
     pub async fn end(&self, device: &str, epoch: u64) -> Result<()> {
         let changed = sqlx::query(
-            "UPDATE link_device SET worker_erasure=0,projection_erasure=0,schedule_notices=0,lease_until=0 WHERE id=? AND epoch=?",
+            "UPDATE link_device SET worker_cleanup=0,worker_erasure=0,projection_erasure=0,schedule_notices=0,lease_until=0 WHERE id=? AND epoch=?",
         )
         .bind(device)
         .bind(epoch as i64)
@@ -331,7 +331,7 @@ impl Hub {
                 .await?;
         ensure(cursor <= max as u64, "resume cursor exceeds sent data")?;
         Self::reset_conversation_capability(&mut tx, device).await?;
-        let row=sqlx::query("UPDATE link_device SET worker_erasure=0,projection_erasure=0,schedule_notices=0,epoch=epoch+1,lease_until=? WHERE id=? AND revoked=0 RETURNING epoch").bind(time+LEASE_MS).bind(device).fetch_optional(&mut *tx).await?.ok_or_else(||crate::Error::Rejected("device revoked".into()))?;
+        let row=sqlx::query("UPDATE link_device SET worker_cleanup=0,worker_erasure=0,projection_erasure=0,schedule_notices=0,epoch=epoch+1,lease_until=? WHERE id=? AND revoked=0 RETURNING epoch").bind(time+LEASE_MS).bind(device).fetch_optional(&mut *tx).await?.ok_or_else(||crate::Error::Rejected("device revoked".into()))?;
         let epoch: i64 = row.get("epoch");
         sqlx::query("UPDATE link_outbox SET acknowledged=1 WHERE device=? AND sequence<=?")
             .bind(device)
@@ -807,6 +807,11 @@ impl Hub {
     ) -> Result<()> {
         let (sequence, _) = envelope.validate()?;
         ensure(envelope.device == device, "wrong device")?;
+        if let DevicePayload::WorkerCleanup { receipt } = &envelope.payload {
+            return self
+                .receive_worker_cleanup(device, envelope, receipt, time)
+                .await;
+        }
         let role: String =
             sqlx::query_scalar("SELECT role FROM link_device WHERE id=? AND revoked=0")
                 .bind(device)
@@ -920,6 +925,11 @@ impl Hub {
         time: i64,
     ) -> Result<()> {
         match &envelope.payload {
+            DevicePayload::WorkerCleanup { .. } => {
+                return Err(crate::Error::Rejected(
+                    "cleanup requires separate receipt transaction".into(),
+                ));
+            }
             DevicePayload::ArtifactChunk {
                 operation_id,
                 artifact,
@@ -1571,6 +1581,7 @@ pub fn router(hub: Hub) -> Router {
             get(crate::memory_chat::server::view).post(crate::memory_chat::server::change),
         )
         .route("/v1/tasks/{id}", get(task))
+        .route("/v1/worker-cleanup/{id}", get(worker_cleanup))
         .route("/v1/artifacts/{id}/{digest}", get(artifact))
         .route("/v1/text-results/{id}", get(text_result_manifest))
         .route("/v1/text-results/{id}/{digest}", get(text_result))
@@ -1583,6 +1594,21 @@ fn bearer(headers: &HeaderMap) -> Result<&str> {
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
         .ok_or_else(|| crate::Error::Rejected("missing bearer".into()))
+}
+async fn worker_cleanup(
+    State(hub): State<Arc<Hub>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    if let Ok(token) = bearer(&headers)
+        && let Ok(device) = hub.authenticate(token).await
+        && let Ok(allowed) = sqlx::query_scalar::<_,i64>("SELECT count(*) FROM memory_erased_reads e JOIN link_reads r ON r.id=e.id JOIN link_device d ON d.id=? WHERE e.id=? AND (d.role='chat' OR r.device=d.id)").bind(&device).bind(&id).fetch_one(&hub.db).await
+        && allowed == 1
+        && let Ok(verified) = hub.worker_cleanup_verified(&id).await
+    {
+        return ([("cache-control","no-store")], axum::Json(json!({"operation_id":id,"owned_runtime_cleanup":if verified {"verified"} else {"unverified"}}))).into_response();
+    }
+    StatusCode::NOT_FOUND.into_response()
 }
 async fn pair(State(hub): State<Arc<Hub>>, bytes: Bytes) -> impl IntoResponse {
     let result = match parse::<PairRequest>(&bytes) {
@@ -1701,9 +1727,14 @@ async fn upgrade(
             return authentication_response(&error, StatusCode::UNAUTHORIZED);
         }
     };
-    ws.max_message_size(MAX_FRAME)
+    let mut response = ws
+        .max_message_size(MAX_FRAME)
         .max_frame_size(MAX_FRAME)
-        .on_upgrade(move |socket| session(hub, device, socket))
+        .on_upgrade(move |socket| session(hub, device, socket));
+    response
+        .headers_mut()
+        .insert("x-pulse-worker-cleanup", "1".parse().unwrap());
+    response
 }
 
 /// A storage failure is not evidence that an identity was revoked. Clients may
@@ -1797,6 +1828,7 @@ async fn session(hub: Arc<Hub>, device: String, mut socket: WebSocket) {
                         ClientWire::ScheduleReady=>hub.schedule_ready(&device,epoch,now()).await?,
                         ClientWire::ConversationReady{version}=>hub.conversation_ready(&device,epoch,version,now()).await?,
                         ClientWire::WorkerErasureReady=>hub.worker_erasure_ready(&device,epoch,now()).await?,
+                        ClientWire::WorkerCleanupReady{version}=>hub.worker_cleanup_ready(&device,epoch,version,now()).await?,
                         ClientWire::ErasedData{header,operation_id,source_id}=>{hub.receive_erased_worker(&device,&header,&operation_id,&source_id).await?;send(&mut socket,&ServerWire::Ack{sequence:header.sequence,id:header.id}).await?;}
                         ClientWire::ProjectionErasureReady=>hub.projection_erasure_ready(&device,epoch,now()).await?,
                         ClientWire::ComputerReady{permits,interactions}=>hub.set_computer_capability(&device,epoch,permits,interactions,now()).await?,

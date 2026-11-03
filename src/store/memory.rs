@@ -180,11 +180,11 @@ impl MemoryGuard {
         let value: Restrictions = serde_json::from_slice(&bytes)
             .map_err(|_| Error::Rejected("invalid memory restrictions".into()))?;
         require(
-            (1..=5).contains(&value.format)
+            (1..=6).contains(&value.format)
                 && value
                     .worker
                     .as_ref()
-                    .is_none_or(|w| value.format >= 5 && w.valid())
+                    .is_none_or(|w| w.compatible(value.format))
                 && uuid::Uuid::parse_str(&value.keeper).is_ok()
                 && value.removed.len() <= 20_100
                 && revocations::valid(&value)
@@ -284,7 +284,7 @@ impl Store {
             false
         };
         if upgraded || imported || manifest.format < 4 {
-            manifest.format = 4;
+            manifest.format = manifest.format.max(4);
             self.memory_guard.write(&manifest)?;
         }
         reconcile(&mut tx, &manifest).await?;

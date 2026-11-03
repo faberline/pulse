@@ -101,7 +101,7 @@ pub(super) fn valid(value: &Restrictions) -> bool {
     value.withdrawals.len() <= RECEIPTS
         && unknown.len() <= UNKNOWN_RECEIPTS
         && unknown_sources.len() <= 10_000
-        && (value.withdrawals.is_empty() || (value.format == 4 && value.copy.is_some()))
+        && (value.withdrawals.is_empty() || (value.format >= 4 && value.copy.is_some()))
         && value
             .withdrawals
             .values()
@@ -125,7 +125,7 @@ fn advance(value: &mut Restrictions, reserve: bool) -> Result<()> {
         .checked_add(1)
         .filter(|v| *v <= i64::MAX as u64)
         .ok_or_else(|| Error::Rejected("memory copy serial exhausted".into()))?;
-    value.format = 4;
+    value.format = value.format.max(4);
     require(valid(value), "withdrawal evidence capacity or identity")?;
     if reserve {
         require(

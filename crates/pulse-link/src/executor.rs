@@ -10,12 +10,22 @@ use tokio::io::AsyncReadExt;
 
 #[derive(Clone)]
 pub struct Executor {
+    pub(crate) runtime_id: String,
     root: PathBuf,
     browser: Option<crate::browser_runtime::BrowserRuntime>,
     computer: Option<crate::computer_runtime::ComputerRuntime>,
     processes: crate::owned_process::ProcessTracker,
 }
 impl Executor {
+    pub(crate) fn prior_resources_absent(&self) -> bool {
+        self.browser
+            .as_ref()
+            .is_none_or(|b| b.prior_resources_absent())
+            && self
+                .computer
+                .as_ref()
+                .is_none_or(|c| c.prior_resources_absent())
+    }
     pub(crate) async fn shutdown(&self) -> Result<()> {
         // Fence every adapter before waiting for any one adapter to finish.
         let mut results = vec![self.processes.close_admission()];
@@ -91,6 +101,7 @@ impl Executor {
         let root = root.canonicalize()?;
         ensure(root.is_dir(), "repo root must be a directory")?;
         Ok(Self {
+            runtime_id: uuid::Uuid::new_v4().to_string(),
             root,
             browser: None,
             computer: None,

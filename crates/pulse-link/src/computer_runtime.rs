@@ -154,6 +154,9 @@ pub struct ComputerRuntime {
     images: crate::computer_cache::ImageCaches,
 }
 impl ComputerRuntime {
+    pub(crate) fn prior_resources_absent(&self) -> bool {
+        crate::worker_cleanup::resources_absent(&self.directory, true)
+    }
     pub(crate) fn begin_shutdown(&self) -> Result<()> {
         let mut results = vec![
             self.images.begin_shutdown(),

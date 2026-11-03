@@ -106,6 +106,7 @@ impl Journal {
     }
     pub async fn deliveries(&self) -> Result<Vec<DeviceDelivery>> {
         self.replay_worker_erasure_rules().await?;
+        self.flush_worker_cleanup().await?;
         let rows=sqlx::query("SELECT o.data,e.header,e.operation_id,e.source_id FROM local_outbox o LEFT JOIN local_erased_outbox e ON e.sequence=o.sequence ORDER BY o.sequence LIMIT 100").fetch_all(&self.db).await?;
         let mut output = Vec::new();
         for row in rows {

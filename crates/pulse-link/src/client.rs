@@ -196,6 +196,11 @@ impl Device {
     ) -> Result<()> {
         let mut computer_control = None;
         let result = async {
+            if let Some(executor) = &self.executor {
+                self.journal
+                    .begin_worker_runtime(executor, &self.config.data_dir)
+                    .await?;
+            }
             if let Some(runtime) = self.executor.as_ref().and_then(Executor::computer_runtime) {
                 computer_control = Some(
                     crate::computer_control::PickerWorker::start(
@@ -213,7 +218,10 @@ impl Device {
             task.stop().await;
         }
         let cleanup = match &self.executor {
-            Some(executor) => executor.shutdown().await,
+            Some(executor) => match executor.shutdown().await {
+                Ok(()) => self.journal.close_worker_runtime(executor).await,
+                Err(error) => Err(error),
+            },
             None => Ok(()),
         };
         result.and(cleanup)
@@ -743,7 +751,7 @@ async fn connected(
     let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
         .max_message_size(Some(MAX_FRAME))
         .max_frame_size(Some(MAX_FRAME));
-    let (mut socket, _) = tokio::time::timeout(
+    let (mut socket, response) = tokio::time::timeout(
         Duration::from_secs(10),
         tokio_tungstenite::connect_async_with_config(request, Some(ws_config), false),
     )
@@ -761,6 +769,10 @@ async fn connected(
         }
         _ => crate::Error::Rejected("socket connect failed".into()),
     })?;
+    let cleanup_supported = response
+        .headers()
+        .get("x-pulse-worker-cleanup")
+        .is_some_and(|v| v == "1");
     wire(
         &mut socket,
         &ClientWire::Hello {
@@ -791,7 +803,10 @@ async fn connected(
                         if computer_checks.is_empty() { let executor=executor.clone(); computer_checks.spawn(async move { executor.computer_capabilities().await }); }
                     }
                     for item in journal.deliveries().await? {match item {
-                        crate::worker_erasure::DeviceDelivery::Data(envelope)=>wire(&mut socket,&ClientWire::Data{envelope}).await?,
+                        crate::worker_erasure::DeviceDelivery::Data(envelope)=>{
+                            if !cleanup_supported && matches!(envelope.payload, DevicePayload::WorkerCleanup { .. }) { break; }
+                            wire(&mut socket,&ClientWire::Data{envelope}).await?;
+                        },
                         crate::worker_erasure::DeviceDelivery::Erased(item)=>wire(&mut socket,&ClientWire::ErasedData{header:item.header,operation_id:item.operation_id,source_id:item.source_id}).await?,
                     }}
                 }
@@ -811,7 +826,7 @@ async fn connected(
                             ensure(epoch.is_none()&&device==journal.device&&lease_ms>0&&lease_ms<=LEASE_MS as u32,"invalid welcome")?;
                             let value=number(&wire_epoch)?;epoch=Some(value);lease.send_replace(Lease{epoch:value,until:Some(started+Duration::from_millis(lease_ms.into()))});state.send_replace(LinkState{connected:true,credential_rejected:false});
                             if journal.role==ClientRole::Chat {wire(&mut socket,&ClientWire::ConversationReady{version:1}).await?;wire(&mut socket,&ClientWire::ScheduleReady).await?;}
-                            else {wire(&mut socket,&ClientWire::WorkerErasureReady).await?;}
+                            else {wire(&mut socket,&ClientWire::WorkerErasureReady).await?;if cleanup_supported {wire(&mut socket,&ClientWire::WorkerCleanupReady{version:1}).await?;}}
                             if let Some(fixture_origin)=browser.clone(){wire(&mut socket,&ClientWire::BrowserReady{fixture_origin}).await?;}
                             if interactions && let Some(fixture_origin)=browser.clone(){wire(&mut socket,&ClientWire::BrowserInteractionReady{fixture_origin}).await?;}
                         }
@@ -823,13 +838,16 @@ async fn connected(
                         ServerWire::Data{envelope,permitted}=>{
                             let current=lease.borrow().clone();ensure(epoch.is_some()&&current.live(),"data without live session")?;
                             journal.accept(&envelope,permitted,current.epoch,current.live()&&!journal.stopped().await?).await?;
-                            if let ServerPayload::EraseWork{context}=&envelope.payload && let Some(executor)=&executor {executor.invalidate_source(context).await?;}
+                            if let ServerPayload::EraseWork{context}=&envelope.payload && let Some(executor)=&executor {
+                                let header=pulse_core::ErasedProjection::from_value(&serde_json::to_value(&envelope)?)?;
+                                journal.complete_worker_cleanup(executor,&header,context,cleanup_supported).await?;
+                            }
                             wire(&mut socket,&ClientWire::Ack{sequence:envelope.sequence,id:envelope.id}).await?;
                         }
                         ServerWire::ErasedWork{header,context}=>{
                             ensure(epoch.is_some() && lease.borrow().live(),"work erasure without live session")?;
                             journal.accept_worker_erasure(&header,&context).await?;
-                            if let Some(executor)=&executor {executor.invalidate_source(&context).await?;}
+                            if let Some(executor)=&executor {journal.complete_worker_cleanup(executor,&header,&context,cleanup_supported).await?;}
                             wire(&mut socket,&ClientWire::Ack{sequence:header.sequence,id:header.id}).await?;
                         }
                         ServerWire::ErasedProjection{header}=>{
