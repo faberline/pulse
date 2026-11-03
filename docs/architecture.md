@@ -74,6 +74,10 @@ SwiftUI 是可替換的顯示與輸入層。任務關聯、記憶、批准核對
 Rust 讀取與保存固定 UTF-8 副本，並核對來源、任務及模型內容。
 選檔不會上傳；按傳送才進入既有待送佇列。詳見 [文字檔案輸入](text-input.md)。
 
+成果匯出也由 Rust 處理。Swift 只提供原訊息識別與人類選定的位置。
+Rust 核對原 run、Human 來源、聊天原文與下載內容，並以新檔案保存。
+來源、重送、未知結果與未完成的保留／刪除規則見 [文字成果](text-results.md)。
+
 2026-11-02 的 Rust adapter 候選已將 macOS 擷取、AX 操作與私有 PNG 儲存搬到 `crates/pulse-macos`。
 `pulse-computer` 由 Cargo 建置。舊 Swift helper 與其執行 target 已移除。
 `ComputerWindowPicker` 只透過 Rust chat 的命令查詢地端 executor，顯示回傳選項，不再直接讀取系統視窗清單。

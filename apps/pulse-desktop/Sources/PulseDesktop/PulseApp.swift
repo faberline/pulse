@@ -70,6 +70,10 @@ struct ChatView: View {
                       } else if let artifact = message.artifact {
                         BrowserScreenshot(model: model, message: message, artifact: artifact)
                       }
+                      if message.id.hasPrefix("model:") {
+                        Button("保存成果（Markdown）") {model.saveTextResult(message)}
+                          .disabled(!model.state.connected || model.textResultExporting != nil)
+                      }
                     }
                     .padding(14).frame(maxWidth: .infinity, alignment: .leading)
                     .background(
@@ -116,6 +120,18 @@ struct ChatView: View {
             }.padding(.horizontal)
           }
           VStack(spacing: 8) {
+            if model.textResultExporting != nil {
+              HStack {
+                Text("正在保存成果…").font(.caption)
+                Spacer()
+                Button("取消保存") {model.cancelTextResultExport()}
+                  .disabled(model.state.text_result_export?.status == "cancelling")
+              }
+            }
+            if model.textResultExporting == nil, let result=model.state.text_result_export?.resultMessage {
+              Text(result)
+                .font(.caption).foregroundStyle(.secondary)
+            }
             if let file = model.state.text_input {
               HStack {
                 Image(systemName:"doc.text")

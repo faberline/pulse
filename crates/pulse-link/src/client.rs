@@ -227,6 +227,9 @@ impl Device {
                 credential = None;
             }
         }
+        // Finish fallible local recovery before creating owned connection tasks.
+        let mut exports = crate::text_result_client::Exports::default();
+        exports.restore(&self.journal).await?;
         let (lease_tx, lease_rx) = watch::channel(Lease::default());
         let (link_tx, mut link_rx) = watch::channel(LinkState::default());
         let recovering = pending.is_some();
@@ -296,11 +299,13 @@ impl Device {
                 changed.map_err(|_|crate::Error::Rejected("connection state stopped".into()))?;
                 let denied=link_rx.borrow().credential_rejected;
                 if denied {
+                    exports.invalidate();
                     credential=None;
                     lease_tx.send_replace(Lease::default());
                     let mut cleared=states.borrow().clone();
                     cleared.connected=false;cleared.paired=false;cleared.memories.clear();cleared.memory_synced_at=None;
                     cleared.text_input=None;cleared.text_input_request=None;
+                    cleared.text_result_export=exports.state();
                     cleared.message="對話身分已失效，正在清除本機記憶。請重新配對。".into();
                     states.send_replace(cleared);
                     if let Some(task)=connection.take(){task.abort();let _=task.await;}
@@ -326,6 +331,9 @@ impl Device {
                     state.loading=false;
                     match completed {Ok(Ok(value))=>{state.permissions=Some(value);state.failed=false;},_=>{state.permissions=None;state.failed=true;}}
                 }
+            }
+            completed=exports.completed()=>{
+                exports.finish(completed,self.journal.text_input_identity().ok());
             }
             completed=async {match file_read.as_mut(){Some(task)=>task.await,None=>std::future::pending().await}}=>{
                 file_read=None;
@@ -420,6 +428,7 @@ impl Device {
                 state.computer_windows=windows.clone();
                 state.computer_permissions=permissions.clone();
                 state.text_input_request=file_request.clone();
+                state.text_result_export=exports.state();
                 if computer_selection.is_empty() && let Some(entry)=self.journal.take_computer_selection(crate::now()).await? {
                     computer_selecting=Some(entry.source_id.clone());let server=self.config.server.to_string();
                     computer_selection.spawn(async move {crate::computer_control::prepare(&server,entry.permit,entry.replace).await});
@@ -440,6 +449,12 @@ impl Device {
                             Err(crate::Error::Rejected(_))=>message="通知回覆無法核對；提醒仍保存在對話中。".into(),
                             Err(e)=>return Err(e),
                         }
+                    }
+                    Some(NativeCommand::ExportTextResult{request_id,message_id,path})=>{
+                        exports.start(self.journal.clone(),self.config.clone(),credential.clone(),crate::text_result_client::ExportRequest{request_id,message_id,path}).await?;
+                    }
+                    Some(NativeCommand::CancelTextResultExport{request_id})=>{
+                        ensure(self.journal.role==ClientRole::Chat,"export requires Human chat")?;exports.cancel(&request_id);
                     }
                     Some(NativeCommand::SelectTextFile{request_id,path})=>{
                         ensure(self.journal.role==ClientRole::Chat && uuid::Uuid::parse_str(&request_id).is_ok(),"file selection requires Human chat")?;
@@ -558,6 +573,7 @@ impl Device {
                         match self.journal.action(&source_id,action).await {Ok(())=>{input_failure=None;message="已存入本機待送佇列。".into();},Err(crate::Error::CredentialRejected)=>{input_failure=Some(source_id);message="記憶要求未保存，草稿已保留。請重新配對。".into();},Err(crate::Error::Rejected(_)|crate::Error::Capacity)=>{input_failure=Some(source_id);message=if memory_control {"記憶要求未保存。請先查詢目前來源，並核對名稱及內容長度；草稿已保留。"}else{"要求未保存：內容或待送數量已超過限制；草稿已保留。"}.into();},Err(e)=>return Err(e)}
                     }
                     Some(NativeCommand::Pair{code})=>{
+                        exports.invalidate();
                         if pairing.is_some(){message="配對仍在進行。".into();continue;}
                         lease_tx.send_replace(Lease::default());
                         if let Some(task)=connection.take(){task.abort();let _=task.await;}

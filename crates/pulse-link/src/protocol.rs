@@ -514,6 +514,14 @@ pub(crate) fn secret() -> crate::Result<String> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeCommand {
+    ExportTextResult {
+        request_id: String,
+        message_id: String,
+        path: String,
+    },
+    CancelTextResultExport {
+        request_id: String,
+    },
     SelectTextFile {
         request_id: String,
         path: String,
@@ -614,6 +622,8 @@ pub struct DesktopNotifications {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NativeState {
+    #[serde(default)]
+    pub text_result_export: Option<crate::text_result_client::ExportState>,
     #[serde(default)]
     pub text_input: Option<crate::text_input::TextInputRef>,
     #[serde(default)]

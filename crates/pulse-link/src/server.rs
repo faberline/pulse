@@ -209,22 +209,32 @@ impl Hub {
             .bind(&task.id)
             .execute(&mut *tx)
             .await?;
+        let input = Self::task_input_in(&mut tx, &task).await?;
+        let source = input
+            .map(|input| format!("\n\n{}", input.source_label()))
+            .unwrap_or_default();
+        let chat = format!(
+            "模型回覆（{model} · {}）：\n\n{}{source}\n\n分析已保存，任務待確認。",
+            crate::conversation::label(&task),
+            reply.text
+        );
+        if let Some(result) = Self::make_text_result(&mut tx, &task, &run, &id, &chat, time).await?
+        {
+            let result = serde_json::to_value(result)?;
+            let mut candidate = run.checkpoint.clone();
+            candidate["text_result"] = result;
+            if serde_json::to_vec(&candidate)?.len() <= 64 * 1024 {
+                run.checkpoint = candidate;
+            }
+        }
         sqlx::query("UPDATE runs SET data=? WHERE id=?")
             .bind(serde_json::to_string(&run)?)
             .bind(&token.run_id)
             .execute(&mut *tx)
             .await?;
-        let input = Self::task_input_in(&mut tx, &task).await?;
-        let source = input
-            .map(|input| format!("\n\n{}", input.source_label()))
-            .unwrap_or_default();
         sqlx::query("INSERT OR IGNORE INTO link_chat VALUES(?,?,?)")
             .bind(&id)
-            .bind(format!(
-                "模型回覆（{model} · {}）：\n\n{}{source}\n\n分析已保存，任務待確認。",
-                crate::conversation::label(&task),
-                reply.text
-            ))
+            .bind(chat)
             .bind(time)
             .execute(&mut *tx)
             .await?;
@@ -1534,6 +1544,8 @@ pub fn router(hub: Hub) -> Router {
         )
         .route("/v1/tasks/{id}", get(task))
         .route("/v1/artifacts/{id}/{digest}", get(artifact))
+        .route("/v1/text-results/{id}", get(text_result_manifest))
+        .route("/v1/text-results/{id}/{digest}", get(text_result))
         .layer(DefaultBodyLimit::max(MAX_FRAME))
         .with_state(Arc::new(hub))
 }
@@ -1573,6 +1585,47 @@ async fn artifact(
                 ("x-content-type-options", "nosniff"),
             ],
             png,
+        )
+            .into_response();
+    }
+    StatusCode::NOT_FOUND.into_response()
+}
+async fn text_result(
+    State(hub): State<Arc<Hub>>,
+    headers: HeaderMap,
+    Path((id, digest)): Path<(String, String)>,
+) -> axum::response::Response {
+    if let Ok(token) = bearer(&headers)
+        && let Ok(device) = hub.authenticate(token).await
+        && let Ok(bytes) = hub.text_result_bytes(&device, &id, &digest, now()).await
+    {
+        return (
+            [
+                ("content-type", "text/markdown; charset=utf-8"),
+                ("cache-control", "no-store"),
+                ("x-content-type-options", "nosniff"),
+            ],
+            bytes,
+        )
+            .into_response();
+    }
+    StatusCode::NOT_FOUND.into_response()
+}
+async fn text_result_manifest(
+    State(hub): State<Arc<Hub>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    if let Ok(token) = bearer(&headers)
+        && let Ok(device) = hub.authenticate(token).await
+        && let Ok(manifest) = hub.text_result_manifest(&device, &id, now()).await
+    {
+        return (
+            [
+                ("cache-control", "no-store"),
+                ("x-content-type-options", "nosniff"),
+            ],
+            axum::Json(manifest),
         )
             .into_response();
     }

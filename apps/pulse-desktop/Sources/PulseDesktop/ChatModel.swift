@@ -16,6 +16,7 @@ final class ChatModel: ObservableObject {
   @Published var selectedComputer: ComputerWindowChoice?
   @Published private(set) var textInputSelecting: String?
   @Published private(set) var textInputClearing: String?
+  @Published private(set) var textResultExporting: String?
   @Published var reselectingTask: PulseTask?
   @Published private(set) var pendingWindowReselection: PendingWindowReselection?
   private var reselectionGeneration: UUID?
@@ -48,7 +49,8 @@ final class ChatModel: ObservableObject {
         self.state.memories = []; self.state.memory_synced_at = nil
         self.state.text_input = nil
         self.textInputSelecting = nil; self.textInputClearing = nil
-        self.notice = "對話連線已停止。草稿會保留，可在設定重新連線。"
+        self.notice = self.textResultExporting == nil ? "對話連線已停止。草稿會保留，可在設定重新連線。" : "對話連線已停止，匯出狀態未確認。請檢查你選的位置；程式不會自動重試。"
+        self.textResultExporting = nil
       }
     })
 
@@ -81,6 +83,7 @@ final class ChatModel: ObservableObject {
     activeBinding = settings.binding
     notificationPresenter.reset()
     textInputSelecting = nil; textInputClearing = nil
+    textResultExporting = nil
     notificationAuthorization = UUID()
     authorizingNotifications = false
     state.memories = []; state.memory_synced_at = nil
@@ -157,6 +160,15 @@ final class ChatModel: ObservableObject {
   func receive(_ value: NativeState, generation id: UUID) {
     guard generation == id else { return }
     state = value
+    if let request = textResultExporting, let result = value.text_result_export,
+      result.request_id == request, !["working","cancelling"].contains(result.status) {
+      textResultExporting = nil
+      switch result.status {
+      case "saved": notice = "成果已保存：\(result.file_name ?? "Markdown")。"
+      case "not_saved": notice = "成果未保存。請核對連線、來源與新檔名；程式不會覆寫既有檔案。"
+      default: notice = "匯出狀態未確認。請檢查你選的位置；程式不會自動重試。"
+      }
+    }
     if let request = textInputSelecting,
       let result = value.text_input_request, result.request_id == request, !result.loading {
       textInputSelecting = nil
@@ -321,5 +333,20 @@ final class ChatModel: ObservableObject {
   func clearTextInput() {
     guard let file = state.text_input, textInputClearing == nil else { return }
     if send(["kind":"clear_text_file","input_id":file.id]) { textInputClearing = file.id }
+  }
+  func saveTextResult(_ message: ChatMessage) {
+    guard state.connected, textResultExporting == nil else { return }
+    let panel = NSSavePanel()
+    panel.title = "保存分析草稿"
+    panel.message = "只建立新檔案，不會覆寫。成果保留原任務與來源。"
+    panel.nameFieldStringValue = "Pulse-\(UUID().uuidString.prefix(8)).md"
+    panel.allowedContentTypes = [UTType(filenameExtension:"md") ?? .plainText]
+    panel.canCreateDirectories = false
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+    let id = UUID().uuidString
+    if send(TextResultExportCommand.make(requestID:id,messageID:message.id,path:url.path)) { textResultExporting = id }
+  }
+  func cancelTextResultExport() {
+    if let id = textResultExporting { send(["kind":"cancel_text_result_export","request_id":id]) }
   }
 }

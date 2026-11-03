@@ -29,6 +29,8 @@ mod schedule_chat;
 pub mod schedules;
 pub mod server;
 pub mod text_input;
+pub mod text_result;
+pub mod text_result_client;
 pub mod worker_erasure;
 
 #[derive(Debug, thiserror::Error)]

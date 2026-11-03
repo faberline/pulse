@@ -52,7 +52,7 @@ struct PulseTask: Decodable, Identifiable, Sendable {
 }
 struct NativeState: Decodable, Sendable {
   enum CodingKeys: String, CodingKey {
-    case server, connected, stopped, paired, message, pending, tasks, messages, artifacts, artifact_loading, artifact_failure, computer_selecting, computer_failure, computer_selections, memories, memory_synced_at, input_failure, computer_windows, computer_permissions, text_input, text_input_request
+    case server, connected, stopped, paired, message, pending, tasks, messages, artifacts, artifact_loading, artifact_failure, computer_selecting, computer_failure, computer_selections, memories, memory_synced_at, input_failure, computer_windows, computer_permissions, text_input, text_input_request, text_result_export
     case localConnected = "local_connected"
     case desktop_notifications
     case syncedAt = "synced_at"
@@ -80,7 +80,26 @@ struct NativeState: Decodable, Sendable {
   var computer_permissions: ComputerPermissionState?
   var text_input: TextInputReference?
   var text_input_request: TextInputRequest?
+  var text_result_export: TextResultExport?
   var desktop_notifications: DesktopNotifications?
+}
+struct TextResultExportCommand {
+  static func make(requestID: String, messageID: String, path: String) -> [String:Any] {
+    ["kind":"export_text_result","request_id":requestID,"message_id":messageID,"path":path]
+  }
+}
+struct TextResultExport: Decodable, Sendable {
+  let request_id: String
+  let status: String
+  let file_name: String?
+  var resultMessage: String? {
+    switch status {
+    case "working", "cancelling": return nil
+    case "saved": return "成果已保存：\(file_name ?? "Markdown")。"
+    case "not_saved": return "成果未保存。請核對連線、來源與新檔名；程式不會覆寫既有檔案。"
+    default: return "匯出狀態未確認\(file_name.map {"：\($0)"} ?? "")。請檢查選定位置；程式不會自動重試。"
+    }
+  }
 }
 struct TextInputReference: Decodable, Equatable, Sendable {
   let id: String

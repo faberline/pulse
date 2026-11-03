@@ -60,7 +60,7 @@ fn allowed_name(name: &str) -> bool {
                     )
                 }))
 }
-fn private_path(path: &Path) -> bool {
+pub(crate) fn private_path(path: &Path) -> bool {
     path.components().any(|part|matches!(part,Component::Normal(value) if matches!(value.to_string_lossy().to_ascii_lowercase().as_str(),".git"|".ssh"|".aws"|".codex"|".agents")))
 }
 impl TextInput {
