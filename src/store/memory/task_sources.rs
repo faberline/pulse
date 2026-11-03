@@ -10,6 +10,17 @@ pub struct TaskMemoryLease<'a> {
     pub(super) _lease: super::Lease<'a>,
 }
 
+const MAX_SOURCE_LINEAGE: usize = 32;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParentMemory {
+    task_id: String,
+    #[serde(with = "crate::model::decimal")]
+    revision: u64,
+    authorization_event: String,
+}
+
 impl Store {
     pub async fn lease_task_memory(
         &self,
@@ -45,6 +56,34 @@ impl Store {
         &self,
         origin: Origin,
         request: &TaskMemoryRequest,
+        now: i64,
+    ) -> Result<TaskMemorySources> {
+        self.bind_task_memories_with_parent(origin, request, None, now)
+            .await
+    }
+
+    /// Explicit Human adoption of the exact source set of the child's actual
+    /// parent revision. This records provenance, never a prompt/tool grant.
+    pub async fn inherit_task_memories(
+        &self,
+        origin: Origin,
+        request: &TaskMemoryRequest,
+        parent_revision: u64,
+        now: i64,
+    ) -> Result<TaskMemorySources> {
+        require(
+            parent_revision > 0 && parent_revision <= i64::MAX as u64,
+            "invalid parent memory revision",
+        )?;
+        self.bind_task_memories_with_parent(origin, request, Some(parent_revision), now)
+            .await
+    }
+
+    async fn bind_task_memories_with_parent(
+        &self,
+        origin: Origin,
+        request: &TaskMemoryRequest,
+        parent_revision: Option<u64>,
         now: i64,
     ) -> Result<TaskMemorySources> {
         require(origin == Origin::Human, "only Human may bind task memory")?;
@@ -93,6 +132,21 @@ impl Store {
                 prior.request == request,
                 "task memory source identity conflict",
             )?;
+            let payload: Option<String> =
+                sqlx::query_scalar("SELECT payload FROM events WHERE id=?")
+                    .bind(&prior.authorization_event)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .flatten();
+            let payload: serde_json::Value =
+                serde_json::from_str(&payload.ok_or_else(|| {
+                    Error::Rejected("task memory authorization unavailable".into())
+                })?)?;
+            let parent = parent_from_payload(&payload)?;
+            require(
+                parent.as_ref().map(|p| p.revision) == parent_revision,
+                "task memory inheritance identity conflict",
+            )?;
             tx.commit().await?;
             self.checkpoint_memory_redaction().await?;
             return Ok(prior);
@@ -130,6 +184,38 @@ impl Store {
         .fetch_one(&mut *tx)
         .await?;
         require(used == 0, "task revision already has memory sources")?;
+        let parent = if let Some(revision) = parent_revision {
+            let parent_id = task
+                .parent
+                .as_ref()
+                .ok_or_else(|| Error::Rejected("task has no parent".into()))?;
+            let parent: Task = load(&mut tx, "tasks", parent_id).await?;
+            require(parent.revision == revision, "parent task revision changed")?;
+            let data: Option<String> = sqlx::query_scalar(
+                "SELECT data FROM task_memory_sources WHERE task_id=? AND task_revision=?",
+            )
+            .bind(parent_id)
+            .bind(revision.to_string())
+            .fetch_optional(&mut *tx)
+            .await?;
+            let binding: TaskMemorySources = serde_json::from_str(
+                &data.ok_or_else(|| Error::Rejected("parent memory sources unavailable".into()))?,
+            )?;
+            let depth = validate_lineage(&mut tx, parent_id, revision, now).await?;
+            require(depth < MAX_SOURCE_LINEAGE, "task memory lineage limit")?;
+            require(
+                binding.request.sources == request.sources
+                    && request.source_at >= binding.request.source_at,
+                "inheritance requires the exact parent source set",
+            )?;
+            Some(ParentMemory {
+                task_id: parent_id.clone(),
+                revision,
+                authorization_event: binding.authorization_event,
+            })
+        } else {
+            None
+        };
         let mut sources = Vec::new();
         for source in &request.sources {
             require(
@@ -154,7 +240,10 @@ impl Store {
                 expires_at: row.get("expires_at"),
             });
         }
-        let payload = json!({"task_memory_binding":request});
+        let mut payload = json!({"task_memory_binding":request});
+        if let Some(parent) = parent {
+            payload["task_memory_parent"] = serde_json::to_value(parent)?;
+        }
         let event = uuid::Uuid::new_v4().to_string();
         let outcome = Outcome::Applied {
             task_ids: vec![task.id.clone()],
@@ -249,6 +338,72 @@ pub(in crate::store) async fn validate(
     revision: u64,
     now: i64,
 ) -> Result<()> {
+    validate_lineage(db, task_id, revision, now)
+        .await
+        .map(|_| ())
+}
+
+fn parent_from_payload(payload: &serde_json::Value) -> Result<Option<ParentMemory>> {
+    payload
+        .get("task_memory_parent")
+        .map(|value| {
+            serde_json::from_value(value.clone())
+                .map_err(|_| Error::Rejected("invalid task memory parent proof".into()))
+        })
+        .transpose()
+}
+
+async fn validate_lineage(
+    db: &mut SqliteConnection,
+    task_id: &str,
+    revision: u64,
+    now: i64,
+) -> Result<usize> {
+    let mut next = (task_id.to_owned(), revision);
+    let mut visited = std::collections::BTreeSet::new();
+    let mut expected: Option<(String, Vec<TaskMemorySource>)> = None;
+    loop {
+        require(
+            visited.len() < MAX_SOURCE_LINEAGE && visited.insert(next.clone()),
+            "task memory lineage limit or cycle",
+        )?;
+        let Some((binding, payload)) = validated_binding(db, &next.0, next.1, now).await? else {
+            require(expected.is_none(), "parent memory sources unavailable")?;
+            return Ok(0);
+        };
+        if let Some((event, sources)) = expected.take() {
+            require(
+                binding.authorization_event == event && binding.sources == sources,
+                "parent memory authorization or sources changed",
+            )?;
+        }
+        let Some(parent) = parent_from_payload(&payload)? else {
+            return Ok(visited.len());
+        };
+        require(
+            !parent.task_id.is_empty()
+                && parent.task_id.len() <= 128
+                && parent.revision > 0
+                && parent.revision <= i64::MAX as u64
+                && uuid::Uuid::parse_str(&parent.authorization_event).is_ok(),
+            "invalid parent memory identity",
+        )?;
+        let task: Task = load(db, "tasks", &binding.request.task_id).await?;
+        require(
+            task.parent.as_ref() == Some(&parent.task_id),
+            "task memory parent relationship changed",
+        )?;
+        expected = Some((parent.authorization_event, binding.sources));
+        next = (parent.task_id, parent.revision);
+    }
+}
+
+async fn validated_binding(
+    db: &mut SqliteConnection,
+    task_id: &str,
+    revision: u64,
+    now: i64,
+) -> Result<Option<(TaskMemorySources, serde_json::Value)>> {
     let data: Option<String> = sqlx::query_scalar(
         "SELECT data FROM task_memory_sources WHERE task_id=? AND task_revision=?",
     )
@@ -257,7 +412,7 @@ pub(in crate::store) async fn validate(
     .fetch_optional(&mut *db)
     .await?;
     let Some(data) = data else {
-        return Ok(());
+        return Ok(None);
     };
     let binding: TaskMemorySources = serde_json::from_str(&data)?;
     require(
@@ -268,17 +423,22 @@ pub(in crate::store) async fn validate(
             && binding.sources.len() == binding.request.sources.len(),
         "task memory source unavailable",
     )?;
-    let row = sqlx::query("SELECT source,source_id,origin,payload FROM events WHERE id=?")
+    let row = sqlx::query("SELECT source,source_id,origin,payload,digest FROM events WHERE id=?")
         .bind(&binding.authorization_event)
         .fetch_optional(&mut *db)
         .await?
         .ok_or_else(|| Error::Rejected("task memory authorization unavailable".into()))?;
-    let payload: serde_json::Value = serde_json::from_str(&row.get::<String, _>("payload"))?;
+    let payload: serde_json::Value = serde_json::from_str(
+        &row.get::<Option<String>, _>("payload")
+            .ok_or_else(|| Error::Rejected("task memory authorization unavailable".into()))?,
+    )?;
     require(
         row.get::<String, _>("origin") == "human"
             && row.get::<String, _>("source") == "task-memory"
             && row.get::<String, _>("source_id") == binding.request.source_id
-            && payload["task_memory_binding"] == serde_json::to_value(&binding.request)?,
+            && payload["task_memory_binding"] == serde_json::to_value(&binding.request)?
+            && row.get::<String, _>("digest")
+                == digest(&json!({"origin":"human","payload":payload}))?,
         "task memory authorization changed",
     )?;
     for (adopted, source) in binding.request.sources.iter().zip(&binding.sources) {
@@ -289,7 +449,7 @@ pub(in crate::store) async fn validate(
         let valid:i64=sqlx::query_scalar("SELECT count(*) FROM memories WHERE id=? AND revision=? AND source_uuid=? AND expires_at=? AND expires_at>?").bind(&source.memory_id).bind(source.revision as i64).bind(&source.source_id).bind(source.expires_at).bind(now).fetch_one(&mut *db).await?;
         require(valid == 1, "task memory source unavailable")?;
     }
-    Ok(())
+    Ok(Some((binding, payload)))
 }
 
 /// Required erasure cannot depend on notification capacity. The caller holds the

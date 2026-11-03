@@ -3,6 +3,9 @@ use serde_json::{Value, json};
 const NOW: i64 = 1_800_000_000_000;
 const BODY: &str = "private memory body which must not enter provenance";
 
+#[path = "task_memory_sources/inheritance.rs"]
+mod inheritance;
+
 async fn setup() -> (tempfile::TempDir, Store, Memory) {
     setup_at(NOW).await
 }

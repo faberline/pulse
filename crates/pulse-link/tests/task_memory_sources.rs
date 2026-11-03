@@ -107,6 +107,87 @@ async fn binding_metadata_does_not_enable_prompt_memory_and_withdrawal_rejects_l
         .unwrap();
     assert_eq!(count, 0);
 }
+#[tokio::test]
+async fn inherited_sources_stay_out_of_prompts_and_parent_withdrawal_erases_child_reply() {
+    let (_root, hub, source) = setup().await;
+    let now = pulse_link::now();
+    let event=hub.core.ingest(Origin::Human,"fixture","child",json!({"commands":[Command::Create {
+        id:"child".into(),goal:"Child analysis".into(),scope:"pulse:read".into(),priority:100,
+        requires_device:false,parent:Some("task".into()),dependencies:vec![],
+    }]}),now).await.unwrap();
+    hub.core.route(&event.event_id).await.unwrap();
+    hub.core
+        .inherit_task_memories(
+            Origin::Human,
+            &TaskMemoryRequest {
+                source_id: uuid::Uuid::new_v4().to_string(),
+                source_at: now,
+                task_id: "child".into(),
+                task_revision: 1,
+                sources: vec![MemoryRef {
+                    id: source.id.clone(),
+                    revision: source.revision,
+                }],
+            },
+            1,
+            now,
+        )
+        .await
+        .unwrap();
+    let run = hub
+        .core
+        .claim_next(&remote::versions(), now)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.token.task_id, "child");
+    let (prompt, history) = hub.model_context(&run).await.unwrap();
+    assert!(!prompt.contains(BODY));
+    assert!(history.is_empty());
+    hub.model_reply(
+        &run.token,
+        &Reply {
+            text: "INHERITED_PRIVATE_REPLY".into(),
+            tool: None,
+            usage: json!({}),
+            cost: 0,
+        },
+        "fixture",
+        now,
+    )
+    .await
+    .unwrap();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM link_chat WHERE body LIKE '%INHERITED_PRIVATE_REPLY%'",
+    )
+    .fetch_one(&hub.core.application_pool())
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    forget(&hub, &source).await;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM link_chat WHERE body LIKE '%INHERITED_PRIVATE_REPLY%'",
+    )
+    .fetch_one(&hub.core.application_pool())
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+    assert!(hub.model_context(&run).await.is_err());
+    assert!(
+        hub.core
+            .task_memory_sources("child", 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .invalidated
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM budget")
+        .fetch_one(&hub.core.application_pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
 async fn pair(hub: &Hub, role: ClientRole) -> (String, u64) {
     let now = pulse_link::now();
     let code = hub.pairing(role, now).await.unwrap();
