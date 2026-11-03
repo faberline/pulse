@@ -8,6 +8,27 @@ use std::{future::IntoFuture, sync::Mutex};
 
 #[derive(Default)]
 struct TestVault(Mutex<(Option<Credential>, Option<PairClaim>)>);
+struct FailedPendingVault(Option<i32>, &'static str);
+impl Vault for FailedPendingVault {
+    fn load(&self, _: &str) -> Result<Option<Credential>> {
+        Ok(None)
+    }
+    fn pending(&self, _: &str) -> Result<Option<PairClaim>> {
+        Ok(None)
+    }
+    fn save_pending(&self, _: &str, _: &PairClaim) -> Result<()> {
+        Err(match self.0 {
+            Some(code) => crate::Error::CredentialStore(code),
+            None => crate::Error::Rejected(self.1.into()),
+        })
+    }
+    fn save(&self, _: &str, _: &Credential) -> Result<()> {
+        panic!("failed claim cannot save credentials")
+    }
+    fn clear_pending(&self, _: &str) -> Result<()> {
+        Ok(())
+    }
+}
 impl Vault for TestVault {
     fn load(&self, _: &str) -> Result<Option<Credential>> {
         Ok(self.0.lock().unwrap().0.clone())
@@ -27,6 +48,86 @@ impl Vault for TestVault {
         self.0.lock().unwrap().1 = None;
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn cli_pairing_failure_exits_promptly_without_echoing_secrets_or_sending_unsaved_claims() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let root = tempfile::tempdir().unwrap();
+    let hub = Hub::new(
+        pulse_core::Store::open(root.path().join("db"), "owner")
+            .await
+            .unwrap(),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}/", listener.local_addr().unwrap());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = calls.clone();
+    let app = router(hub.clone()).layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            count.fetch_add(1, Ordering::SeqCst);
+            async move { next.run(request).await }
+        },
+    ));
+    let server = tokio::spawn(axum::serve(listener, app).into_future());
+    let cases: Vec<(Arc<dyn Vault>, &str, bool)> = vec![
+        (
+            Arc::new(FailedPendingVault(Some(-12345), "")),
+            "系統憑證存取失敗",
+            true,
+        ),
+        (
+            Arc::new(FailedPendingVault(
+                None,
+                "PRIVATE_SECRET /PRIVATE/credential",
+            )),
+            "配對尚未確認",
+            true,
+        ),
+        (Arc::new(TestVault::default()), "server 已拒絕配對", false),
+    ];
+    for (index, (vault, expected, no_http)) in cases.into_iter().enumerate() {
+        let config = Config {
+            server: origin.parse().unwrap(),
+            repo: Default::default(),
+            data_dir: root.path().join(format!("chat-{index}")),
+        };
+        let before = calls.load(Ordering::SeqCst);
+        let mut output = Vec::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run(
+                config,
+                Some("f".repeat(64)),
+                vault,
+                &b"must not create a task\n"[..],
+                &mut output,
+                false,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_err());
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains(expected), "{text}");
+        if index == 0 {
+            assert!(text.contains("系統憑證錯誤代碼：-12345"));
+        }
+        assert!(!text.contains("PRIVATE_SECRET") && !text.contains("/PRIVATE/credential"));
+        assert!(!text.contains("本機已保存：") && !text.contains("server 已收件；"));
+        if no_http {
+            assert_eq!(calls.load(Ordering::SeqCst), before);
+        } else {
+            assert!(calls.load(Ordering::SeqCst) > before);
+        }
+        assert!(hub.core.list_tasks(100).await.unwrap().is_empty());
+    }
+    let devices: i64 = sqlx::query_scalar("SELECT count(*) FROM link_device")
+        .fetch_one(&hub.core.application_pool())
+        .await
+        .unwrap();
+    assert_eq!(devices, 0);
+    server.abort();
 }
 
 #[tokio::test]

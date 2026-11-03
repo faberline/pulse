@@ -54,6 +54,8 @@ pub enum Error {
     Capacity,
     #[error("credential rejected; fresh pairing required")]
     CredentialRejected,
+    #[error("system credential storage failed ({0})")]
+    CredentialStore(i32),
     #[error("credential rejected; local memory cleanup failed: {0}")]
     CredentialCleanup(#[source] Box<Error>),
     #[error("pairing claim rejected")]

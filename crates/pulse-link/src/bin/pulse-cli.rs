@@ -7,6 +7,9 @@ use pulse_link::{
 fn failure_summary(error: &pulse_link::Error) -> &'static str {
     use pulse_link::Error;
     match error {
+        Error::CredentialStore(_) => {
+            "macOS Keychain access failed. Check system credential access."
+        }
         Error::Rejected(reason) => match reason.as_str() {
             "Keychain access failed" | "Keychain save failed" | "Keychain worker failed" => {
                 "macOS Keychain access failed. Check system credential access."
@@ -19,6 +22,9 @@ fn failure_summary(error: &pulse_link::Error) -> &'static str {
             }
             "input was not saved; check connection identity, size and queue capacity" => {
                 "Input was not saved. Check pairing, input size and queue capacity."
+            }
+            "CLI pairing unconfirmed; check original pairing state" => {
+                "Pairing is unconfirmed. Check the reason above."
             }
             _ => "The request could not be confirmed. Check pairing and the server.",
         },
@@ -62,6 +68,9 @@ fn main() {
     runtime.shutdown_timeout(std::time::Duration::from_secs(1));
     if let Err(error) = result {
         eprintln!("{}", failure_summary(&error));
+        if let pulse_link::Error::CredentialStore(code) = &error {
+            eprintln!("System credential error code: {code}");
+        }
         eprintln!(
             "Pulse CLI stopped without confirmation. Check pairing, the server and the same private data directory. Do not resubmit an unknown request as a new task."
         );

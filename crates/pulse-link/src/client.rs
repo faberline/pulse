@@ -279,6 +279,7 @@ impl Device {
         let mut computer_failure: Option<String> = None;
         let mut input_failure: Option<String> = None;
         let mut input_receipt: Option<InputReceipt> = None;
+        let mut pairing_failure = None;
         let mut memory_sync: Option<tokio::task::JoinHandle<Result<()>>> = None;
         let mut memory_retry = Instant::now();
         let mut window_list: Option<
@@ -300,11 +301,13 @@ impl Device {
                 changed.map_err(|_|crate::Error::Rejected("connection state stopped".into()))?;
                 let denied=link_rx.borrow().credential_rejected;
                 if denied {
+                    pairing_failure=None;
                     input_receipt=None;
                     exports.invalidate();
                     credential=None;
                     lease_tx.send_replace(Lease::default());
                     let mut cleared=states.borrow().clone();
+                    cleared.pairing_failure=None;
                     cleared.connected=false;cleared.paired=false;cleared.memories.clear();cleared.memory_synced_at=None;
                     cleared.text_input=None;cleared.text_input_request=None;
                     cleared.text_result_export=exports.state();
@@ -398,6 +401,7 @@ impl Device {
                 pairing=None;
                 match completed {
                     Ok(Ok(value))=>{
+                        pairing_failure=None;
                         lease_tx.send_replace(Lease::default());
                         if let Some(task)=connection.take(){task.abort();let _=task.await;}
                         if let Some(task)=memory_sync.take(){task.abort();let _=task.await;}
@@ -408,6 +412,12 @@ impl Device {
                         credential=Some(value);message="配對完成。密鑰已存入 Keychain。".into();
                     }
                     failure=>{
+                        pairing_failure=Some(match &failure {
+                            Ok(Err(crate::Error::CredentialStore(code)))=>PairingFailure::Credentials{code:Some(*code)},
+                            Ok(Err(crate::Error::Rejected(reason))) if matches!(reason.as_str(),"Keychain access failed"|"Keychain save failed"|"Keychain worker failed")=>PairingFailure::Credentials{code:None},
+                            Ok(Err(crate::Error::PairingRejected))=>PairingFailure::Denied,
+                            _=>PairingFailure::Unconfirmed,
+                        });
                         if let Some(old)=credential.as_ref() {
                             if self.journal.bind_memory_credential(old).await? {
                                 connection=Some(tokio::spawn(reconnect(self.config.clone(),self.journal.clone(),old.clone(),lease_tx.clone(),link_tx.clone(),self.executor.clone())));
@@ -433,6 +443,7 @@ impl Device {
                 state.text_input_request=file_request.clone();
                 state.text_result_export=exports.state();
                 state.input_receipt=input_receipt.clone();
+                state.pairing_failure=pairing_failure;
                 if computer_selection.is_empty() && let Some(entry)=self.journal.take_computer_selection(crate::now()).await? {
                     computer_selecting=Some(entry.source_id.clone());let server=self.config.server.to_string();
                     computer_selection.spawn(async move {crate::computer_control::prepare(&server,entry.permit,entry.replace).await});
@@ -581,6 +592,7 @@ impl Device {
                         input_receipt=Some(InputReceipt{source_id:receipt_id,saved:input_failure.is_none()});
                     }
                     Some(NativeCommand::Pair{code})=>{
+                        pairing_failure=None;
                         input_receipt=None;
                         exports.invalidate();
                         if pairing.is_some(){message="配對仍在進行。".into();continue;}

@@ -622,6 +622,9 @@ pub struct DesktopNotifications {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NativeState {
+    /// Local diagnostic only. Contains no credential or server response data.
+    #[serde(default)]
+    pub pairing_failure: Option<PairingFailure>,
     /// Local journal receipt only. This is not server acceptance or task success.
     #[serde(default)]
     pub input_receipt: Option<InputReceipt>,
@@ -671,6 +674,13 @@ pub struct NativeState {
     pub synced_at: Option<i64>,
     pub tasks: Vec<pulse_core::Task>,
     pub messages: Vec<ChatMessage>,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PairingFailure {
+    Credentials { code: Option<i32> },
+    Denied,
+    Unconfirmed,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InputReceipt {

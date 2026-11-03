@@ -118,6 +118,18 @@ pub async fn run(
             changed.map_err(|_|crate::Error::Rejected("CLI state stopped".into()))?;
             let value=state.borrow_and_update().clone();
             ready=value.paired;
+            if !ready && let Some(failure)=value.pairing_failure {
+                output.write_all(match failure {
+                    PairingFailure::Credentials{..}=>"系統憑證存取失敗，配對未完成。請核對系統憑證狀態。\n".as_bytes(),
+                    PairingFailure::Denied=>"server 已拒絕配對。請核對原配對身分。\n".as_bytes(),
+                    PairingFailure::Unconfirmed=>"配對尚未確認。請核對連線與原本的配對資料。\n".as_bytes(),
+                }).await?;
+                if let PairingFailure::Credentials{code:Some(code)}=failure {
+                    output.write_all(format!("系統憑證錯誤代碼：{code}\n").as_bytes()).await?;
+                }
+                output.flush().await?;
+                return Err(crate::Error::Rejected("CLI pairing unconfirmed; check original pairing state".into()));
+            }
             if let Some(request_id)=&selecting
                 && let Some(request)=value.text_input_request.as_ref().filter(|r| &r.request_id==request_id && !r.loading) {
                 crate::ensure(!request.failed && !request.cancelled,"text file selection rejected; no new message submitted")?;

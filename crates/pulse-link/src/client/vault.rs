@@ -92,7 +92,7 @@ mod native {
                 active: None,
                 pending: None,
             }),
-            Err(_) => Err(crate::Error::Rejected("Keychain access failed".into())),
+            Err(error) => Err(crate::Error::CredentialStore(error.code())),
         }
     }
     fn write(account: &str, record: &Record) -> Result<()> {
@@ -101,7 +101,7 @@ mod native {
             account,
             &serde_json::to_vec(record)?,
         )
-        .map_err(|_| crate::Error::Rejected("Keychain save failed".into()))
+        .map_err(|error| crate::Error::CredentialStore(error.code()))
     }
     impl Vault for NativeVault {
         fn load(&self, account: &str) -> Result<Option<Credential>> {
