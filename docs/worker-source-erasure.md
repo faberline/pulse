@@ -6,8 +6,8 @@ Swift 只處理介面與輸入。
 其他介面可以使用同一套核心。
 
 資料庫 schema 為 17。
-remote workflow 為 `pulse-remote-18`。
-policy 為 `approved-effects-memory-fences-5`。
+remote workflow 為 `pulse-remote-19`。
+policy 為 `approved-effects-memory-fences-6`。
 
 ## Server 與地端資料
 

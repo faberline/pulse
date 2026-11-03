@@ -9,13 +9,13 @@ pub fn versions() -> Versions {
 }
 fn manifest(provider: Option<&Provider>) -> Versions {
     Versions {
-        workflow: "pulse-remote-18".into(),
+        workflow: "pulse-remote-19".into(),
         schema: "1".into(),
         prompt: "effective-read-7".into(),
         tools: "pulse-tools-6".into(),
         model: provider.map(|p| p.model).unwrap_or("unconfigured").into(),
         provider_api: "function-call-1".into(),
-        policy: "approved-effects-memory-fences-5".into(),
+        policy: "approved-effects-memory-fences-6".into(),
     }
 }
 pub async fn step(hub: &Hub, time: i64) -> Result<bool> {
@@ -92,8 +92,10 @@ pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Res
                     })
                     .await
                     {
-                        Ok(true) => match request.send().await {
-                            Ok(reply) => {
+                        Ok(true) => match send_fenced(hub, &run.token, &call, request.send())
+                            .await?
+                        {
+                            Some(reply) => {
                                 hub.core
                                     .settle(
                                         &call,
@@ -123,8 +125,7 @@ pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Res
                                     Err(error) => return Err(error),
                                 }
                             }
-                            Err(_) => {
-                                hub.core.cost_unknown(&call).await?;
+                            None => {
                                 reason = "provider_call_failed_cost_reserved";
                             }
                         },
@@ -157,6 +158,58 @@ pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Res
     hub.notify_change();
     Ok(true)
 }
+
+// `send` is lazy: an invalid preflight never polls provider I/O. Do not retain
+// a keeper lease across a network wait. Periodic rechecks also see restrictions
+// written by a different process, which an in-process watch cannot guarantee.
+// Dropping I/O stops our wait; it does not prove provider cancellation or refund.
+async fn send_fenced<F>(
+    hub: &Hub,
+    token: &pulse_core::Token,
+    call: &str,
+    send: F,
+) -> Result<Option<crate::provider::Reply>>
+where
+    F: std::future::Future<Output = Result<crate::provider::Reply>>,
+{
+    match wait_fenced(hub, token, call, send).await {
+        Ok(reply) => Ok(Some(reply)),
+        Err(_) => {
+            // A ledger write failure must propagate to the controller. It must
+            // not be mistaken for a recorded, recoverable provider failure.
+            hub.core.cost_unknown(call).await?;
+            Ok(None)
+        }
+    }
+}
+
+async fn wait_fenced<F>(
+    hub: &Hub,
+    token: &pulse_core::Token,
+    call: &str,
+    send: F,
+) -> Result<crate::provider::Reply>
+where
+    F: std::future::Future<Output = Result<crate::provider::Reply>>,
+{
+    let mut until = hub.core.validate_model_call(token, call, now()).await?;
+    tokio::pin!(send);
+    loop {
+        let delay = Duration::from_millis(until.saturating_sub(now()).clamp(0, 1_000) as u64);
+        tokio::select! {
+            // At a known deadline, validate before accepting a simultaneous reply.
+            biased;
+            _ = tokio::time::sleep(delay) => {
+                until = hub.core.validate_model_call(token, call, now()).await?;
+            }
+            reply = &mut send => return reply,
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "remote/tests.rs"]
+mod tests;
 pub async fn run(hub: Hub) -> Result<()> {
     let name = std::env::var("PULSE_PROVIDER").unwrap_or_else(|_| "openai".into());
     let provider = Provider::load(&name)?;

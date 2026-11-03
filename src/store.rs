@@ -656,6 +656,52 @@ impl Store {
         Ok(true)
     }
 
+    /// Recheck immediately before polling provider I/O and during its wait.
+    /// The returned deadline is only a wake-up hint, never a reusable grant.
+    /// Release the local restriction lease before waiting on the network.
+    pub async fn validate_model_call(&self, token: &Token, call_id: &str, now: i64) -> Result<i64> {
+        let _memory = self.lease_task_memory(&token.task_id, now).await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let (task, run) = current(&mut tx, token, now).await?;
+        let round = run.checkpoint["round"].as_u64().unwrap_or(0);
+        require(
+            task.state == State::Planning
+                && crate::read_scope(&task.scope)
+                && (1..=8).contains(&task.model_calls)
+                && call_id == format!("model:{}:{}:{round}", token.run_id, token.revision),
+            "model call does not match current planning round",
+        )?;
+        let row = sqlx::query("SELECT task_id,reserved,charged,state FROM budget WHERE call_id=?")
+            .bind(call_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| Error::Rejected("model reservation missing".into()))?;
+        let reserved = row.get::<i64, _>("reserved");
+        require(
+            row.get::<String, _>("task_id") == task.id
+                && row.get::<String, _>("state") == "reserved"
+                && (1..=TASK_BUDGET).contains(&reserved)
+                && row.get::<i64, _>("charged") == reserved,
+            "model reservation no longer valid",
+        )?;
+        let mut until = task.deadline;
+        let binding: Option<String> = sqlx::query_scalar(
+            "SELECT data FROM task_memory_sources WHERE task_id=? AND task_revision=?",
+        )
+        .bind(&task.id)
+        .bind(task.revision.to_string())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(binding) = binding {
+            let binding: TaskMemorySources = serde_json::from_str(&binding)?;
+            for source in binding.sources {
+                until = until.min(source.expires_at);
+            }
+        }
+        tx.commit().await?;
+        Ok(until)
+    }
+
     pub async fn cost_unknown(&self, call_id: &str) -> Result<()> {
         let changed =
             sqlx::query("UPDATE budget SET state='unknown' WHERE call_id=? AND state='reserved'")
@@ -663,7 +709,19 @@ impl Store {
                 .execute(&self.pool)
                 .await?
                 .rows_affected();
-        require(changed == 1, "call missing or no longer reserved")
+        if changed == 1 {
+            return Ok(());
+        }
+        // A concurrent controller may already have recorded uncertainty or
+        // known usage. Never overwrite that settlement or refund its charge.
+        let state: Option<String> = sqlx::query_scalar("SELECT state FROM budget WHERE call_id=?")
+            .bind(call_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        require(
+            matches!(state.as_deref(), Some("unknown" | "settled")),
+            "call missing or no longer reserved",
+        )
     }
 
     pub async fn settle(&self, call_id: &str, actual_micro_usd: i64, evidence: &str) -> Result<()> {
