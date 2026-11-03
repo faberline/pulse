@@ -11,17 +11,29 @@ final class DesktopTests: XCTestCase {
     XCTAssertEqual(task.status, "等待下一步")
     XCTAssertFalse(task.cancelRequested)
   }
-  func testShortPipeStateArrivesBeforeChildExit() {
+  func testShortPipeStateArrivesBeforeChildExit() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+      attributes: [.posixPermissions: 0o700])
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let exited = directory.appendingPathComponent("passed-stdin-barrier")
     let ready = expectation(description: "short state received while child still runs")
     let transport = ChatTransport(
-      executable: URL(fileURLWithPath: "/usr/bin/python3"),
+      executable: URL(fileURLWithPath: "/bin/sh"),
       onState: { _, state in
-        if state.server == "https://pulse.example/" { ready.fulfill() }
+        if state.server == "https://pulse.example/" {
+          XCTAssertFalse(FileManager.default.fileExists(atPath: exited.path),
+            "The short frame must arrive before the child reaches EOF.")
+          ready.fulfill()
+        }
       }, onExit: { _ in })
     defer { transport.stop() }
-    let script =
-      #"import json,sys,time; print(json.dumps(dict(server='https://pulse.example/',connected=False,stopped=False,local_connected=False,paired=False,message='',pending=0,synced_at=None,tasks=[],messages=[])));sys.stdout.flush();time.sleep(30)"#
-    transport.start(arguments: ["-c", script], generation: UUID())
+    let script = #"""
+      printf '%s\n' '{"server":"https://pulse.example/","connected":false,"stopped":false,"local_connected":false,"paired":false,"message":"","pending":0,"synced_at":null,"tasks":[],"messages":[]}'
+      read -r pulse_fixture_input
+      printf '%s' done > "$1"
+      """#
+    transport.start(arguments: ["-c", script, "pulse-pipe-fixture", exited.path], generation: UUID())
     wait(for: [ready], timeout: 3)
   }
   func testFrameDecoderHandlesSplitUTF8AndMultipleFrames() throws {
