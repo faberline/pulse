@@ -26,6 +26,11 @@ def snapshot(database):
         }
 
 
+def saved_replies(state):
+    # A claimed run can legitimately have a null checkpoint before its first reply.
+    return [r for r in state["runs"] if (r.get("checkpoint") or {}).get("phase") == "reply_saved"]
+
+
 class Scene:
     def __init__(self, root, provider, live=True):
         self.root = root
@@ -128,7 +133,7 @@ def check(root, provider):
             state = snapshot(scene.database)
             if len(state["budget"]) > 8:
                 raise RuntimeError("Smoke call count exceeded the expected bounded flow")
-            saved = [r for r in state["runs"] if r.get("checkpoint", {}).get("phase") == "reply_saved"]
+            saved = saved_replies(state)
             return (state, saved) if len(saved) == 2 else None
         before, runs = scene.wait(replies, seconds=180)
         assert len(before["tasks"]) == 2

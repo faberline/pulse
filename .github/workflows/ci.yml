@@ -17,6 +17,8 @@ jobs:
       - name: Record compiler
         run: rustc --version --verbose
       - run: cargo fmt --all --check
+      - name: CLI acceptance script tests (no API)
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_check_server_cli.py
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - name: Swift desktop tests

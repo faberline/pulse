@@ -111,6 +111,35 @@ server 仍只有一個 chat 與一個 local 身分，兩者 epoch 均為 3。
 本機報告是 `/var/folders/r_/zwj_t8895ms334wn1pq5gf_w0000gn/T/pulse-server-cli-live-341o5g02/report.json`。
 報告保存執行檔摘要與產品來源摘要。這不是 CI artifact，也不是模型回覆的驗證。
 
-本輪真正 OpenAI／Anthropic API 驗證未執行。
-目前等待本次目的地、檔案內容與費用的明確授權。
-較早候選的 API 證據不能取代目前候選驗證。
+## 兩家 API 與程序重開證據
+
+2026-11-03，使用者明確核准本次兩家 API 的目的地、資料與費用範圍。
+真正的 Rust server、CLI 與獨立 local process 已通過下列案例。
+產品來源與執行檔摘要對應 `15cd938ad4b25c7fb62cd13d50867ce9944e102d` 的 Rust 程式。
+
+| Provider／模型 | 任務 | 模型呼叫 | 完成讀取 | 本機費用估算 |
+|---|---:|---:|---:|---:|
+| OpenAI／`gpt-6-luna` | 2 | 4 | 2 | 1007 micro USD |
+| Anthropic／`claude-haiku-5-5` | 2 | 4 | 2 | 2071 micro USD |
+
+兩家都回覆正確的三個元件與 workspace 成員。
+local 讀取摘要符合隔離副本。模型使用有界證據，沒有宣稱讀完被截斷的內容。
+CLI 顯示回覆後正常結束。三個程序重開時沒有提供新的配對碼。
+原回覆、任務識別、用量與讀取派工紀錄保持一致；每個角色仍只有一個身分，epoch 為 3。
+新案例沒有未知呼叫。任務保持 `blocked / model_reply_ready`，等待人類核對，不自動宣告完成。
+
+本機報告是 `/var/folders/r_/zwj_t8895ms334wn1pq5gf_w0000gn/T/pulse-server-cli-live-jhqj1nes/report.json`。
+這是本輪 CLI／API 功能證據，不是完整故障矩陣、正式部署或整體 Dot 接受。
+
+## 中斷案例與未確認費用
+
+第一次付費檢查的腳本未處理 null checkpoint，因此在首輪中止。
+修正後加入不使用 API 的回歸測試，並接入一般 CI。
+原資料庫重開後，該任務保持 `previous_call_not_retried`。
+同一 call 的預留與識別未變，沒有重送或清除未確認費用。
+另一個原已排隊的任務完成，保守用量估算為 655 micro USD。
+
+該中斷呼叫仍保留 US$0.02 預留，不能視為已知實付費用。
+包含上述成功案例，本輪已知用量估算合計為 US$0.003733；未確認預留另計。
+故障資料庫與原 incomplete 報告保留。
+重開核對紀錄是 `/var/folders/r_/zwj_t8895ms334wn1pq5gf_w0000gn/T/pulse-server-cli-live-8pdabsa9/openai/recovery-check.json`。
