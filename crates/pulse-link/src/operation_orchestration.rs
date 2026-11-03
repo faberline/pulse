@@ -117,10 +117,32 @@ impl Hub {
         versions: &Versions,
         time: i64,
     ) -> Result<bool> {
-        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
-        let rows:Vec<String>=sqlx::query_scalar("SELECT data FROM operation_requests WHERE json_extract(data,'$.state')='approved' AND (json_extract(data,'$.proposal.target') LIKE 'browser:%' OR json_extract(data,'$.proposal.target') LIKE 'computer:%') ORDER BY rowid").fetch_all(&mut *tx).await?;
+        // Never wait for a keeper lease while holding the single SQL writer.
+        let rows:Vec<String>=sqlx::query_scalar("SELECT data FROM operation_requests WHERE json_extract(data,'$.state')='approved' AND (json_extract(data,'$.proposal.target') LIKE 'browser:%' OR json_extract(data,'$.proposal.target') LIKE 'computer:%') ORDER BY rowid").fetch_all(&self.db).await?;
         for data in rows {
+            let candidate: OperationRequest = serde_json::from_str(&data)?;
+            let time = time.max(crate::now());
+            let _memory = match self
+                .core
+                .lease_task_memory(&candidate.proposal.token.task_id, time)
+                .await
+            {
+                Ok(lease) => lease,
+                Err(pulse_core::Error::Rejected(_) | pulse_core::Error::Busy) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+            let time = time.max(crate::now());
+            let data: Option<String> =
+                sqlx::query_scalar("SELECT data FROM operation_requests WHERE id=?")
+                    .bind(&candidate.proposal.id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            let Some(data) = data else { continue };
             let request: OperationRequest = serde_json::from_str(&data)?;
+            if request != candidate || request.state != pulse_core::ApprovalState::Approved {
+                continue;
+            }
             if request.proposal.expires_at <= time {
                 continue;
             }
@@ -128,7 +150,9 @@ impl Hub {
             let token = &request.proposal.token;
             let (task, mut run) = match current(&mut tx, token, time).await {
                 Ok(value) => value,
-                Err(crate::Error::Rejected(_)) => continue,
+                Err(
+                    crate::Error::Rejected(_) | crate::Error::Core(pulse_core::Error::Rejected(_)),
+                ) => continue,
                 Err(error) => return Err(error),
             };
             if task.state != State::Ready
@@ -252,7 +276,6 @@ impl Hub {
             self.notify_change();
             return Ok(true);
         }
-        tx.commit().await?;
         Ok(false)
     }
     pub(crate) async fn action_receipt(

@@ -156,15 +156,33 @@ impl Hub {
 
     /// Wait without model calls while no live worker is free. Dispatch once in one transaction.
     pub async fn dispatch_model_read(&self, versions: &Versions, time: i64) -> Result<bool> {
-        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
-        let workers=sqlx::query("SELECT id,epoch FROM link_device WHERE role='local_executor' AND revoked=0 AND stopped=0 AND lease_until>? AND NOT EXISTS(SELECT 1 FROM link_reads WHERE device=link_device.id AND state IN ('sent','accepted','unknown')) ORDER BY id").bind(time).fetch_all(&mut *tx).await?;
-        if workers.is_empty() {
-            return Ok(false);
-        }
-        let rows:Vec<String>=sqlx::query_scalar("SELECT data FROM tasks WHERE json_extract(data,'$.state')='waiting_device' ORDER BY json_extract(data,'$.created_at'),id").fetch_all(&mut *tx).await?;
+        // Select candidates without holding SQL while acquiring a restriction
+        // lease. Each candidate is reloaded under its own atomic dispatch.
+        let rows:Vec<String>=sqlx::query_scalar("SELECT data FROM tasks WHERE json_extract(data,'$.state')='waiting_device' AND json_extract(data,'$.reason')='model_tool_waiting' ORDER BY json_extract(data,'$.created_at'),id").fetch_all(&self.db).await?;
         for data in rows {
+            let candidate: Task = serde_json::from_str(&data)?;
+            let time = time.max(crate::now());
+            let _memory = match self.core.lease_task_memory(&candidate.id, time).await {
+                Ok(lease) => lease,
+                Err(pulse_core::Error::Rejected(_) | pulse_core::Error::Busy) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+            let time = time.max(crate::now());
+            let data: Option<String> = sqlx::query_scalar("SELECT data FROM tasks WHERE id=?")
+                .bind(&candidate.id)
+                .fetch_optional(&mut *tx)
+                .await?;
+            let Some(data) = data else { continue };
             let task: Task = serde_json::from_str(&data)?;
-            if task.reason.as_deref() != Some("model_tool_waiting")
+            if task.id != candidate.id
+                || task.revision != candidate.revision
+                || task.active_run != candidate.active_run
+            {
+                continue;
+            }
+            if task.state != State::WaitingDevice
+                || task.reason.as_deref() != Some("model_tool_waiting")
                 || task.cancel_requested
                 || task.deadline <= time
             {
@@ -179,6 +197,8 @@ impl Hub {
                 .await?;
             let mut run: Run = serde_json::from_str(&data)?;
             if run.versions != *versions
+                || run.token.task_id != task.id
+                || run.token.run_id != *id
                 || run.token.revision != task.revision
                 || run.checkpoint["phase"] != "waiting_tool"
             {
@@ -192,6 +212,10 @@ impl Hub {
                 read.call.operation.permitted_by(&task.scope),
                 "dispatch outside Human scope",
             )?;
+            let workers=sqlx::query("SELECT id,epoch FROM link_device WHERE role='local_executor' AND revoked=0 AND stopped=0 AND lease_until>? AND NOT EXISTS(SELECT 1 FROM link_reads WHERE device=link_device.id AND state IN ('sent','accepted','unknown')) ORDER BY id").bind(time).fetch_all(&mut *tx).await?;
+            if workers.is_empty() {
+                return Ok(false);
+            }
             let mut selected = None;
             for worker in &workers {
                 let device: String = worker.get("id");
@@ -214,8 +238,18 @@ impl Hub {
             let Some((device, epoch)) = selected else {
                 continue;
             };
-            pulse_core::Store::authorize_remote_read(&mut tx, &run.token, &read.operation_id, time)
-                .await?;
+            match pulse_core::Store::authorize_remote_read(
+                &mut tx,
+                &run.token,
+                &read.operation_id,
+                time,
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(pulse_core::Error::Rejected(_)) => continue,
+                Err(error) => return Err(error.into()),
+            }
             sqlx::query("INSERT INTO link_reads VALUES(?,?,?,?,?,?,'sent',NULL)")
                 .bind(&read.operation_id)
                 .bind(&device)
@@ -248,7 +282,6 @@ impl Hub {
             self.notify_change();
             return Ok(true);
         }
-        tx.commit().await?;
         Ok(false)
     }
 

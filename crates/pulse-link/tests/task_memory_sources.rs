@@ -2,6 +2,8 @@ use pulse_core::*;
 use pulse_link::{protocol::*, provider::Reply, remote, server::Hub};
 use serde_json::json;
 const BODY: &str = "private source body remains outside provider prompts";
+#[path = "task_memory_sources/dispatch.rs"]
+mod dispatch;
 #[path = "task_memory_sources/tool_erasure.rs"]
 mod tool_erasure;
 async fn setup() -> (tempfile::TempDir, Hub, Memory) {

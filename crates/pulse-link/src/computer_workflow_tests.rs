@@ -952,3 +952,6 @@ async fn reselecting_an_undispatched_approval_keeps_the_task_and_invalidates_the
         assert_eq!(f.effects(), 0);
     }
 }
+
+#[path = "computer_workflow_tests/dispatch.rs"]
+mod dispatch;

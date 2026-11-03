@@ -64,3 +64,5 @@ Rust／Swift 邊界、共用本機協定與驗證缺口見 [macOS adapter](macos
 - 原 v0.1–v0.4 issue／PR 仍保留原狀。milestone 名稱已改為純版本號，原 description 與需求完整保留。v0.1 尚有三項開啟的工作，發布判定仍為 HOLD，沒有 RC 或發布接受。
 
 - Rust remote 已加入 provider 送出前與等待期間的任務、來源鏈及費用保留核對候選。取消、修訂、恢復或撤銷後停止本機等待；保留未知費用，不自動重試。受控 HTTP 測試不證明 provider 停止或退款，也不開啟模型記憶。完整 provider 記憶流程及 D06 仍待驗收；見 [任務來源核對](task-memory-sources.md#provider-送出與等待核對)。
+
+- 模型工具讀取與已批准 browser／computer 派工已加入來源限制鎖候選。即使 SQL 還有舊來源，資料庫外的撤銷仍會先阻止派工。取得鎖後重讀任務與批准，再把次數、帳本與佇列一起提交；故障回滾不消耗有效批准。合成來源與受控 helper 的測試不能代替桌面實機驗收；模型記憶仍關閉，見 [工具派工核對](task-memory-sources.md#工具派工核對)。

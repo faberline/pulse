@@ -6,8 +6,8 @@ Swift 只處理介面與輸入。
 其他介面可以使用同一套核心。
 
 資料庫 schema 為 17。
-remote workflow 為 `pulse-remote-19`。
-policy 為 `approved-effects-memory-fences-6`。
+remote workflow 為 `pulse-remote-20`。
+policy 為 `approved-effects-memory-fences-7`。
 
 ## Server 與地端資料
 
@@ -59,6 +59,6 @@ Rust 另已接上子程序退出核對與 Chrome profile 清理候選，見 [程
 server 的未知結果與已保留預算仍保留。
 
 runtime 的 PNG、舊 profile 與硬退出後的孤兒程序仍須完整處理。
-server 的獨立停止回報、provider 送出前核對與在途取消仍須完成。
-子任務來源繼承、關閉副本與正式還原也未完成。
+provider 已加入送出前與等待核對，模型工具派工也已加入來源限制鎖；見 [任務來源核對](task-memory-sources.md)。server 的獨立停止回報及其他 adapter 的完整在途取消仍須完成。
+子任務明確採用父來源已有候選。自動規劃的完整來源繼承、關閉副本與正式還原仍未完成。
 這個候選不代表 D06、D08 或 K15 已接受。
