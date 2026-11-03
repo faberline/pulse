@@ -34,6 +34,44 @@ impl Store {
         let revision = revision
             .parse()
             .map_err(|_| Error::Rejected("invalid task memory revision".into()))?;
+        self.lease_bound_task_memory(task_id, revision, now)
+            .await
+            .map(Some)
+    }
+
+    /// Historical projections retain their original revision's provenance.
+    /// This is a short local lease, never permission to call a model or tool.
+    pub async fn lease_task_memory_revision(
+        &self,
+        task_id: &str,
+        revision: u64,
+        now: i64,
+    ) -> Result<Option<TaskMemoryLease<'_>>> {
+        require(
+            revision > 0 && revision <= i64::MAX as u64,
+            "invalid task memory revision",
+        )?;
+        let bound: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM task_memory_sources WHERE task_id=? AND task_revision=?",
+        )
+        .bind(task_id)
+        .bind(revision.to_string())
+        .fetch_one(&self.pool)
+        .await?;
+        if bound == 0 {
+            return Ok(None);
+        }
+        self.lease_bound_task_memory(task_id, revision, now)
+            .await
+            .map(Some)
+    }
+
+    async fn lease_bound_task_memory(
+        &self,
+        task_id: &str,
+        revision: u64,
+        now: i64,
+    ) -> Result<TaskMemoryLease<'_>> {
         let lease = self.memory_guard.lease().await?;
         let mut restrictions = self
             .memory_guard
@@ -48,7 +86,7 @@ impl Store {
         self.checkpoint_memory_redaction().await?;
         let mut db = self.pool.acquire().await?;
         validate(&mut db, task_id, revision, now).await?;
-        Ok(Some(TaskMemoryLease { _lease: lease }))
+        Ok(TaskMemoryLease { _lease: lease })
     }
     /// Bind before any model/tool work. The controller supplies authenticated Human
     /// origin, never a model proposal. This method returns references, not bodies.

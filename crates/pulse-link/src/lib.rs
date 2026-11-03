@@ -29,6 +29,7 @@ mod remote_io;
 mod schedule_chat;
 pub mod schedules;
 pub mod server;
+mod server_projection;
 pub mod text_input;
 pub mod text_result;
 pub mod text_result_client;

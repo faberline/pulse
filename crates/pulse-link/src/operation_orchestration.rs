@@ -73,12 +73,36 @@ impl Hub {
         Ok(())
     }
     pub(crate) async fn project_action_approvals(&self, time: i64) -> Result<()> {
-        // Recover the projection gap and register source lineage atomically.
-        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
-        let rows:Vec<String>=sqlx::query_scalar("SELECT r.data FROM operation_requests r WHERE (json_extract(r.data,'$.proposal.target') LIKE 'browser:%' OR json_extract(r.data,'$.proposal.target') LIKE 'computer:%') AND (NOT EXISTS(SELECT 1 FROM link_chat c WHERE c.id=r.id) OR (EXISTS(SELECT 1 FROM task_memory_sources b WHERE b.task_id=r.task_id AND b.task_revision=json_extract(r.data,'$.proposal.token.revision')) AND NOT EXISTS(SELECT 1 FROM memory_derived_messages d WHERE d.id=r.id))) AND NOT EXISTS(SELECT 1 FROM task_memory_sources b WHERE b.task_id=r.task_id AND b.task_revision=json_extract(r.data,'$.proposal.token.revision') AND json_extract(b.data,'$.invalidated')=1) ORDER BY r.rowid").fetch_all(&mut *tx).await?;
-        let mut changed = false;
+        // Do not acquire a keeper lease while holding the single SQL writer.
+        let rows:Vec<String>=sqlx::query_scalar("SELECT r.data FROM operation_requests r WHERE (json_extract(r.data,'$.proposal.target') LIKE 'browser:%' OR json_extract(r.data,'$.proposal.target') LIKE 'computer:%') AND (NOT EXISTS(SELECT 1 FROM link_chat c WHERE c.id=r.id) OR (EXISTS(SELECT 1 FROM task_memory_sources b WHERE b.task_id=r.task_id AND b.task_revision=json_extract(r.data,'$.proposal.token.revision')) AND NOT EXISTS(SELECT 1 FROM memory_derived_messages d WHERE d.id=r.id))) AND NOT EXISTS(SELECT 1 FROM task_memory_sources b WHERE b.task_id=r.task_id AND b.task_revision=json_extract(r.data,'$.proposal.token.revision') AND json_extract(b.data,'$.invalidated')=1) ORDER BY r.rowid").fetch_all(&self.db).await?;
         for data in rows {
+            let candidate: OperationRequest = serde_json::from_str(&data)?;
+            let time = time.max(crate::now());
+            let _source = match self
+                .core
+                .lease_task_memory_revision(
+                    &candidate.proposal.token.task_id,
+                    candidate.proposal.token.revision,
+                    time,
+                )
+                .await
+            {
+                Ok(lease) => lease,
+                Err(pulse_core::Error::Rejected(_) | pulse_core::Error::Busy) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+            let time = time.max(crate::now());
+            let data: Option<String> =
+                sqlx::query_scalar("SELECT data FROM operation_requests WHERE id=?")
+                    .bind(&candidate.proposal.id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            let Some(data) = data else { continue };
             let request: OperationRequest = serde_json::from_str(&data)?;
+            if request != candidate {
+                continue;
+            }
             let body = if request.proposal.target.starts_with("computer:") {
                 "程式視窗操作提議。請核對畫面、目標與效果。"
             } else {
@@ -89,7 +113,7 @@ impl Hub {
                 .ok_or_else(|| {
                     crate::Error::Rejected("proposal observation time missing".into())
                 })?;
-            changed |= sqlx::query("INSERT OR IGNORE INTO link_chat VALUES(?,?,?)")
+            let changed = sqlx::query("INSERT OR IGNORE INTO link_chat VALUES(?,?,?)")
                 .bind(&request.proposal.id)
                 .bind(body)
                 .bind(created)
@@ -105,10 +129,10 @@ impl Hub {
                 time,
             )
             .await?;
-        }
-        tx.commit().await?;
-        if changed {
-            self.notify_change();
+            tx.commit().await?;
+            if changed {
+                self.notify_change();
+            }
         }
         Ok(())
     }

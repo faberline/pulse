@@ -25,6 +25,8 @@ pub struct Hub {
     pub core: Store,
     pub(crate) db: SqlitePool,
     changes: tokio::sync::watch::Sender<u64>,
+    // One active chat role. Retry source-busy projections on the existing tick.
+    projection_retry: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) human: Arc<tokio::sync::Mutex<()>>,
 }
 impl Hub {
@@ -148,6 +150,7 @@ impl Hub {
             core,
             db,
             changes: tokio::sync::watch::channel(0).0,
+            projection_retry: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             human: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -389,8 +392,13 @@ impl Hub {
         Ok(())
     }
     pub async fn snapshot(&self, device: &str, epoch: u64, time: i64) -> Result<()> {
+        // Never wait for the keeper while holding the single SQL writer.
+        let time = time.max(now());
+        let (_source, covered, mut retry_projection) =
+            self.projection_lease(device, epoch, time).await?;
         // Projection reads and the domain-notification handoff share one committed view.
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+        let time = time.max(now());
         let erasure_ready: i64 =
             sqlx::query_scalar("SELECT projection_erasure FROM link_device WHERE id=?")
                 .bind(device)
@@ -470,39 +478,46 @@ impl Hub {
                 }
             }
         }
-        let mut rows = sqlx::query(
-            "SELECT c.id,c.body FROM link_chat c ORDER BY EXISTS(SELECT 1 FROM operation_requests r WHERE r.id=c.id AND json_extract(r.data,'$.state') IN ('pending','approved') AND json_extract(r.data,'$.proposal.expires_at')>?) DESC,c.created_at DESC,c.rowid DESC LIMIT 10",
-        )
-        .bind(time)
-        .fetch_all(&mut *tx)
-        .await?;
+        let mut rows = crate::server_projection::messages(&mut tx, time).await?;
         rows.reverse();
         let mut messages = Vec::new();
         let mut memory_sources = std::collections::BTreeMap::new();
         for row in rows {
             let id: String = row.get("id");
-            let redacted: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM memory_derived_messages WHERE id=? AND redacted=1",
-            )
-            .bind(&id)
-            .fetch_one(&mut *tx)
-            .await?;
+            let redacted: i64 = row.get("redacted");
             if redacted == 1 {
                 messages.push(ChatMessage {
                     id,
-                    body: row.get("body"),
+                    body: "記憶來源已移除，回覆內容已清除。".into(),
                     approval: None,
                     artifact: None,
                     artifact_operation_id: None,
                 });
                 continue;
             }
-            let lineage:Option<String>=sqlx::query_scalar("SELECT b.data FROM memory_derived_messages d JOIN task_memory_sources b ON b.task_id=d.task_id AND b.task_revision=d.task_revision WHERE d.id=? AND d.redacted=0").bind(&id).fetch_optional(&mut *tx).await?;
-            if let Some(lineage) = lineage {
+            if let Some(lineage) = row.get::<Option<String>, _>("lineage") {
                 if erasure_ready == 0 {
                     continue;
                 }
                 let binding: pulse_core::TaskMemorySources = serde_json::from_str(&lineage)?;
+                match Store::validate_task_memory_in(
+                    &mut tx,
+                    &binding.request.task_id,
+                    binding.request.task_revision,
+                    time,
+                )
+                .await
+                {
+                    Ok(()) => {}
+                    Err(pulse_core::Error::Rejected(_)) => continue,
+                    Err(error) => return Err(error.into()),
+                }
+                if _source.is_none() || binding.sources.iter().any(|s| !covered.contains(s)) {
+                    // A new message may have appeared after the candidate read.
+                    // Keep ordinary messages and retry on the existing bounded tick.
+                    retry_projection = true;
+                    continue;
+                }
                 for source in binding.sources {
                     memory_sources.insert(source.source_id.clone(), source);
                 }
@@ -611,6 +626,10 @@ impl Hub {
             }
         }
         tx.commit().await?;
+        if retry_projection {
+            self.projection_retry
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
         // Watch updates can merge many timer occurrences. Drain the next bounded
         // batch even when no further Human input or timer event arrives.
         if more_notices {
@@ -1712,6 +1731,7 @@ async fn session(hub: Arc<Hub>, device: String, mut socket: WebSocket) {
         send(&mut socket,&ServerWire::Welcome{device:device.clone(),epoch:epoch.to_string(),lease_ms:LEASE_MS as u32}).await?;
         hub.snapshot(&device,epoch,now()).await?;
         let mut ticker=tokio::time::interval(std::time::Duration::from_millis(150));
+        let mut projection_retry_at=tokio::time::Instant::now()+std::time::Duration::from_secs(1);
         loop {tokio::select! {
             result=changes.changed()=>{
                 result.map_err(|_|crate::Error::Rejected("server stopped".into()))?;
@@ -1720,6 +1740,12 @@ async fn session(hub: Arc<Hub>, device: String, mut socket: WebSocket) {
             }
             _=ticker.tick()=>{
                 ensure(hub.live(&device,epoch,now()).await?,"revoked, expired or superseded connection")?;
+                let role:String=sqlx::query_scalar("SELECT role FROM link_device WHERE id=?").bind(&device).fetch_one(&hub.db).await?;
+                if role == "chat" && tokio::time::Instant::now()>=projection_retry_at
+                    && hub.projection_retry.swap(false,std::sync::atomic::Ordering::AcqRel) {
+                    hub.snapshot(&device,epoch,now()).await?;
+                    projection_retry_at=tokio::time::Instant::now()+std::time::Duration::from_secs(1);
+                }
                 match hub.flush_worker_erasures(&device,epoch).await {Ok(())|Err(crate::Error::Capacity)=>{},Err(error)=>return Err(error)}
                 for delivery in hub.deliveries(&device).await? {
                     match delivery {

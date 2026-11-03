@@ -684,3 +684,77 @@ async fn changed_source_authority_is_denied_and_missing_memory_keeper_does_not_g
             .unwrap()
     );
 }
+
+#[tokio::test]
+async fn historical_revision_lease_uses_original_sources_after_the_current_task_is_revised() {
+    let (_root, store, memory) = setup().await;
+    bind(&store, &memory).await;
+    route(
+        &store,
+        vec![Command::Revise {
+            id: "a".into(),
+            expected_revision: 1,
+            goal: "Independent new Human goal".into(),
+            scope: None,
+        }],
+        NOW + 1,
+    )
+    .await;
+    assert!(
+        store
+            .lease_task_memory("a", NOW + 1)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let old = store
+        .lease_task_memory_revision("a", 1, NOW + 1)
+        .await
+        .unwrap();
+    assert!(old.is_some());
+    drop(old);
+    assert!(
+        store
+            .lease_task_memory_revision("a", 0, NOW + 1)
+            .await
+            .is_err()
+    );
+    sqlx::query("CREATE TRIGGER block_history_erasure BEFORE DELETE ON memories BEGIN SELECT RAISE(ABORT,'controlled history failure'); END")
+        .execute(&store.application_pool()).await.unwrap();
+    assert!(forget(&store, &memory, NOW + 2).await.is_err());
+    assert!(
+        store
+            .lease_task_memory_revision("a", 1, NOW + 2)
+            .await
+            .is_err()
+    );
+    sqlx::query("DROP TRIGGER block_history_erasure")
+        .execute(&store.application_pool())
+        .await
+        .unwrap();
+    assert!(
+        store
+            .lease_task_memory_revision("a", 1, NOW + 2)
+            .await
+            .is_err()
+    );
+    let current = store.task("a").await.unwrap();
+    assert_eq!(current.revision, 2);
+    assert_eq!(current.goal, "Independent new Human goal");
+    assert_eq!(current.state, State::Queued);
+    assert!(
+        store
+            .lease_task_memory("a", NOW + 2)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .task_memory_sources("a", 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .invalidated
+    );
+}

@@ -955,3 +955,6 @@ async fn reselecting_an_undispatched_approval_keeps_the_task_and_invalidates_the
 
 #[path = "computer_workflow_tests/dispatch.rs"]
 mod dispatch;
+
+#[path = "computer_workflow_tests/projection.rs"]
+mod projection;

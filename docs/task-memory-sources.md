@@ -2,7 +2,7 @@
 
 這是 D06 的必要前置工作。它不開啟模型記憶，也不代表 D06、D08 或 K15 已接受。
 Swift 沒有新增任務或記憶規則。這些規則由 Rust Core 處理。
-schema 為 17。remote workflow 為 `pulse-remote-20`，policy 為 `approved-effects-memory-fences-7`。
+schema 為 17。remote workflow 為 `pulse-remote-21`，policy 為 `approved-effects-memory-fences-8`。
 地端工作與雙向傳輸清除見 [地端工作清除](worker-source-erasure.md)。
 模型聊天的來源追蹤與清除候選見 [衍生聊天清除](derived-chat-erasure.md)。
 版本不符的舊 run 需重新核對，不能自動視為新規則已驗收。
@@ -72,7 +72,7 @@ Core 的費用保留、advance、finish、提議與操作準備入口會先取�
 
 Core claim、SQL 共用入口、remote context／結果與傳輸允許核對也檢查來源修訂與 Human 採用事件。
 已排入真正傳輸佇列的讀取，在來源移除後會失去傳送允許。
-context／回覆／提議、手動讀取與傳輸允許入口也已取得這個限制鎖。provider 的送出與等待核對見下節。模型讀取及已批准的 browser／computer 派工也已加入限制鎖；其他 adapter 的完整核對仍待完成。
+context／回覆／提議、手動讀取與傳輸允許入口也已取得這個限制鎖。provider 的送出與等待核對見下節。模型讀取及已批准的 browser／computer 派工也已加入限制鎖；操作卡片發布與聊天快照也已加入原修訂的來源核對；見 [衍生聊天清除](derived-chat-erasure.md#卡片與快照建立)。其他 adapter 的完整核對仍待完成。
 這些 SQL 核對不能代替資料庫外的限制鎖。`TaskMemoryLease` 只供有界本機提交，不可持鎖等待 provider。
 
 正常重開會從同一 keeper 重做撤銷。測試亦核對：關聯已存在的刪除前快照，搭配目前 keeper 時，不能恢復原 run。
