@@ -383,6 +383,7 @@ async fn journal_commits_before_ack_and_deduplicates_across_restart() {
             local: LocalStatus::default(),
             tasks: vec![],
             messages: vec![ChatMessage {
+                memory_sources: None,
                 artifact_operation_id: None,
                 approval: None,
                 artifact: None,

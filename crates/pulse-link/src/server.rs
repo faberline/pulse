@@ -487,6 +487,7 @@ impl Hub {
             let redacted: i64 = row.get("redacted");
             if redacted == 1 {
                 messages.push(ChatMessage {
+                    memory_sources: Some(vec![]),
                     id,
                     body: "記憶來源已移除，回覆內容已清除。".into(),
                     approval: None,
@@ -495,6 +496,7 @@ impl Hub {
                 });
                 continue;
             }
+            let mut message_sources = Vec::new();
             if let Some(lineage) = row.get::<Option<String>, _>("lineage") {
                 if erasure_ready == 0 {
                     continue;
@@ -518,6 +520,7 @@ impl Hub {
                     retry_projection = true;
                     continue;
                 }
+                message_sources = binding.sources.clone();
                 for source in binding.sources {
                     memory_sources.insert(source.source_id.clone(), source);
                 }
@@ -549,6 +552,7 @@ impl Hub {
             };
             let metadata:Option<String>=sqlx::query_scalar("SELECT a.metadata FROM link_artifacts a JOIN link_reads r ON a.operation_id=r.id WHERE a.operation_id=? AND r.state='completed' AND a.png IS NOT NULL").bind(&source_id).fetch_optional(&mut *tx).await?;
             messages.push(ChatMessage {
+                memory_sources: Some(message_sources),
                 approval,
                 artifact_operation_id: (source_id != id).then_some(source_id),
                 id,

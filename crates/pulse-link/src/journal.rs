@@ -8,6 +8,8 @@ use std::{
 
 #[derive(Clone)]
 pub struct Journal {
+    pub(crate) directory: PathBuf,
+    pub(crate) image_io: std::sync::Arc<tokio::sync::Mutex<()>>,
     pub(crate) core: pulse_core::Store,
     pub(crate) memory_denied: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub(crate) memory_lifecycle: std::sync::Arc<tokio::sync::Mutex<()>>,
@@ -162,8 +164,15 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
             .execute(&mut *tx)
             .await?;
         crate::derived_projection::clear(&mut tx).await?;
+        sqlx::query(
+            "DELETE FROM local_meta WHERE key IN ('image_erasure_pending','image_erasure_ready')",
+        )
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         let journal = Self {
+            directory: dir.canonicalize()?,
+            image_io: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             core,
             memory_denied: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             memory_lifecycle: std::sync::Arc::new(tokio::sync::Mutex::new(())),
@@ -408,13 +417,25 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                 pulse_core::ErasedProjection::from_value(&serde_json::to_value(envelope)?)?;
             return self.accept_erasure_control(&header, context).await;
         }
-        let _lifecycle = if self.role == ClientRole::LocalExecutor
-            || matches!(&envelope.payload, ServerPayload::DerivedSnapshot { .. })
+        let _lifecycle = self.memory_lifecycle.lock().await;
+        if let ServerPayload::Snapshot { messages, .. }
+        | ServerPayload::DerivedSnapshot { messages, .. } = &envelope.payload
         {
-            Some(self.memory_lifecycle.lock().await)
-        } else {
-            None
-        };
+            let sources = if let ServerPayload::DerivedSnapshot { sources, .. } = &envelope.payload
+            {
+                sources.as_slice()
+            } else {
+                &[]
+            };
+            ensure(
+                messages.iter().all(|m| {
+                    m.memory_sources
+                        .as_ref()
+                        .is_none_or(|s| s.len() <= 100 && s.iter().all(|v| sources.contains(v)))
+                }),
+                "message sources are outside the projection lease",
+            )?;
+        }
         let source_erased = if let ServerPayload::Read {
             task_id, revision, ..
         } = &envelope.payload
@@ -826,7 +847,26 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                         .fetch_optional(&self.db)
                         .await?;
                 if let Some(data) = data {
-                    let image: crate::artifact::LocalArtifact = serde_json::from_str(&data)?;
+                    let value: serde_json::Value = serde_json::from_str(&data)?;
+                    if value["erased"] == true || value["writing"] == true {
+                        continue;
+                    }
+                    if let Some(sources) = value.get("memory_sources") {
+                        let sources: Vec<pulse_core::TaskMemorySource> =
+                            serde_json::from_value(sources.clone())?;
+                        if !sources.is_empty()
+                            && !self
+                                .projection_sources_allowed(&sources, crate::now())
+                                .await?
+                        {
+                            continue;
+                        }
+                    }
+                    let image = if value.get("file").is_some() {
+                        crate::chat_image_cache::image(&data)?
+                    } else {
+                        serde_json::from_str::<crate::artifact::LocalArtifact>(&data)?
+                    };
                     if image.artifact == *artifact {
                         state.artifacts.push(image);
                     }
@@ -850,6 +890,7 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                 body
             };
             state.messages.push(ChatMessage {
+                memory_sources: Some(vec![]),
                 artifact_operation_id: None,
                 approval: None,
                 artifact: None,
@@ -873,6 +914,7 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                 let notice: pulse_core::ScheduleNotice = serde_json::from_str(&row)?;
                 state.schedule_notices.push(notice.clone());
                 state.messages.push(ChatMessage {
+                    memory_sources: Some(vec![]),
                     id: notice.id,
                     body: format!(
                         "{} · {}\n{}",

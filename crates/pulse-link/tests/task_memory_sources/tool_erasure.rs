@@ -108,6 +108,14 @@ async fn tool_source_erasure_removes_result_event_chat_and_transport_without_ack
         .into_iter()
         .find(|f| matches!(f.payload, ServerPayload::DerivedSnapshot { .. }))
         .unwrap();
+    let ServerPayload::DerivedSnapshot {
+        messages, sources, ..
+    } = &before.payload
+    else {
+        panic!()
+    };
+    let message = messages.iter().find(|m| m.id == read.id).unwrap();
+    assert_eq!(message.memory_sources.as_ref(), Some(sources));
     hub.ack(&read.chat, number(&before.sequence).unwrap(), &before.id)
         .await
         .unwrap();

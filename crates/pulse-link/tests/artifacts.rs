@@ -225,7 +225,8 @@ async fn original_png_crosses_durable_journal_receipt_and_authenticated_chat_dow
     let downloaded = pulse_link::artifact_client::download(&config, &chat, operation_id, &metadata)
         .await
         .unwrap();
-    assert_eq!(std::fs::read(&downloaded.path).unwrap(), expected);
+    assert_eq!(downloaded.png, expected);
+    assert!(!config.data_dir.join("artifacts").exists());
     hub.revoke(&chat.device).await.unwrap();
     assert!(
         hub.artifact_png(

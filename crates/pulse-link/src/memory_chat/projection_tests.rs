@@ -21,6 +21,7 @@ fn frame(f: &Fixture, memory: &Memory, sequence: u64) -> Envelope<ServerPayload>
         ServerPayload::DerivedSnapshot {
             tasks: vec![],
             messages: vec![ChatMessage {
+                memory_sources: None,
                 id: "generated".into(),
                 body: DERIVED.into(),
                 approval: None,

@@ -41,6 +41,7 @@ impl Journal {
         self.memory_copy_locked(change).await
     }
     async fn memory_copy_locked(&self, change: pulse_core::MemoryCopyChange<'_>) -> Result<bool> {
+        let prior_identity = self.memory_identity.lock().unwrap().clone();
         let identity = match &change {
             pulse_core::MemoryCopyChange::Bind(hash)
             | pulse_core::MemoryCopyChange::Activate(hash) => Some((*hash).to_owned()),
@@ -53,6 +54,12 @@ impl Journal {
             .core
             .memory_copy(&self.device, &crate::protocol::hash(&self.server)?, change)
             .await?;
+        if !allowed || prior_identity != identity {
+            sqlx::query("DELETE FROM local_meta WHERE key='image_erasure_ready'")
+                .execute(&self.db)
+                .await?;
+        }
+        self.flush_memory().await?;
         self.memory_denied
             .store(!allowed, std::sync::atomic::Ordering::Release);
         if allowed {
@@ -302,6 +309,7 @@ impl Journal {
                         now,
                     )
                     .await?;
+                self.flush_memory().await?;
                 self.memory_denied
                     .store(false, std::sync::atomic::Ordering::Release);
                 return Ok(true);
@@ -338,10 +346,22 @@ impl Journal {
         Ok(value.filter(|s| !s.is_empty()))
     }
     pub(crate) async fn memory_clean(&self, generation: &str) -> Result<()> {
-        sqlx::query("UPDATE local_meta SET value='' WHERE key='memory_dirty' AND value=?")
-            .bind(generation)
-            .execute(&self.db)
-            .await?;
+        let _lifecycle = self.memory_lifecycle.lock().await;
+        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+        let changed =
+            sqlx::query("UPDATE local_meta SET value='' WHERE key='memory_dirty' AND value=?")
+                .bind(generation)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+        if changed > 0 {
+            sqlx::query("INSERT INTO local_meta SELECT 'image_erasure_ready',value FROM local_meta WHERE key='image_erasure_pending' ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+                .execute(&mut *tx).await?;
+            sqlx::query("DELETE FROM local_meta WHERE key='image_erasure_pending'")
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
     pub(crate) async fn memory_requests(&self) -> Result<Vec<MemoryRequest>> {
@@ -570,6 +590,7 @@ impl Journal {
                     _ => "記憶查詢已保存。連線後會核對目前來源。",
                 };
                 state.messages.push(ChatMessage {
+                    memory_sources: Some(vec![]),
                     id: row.get("source_id"),
                     body: body.into(),
                     artifact: None,
@@ -590,6 +611,7 @@ impl Journal {
         Ok(())
     }
     pub(crate) async fn flush_memory(&self) -> Result<()> {
+        crate::chat_image_cache::drain(self).await?;
         let row = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
             .fetch_one(&self.db)
             .await?;

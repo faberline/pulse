@@ -5,6 +5,7 @@ mod browser_controls;
 pub mod browser_network;
 pub mod browser_runtime;
 pub mod browser_session;
+mod chat_image_cache;
 pub mod cli;
 pub mod client;
 mod computer_admission;

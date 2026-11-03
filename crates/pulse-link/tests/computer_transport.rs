@@ -342,7 +342,7 @@ async fn exact_computer_source_survives_journal_restart_receipt_and_chat_downloa
     )
     .await
     .unwrap();
-    assert_eq!(std::fs::read(downloaded.path).unwrap(), expected);
+    assert_eq!(downloaded.png, expected);
     hub.revoke(&chat.device).await.unwrap();
     assert!(
         hub.artifact_png(

@@ -69,7 +69,29 @@ impl Journal {
             .transpose()?
             .is_none_or(|s| s <= sequence)
         {
-            clear(&mut tx).await?;
+            clear_view(&mut tx).await?;
+        }
+        let ready: Option<String> =
+            sqlx::query_scalar("SELECT value FROM local_meta WHERE key='image_erasure_ready'")
+                .fetch_optional(&mut *tx)
+                .await?;
+        let pending: Option<String> =
+            sqlx::query_scalar("SELECT value FROM local_meta WHERE key='image_erasure_pending'")
+                .fetch_optional(&mut *tx)
+                .await?;
+        let sourced:i64=sqlx::query_scalar("SELECT count(*) FROM local_meta WHERE key GLOB 'image:*' AND json_array_length(value,'$.memory_sources')>0")
+                .fetch_one(&mut *tx).await?;
+        if sourced == 0 || (ready.as_deref() == Some(&header.sequence) && pending.is_none()) {
+            // One sync authorizes one ACK attempt. An older ACK cannot certify a later withdrawal.
+            sqlx::query("DELETE FROM local_meta WHERE key IN ('image_erasure_pending','image_erasure_ready')")
+                .execute(&mut *tx).await?;
+        } else if pending.as_deref() != Some(&header.sequence) {
+            crate::memory_chat::journal::dirty(&mut tx).await?;
+            sqlx::query("INSERT INTO local_meta VALUES('image_erasure_pending',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+                .bind(&header.sequence).execute(&mut *tx).await?;
+            sqlx::query("DELETE FROM local_meta WHERE key='image_erasure_ready'")
+                .execute(&mut *tx)
+                .await?;
         }
         tx.commit().await?;
         // A lost ACK redoes this physical checkpoint even after the logical row
@@ -79,6 +101,11 @@ impl Journal {
                 .store(true, std::sync::atomic::Ordering::Release);
             return Err(error);
         }
+        let pending: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM local_meta WHERE key='image_erasure_pending'")
+                .fetch_one(&self.db)
+                .await?;
+        ensure(pending == 0, "image erasure awaits a fresh source sync")?;
         Ok(fresh)
     }
     pub(crate) async fn projection_sources_allowed(
@@ -105,6 +132,10 @@ impl Journal {
     }
 }
 pub(crate) async fn clear(db: &mut SqliteConnection) -> Result<()> {
+    sqlx::query("UPDATE local_meta SET value=json_object('erased',json('true'),'file',json_extract(value,'$.file'),'writing',coalesce(json_extract(value,'$.writing'),0)) WHERE key GLOB 'image:*' AND json_array_length(value,'$.memory_sources')>0").execute(&mut *db).await?;
+    clear_view(db).await
+}
+async fn clear_view(db: &mut SqliteConnection) -> Result<()> {
     let count=sqlx::query("DELETE FROM local_meta WHERE key='cache' AND json_array_length(value,'$.memory_sources')>0").execute(&mut *db).await?.rows_affected();
     if count > 0 {
         sqlx::query("DELETE FROM local_meta WHERE key='cache_sequence'")

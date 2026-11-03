@@ -10,14 +10,19 @@ impl Store {
         now: Option<i64>,
         denied: bool,
     ) -> Result<bool> {
-        let count = sqlx::query("DELETE FROM local_meta WHERE key='cache' AND json_array_length(local_meta.value,'$.memory_sources')>0 AND (? OR EXISTS (SELECT 1 FROM json_each(local_meta.value,'$.memory_sources') s WHERE NOT EXISTS(SELECT 1 FROM local_memory_cache m WHERE m.id=json_extract(s.value,'$.memory_id') AND json_extract(m.data,'$.revision')=json_extract(s.value,'$.revision') AND json_extract(m.data,'$.source_id')=json_extract(s.value,'$.source_id') AND json_extract(m.data,'$.expires_at')=json_extract(s.value,'$.expires_at') AND (? IS NULL OR json_extract(m.data,'$.expires_at')>?) AND NOT EXISTS(SELECT 1 FROM local_memory_queue q WHERE q.request IS NOT NULL AND json_extract(q.request,'$.command.kind')='correct' AND json_extract(q.request,'$.command.id')=m.id AND json_extract(q.request,'$.command.revision')>=json_extract(m.data,'$.revision')))))")
-            .bind(denied).bind(now).bind(now).execute(&mut *db).await?.rows_affected();
-        if count > 0 {
-            sqlx::query("DELETE FROM local_meta WHERE key='cache_sequence'")
-                .execute(db)
-                .await?;
+        let keys:Vec<String> = sqlx::query_scalar("SELECT key FROM local_meta WHERE (key='cache' OR key GLOB 'image:*') AND coalesce(json_extract(value,'$.erased'),0)=0 AND ((? AND key GLOB 'image:*') OR (json_array_length(local_meta.value,'$.memory_sources')>0 AND (? OR EXISTS (SELECT 1 FROM json_each(local_meta.value,'$.memory_sources') s WHERE NOT EXISTS(SELECT 1 FROM local_memory_cache m WHERE m.id=json_extract(s.value,'$.memory_id') AND json_extract(m.data,'$.revision')=json_extract(s.value,'$.revision') AND json_extract(m.data,'$.source_id')=json_extract(s.value,'$.source_id') AND json_extract(m.data,'$.expires_at')=json_extract(s.value,'$.expires_at') AND (? IS NULL OR json_extract(m.data,'$.expires_at')>?) AND NOT EXISTS(SELECT 1 FROM local_memory_queue q WHERE q.request IS NOT NULL AND json_extract(q.request,'$.command.kind')='correct' AND json_extract(q.request,'$.command.id')=m.id AND json_extract(q.request,'$.command.revision')>=json_extract(m.data,'$.revision')))))))")
+            .bind(denied).bind(denied).bind(now).bind(now).fetch_all(&mut *db).await?;
+        for key in &keys {
+            if key == "cache" {
+                sqlx::query("DELETE FROM local_meta WHERE key IN ('cache','cache_sequence')")
+                    .execute(&mut *db)
+                    .await?;
+            } else {
+                sqlx::query("UPDATE local_meta SET value=json_object('erased',json('true'),'file',json_extract(value,'$.file'),'writing',coalesce(json_extract(value,'$.writing'),0)) WHERE key=?")
+                    .bind(key).execute(&mut *db).await?;
+            }
         }
-        Ok(count > 0)
+        Ok(!keys.is_empty())
     }
 
     /// Hold only over a bounded projection send, never a provider request.

@@ -411,11 +411,7 @@ impl Device {
                 artifact_download=None;
                 let loaded_id=artifact_loading.take();
                 match completed {
-                    Ok(Ok(image))=>{match self.journal.save_artifact(&image).await {
-                        Ok(())=>message="截圖已核對並保存。".into(),
-                        Err(crate::Error::Rejected(_))=>{artifact_failure=loaded_id;message="截圖來源已更新。請重新選取。".into();},
-                        Err(error)=>return Err(error),
-                    }}
+                    Ok(Ok(_))=>message="截圖已核對並保存。".into(),
                     _=>{artifact_failure=loaded_id;message="截圖尚未取得。可按截圖重試；不會重新瀏覽。".into();},
                 }
             }
@@ -590,7 +586,7 @@ impl Device {
                         if artifact_download.is_some(){continue;}
                         if let Some(credential)=credential.clone() {
                             match self.journal.artifact_request(&operation_id,&digest).await {
-                                Ok(artifact)=>{artifact_loading=Some(operation_id.clone());artifact_failure=None;message="正在載入截圖…".into();let config=self.config.clone();artifact_download=Some(tokio::spawn(async move{crate::artifact_client::download(&config,&credential,&operation_id,&artifact).await}));}
+                                Ok(_)=>{artifact_loading=Some(operation_id.clone());artifact_failure=None;message="正在載入截圖…".into();let config=self.config.clone();let journal=self.journal.clone();artifact_download=Some(tokio::spawn(async move{journal.load_artifact(&config,&credential,&operation_id,&digest).await}));}
                                 Err(_)=>{artifact_failure=Some(operation_id);message="截圖要求已拒絕。請核對來源。".into();},
                             }
                         }

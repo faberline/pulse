@@ -383,6 +383,9 @@ pub enum ServerPayload {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatMessage {
+    /// None is a legacy projection. Some(empty) is an explicitly independent message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_sources: Option<Vec<pulse_core::TaskMemorySource>>,
     pub id: String,
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

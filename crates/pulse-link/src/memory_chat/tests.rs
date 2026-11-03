@@ -4,6 +4,8 @@ use super::*;
 mod generation_tests;
 #[path = "identity_tests.rs"]
 mod identity_tests;
+#[path = "image_tests.rs"]
+mod image_tests;
 #[path = "projection_tests.rs"]
 mod projection_tests;
 #[path = "topic_tests.rs"]
