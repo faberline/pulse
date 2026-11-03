@@ -32,13 +32,15 @@ The proxy checks every destination before connecting. It resolves a hostname onc
 
 `PULSE_BROWSER_FIXTURE_ORIGIN` is an optional **local operator** test setting. It accepts exactly one `http://127.0.0.1:PORT/` origin. Other loopback ports remain blocked. Neither a server request nor a model call can set this exception.
 
-Navigation and observation take at most 35 seconds in total. Each driver response is at most 4 MiB. Page text is at most 32 KiB. Evidence includes the final URL, title, observation time, text, truncation flag and PNG SHA-256. The PNG stays in the local private `browser/artifacts` directory. There are at most 128 artifacts through the serial local worker. At this limit, further reads stop. There is no automatic deletion.
+Navigation and observation take at most 35 seconds in total. Each driver response is at most 4 MiB. Page text is at most 32 KiB. Evidence includes the final URL, title, observation time, text, truncation flag and PNG SHA-256.
 
-The model receives bounded text evidence. It does not receive screenshot bytes. The chat can show the source and the evidence text, but image delivery is unfinished. Script-dependent pages can be incomplete. This candidate does not click, type, log in or submit forms.
+The current Rust runtime hands the PNG bytes to its caller. The local journal saves image chunks and the result in one transaction. Restart delivery uses that journal, without another navigation. The runtime no longer writes an extra `browser/artifacts` copy. Old files in that directory do not block new captures and are retained for source recovery. The response, PNG, session and journal limits still apply. Server and chat image limits remain separate; see [original screenshot delivery](browser-interaction.md#original-screenshot-delivery).
+
+The model receives bounded text evidence. It does not receive screenshot bytes. The chat can show the original PNG through the verified image transport. Script-dependent pages can be incomplete. A read task does not permit clicks, typing, login or form submission. [Browser interaction](browser-interaction.md) needs its separate Human scope and approval.
 
 The existing durable intent, journal, receipt, ACK and fencing rules apply. Completed operation receipts are replayed without another navigation. Unknown reads stop for Human review. Revision, cancellation and restart cannot restore an old run. During a read, loss of the local lease or the stop switch drops the browser future. An observed task revision or cancellation also stops it. Task updates arrive through snapshots; this is not an immediate per-task cancel channel. A missing snapshot entry does not itself prove cancellation. The 35-second read limit still applies. Dispatch and receipt checks enforce the server's task state independently.
 
-Execution versions are `pulse-remote-8`, `effective-read-3`, `pulse-read-3` and `read-only-3`. Checkpoint schema remains 1. Database schema remains 4. No old migration was edited. Incompatible in-flight runs remain stopped.
+The original read candidate used `pulse-remote-8`, `effective-read-3`, `pulse-read-3` and `read-only-3`, with checkpoint schema 1 and database schema 4. Later candidates are recorded in [browser interaction](browser-interaction.md) and [task memory sources](task-memory-sources.md). Incompatible in-flight runs remain stopped.
 
 ## Verification on 2026-11-02
 

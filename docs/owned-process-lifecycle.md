@@ -43,7 +43,8 @@ Git 與原生 helper 會收到停止要求，並核對子程序回收與程序�
 操作帳本與未知結果不會因此改寫，也不會自動重做效果。
 
 直接中止 `Device::run` future 或強制終止程序，不會完成這個正常關閉流程。
-瀏覽器成果 PNG、舊 runtime 的檔案、孤兒程序與正式恢復仍須另行處理。
+瀏覽器 runtime 已停止新增獨立成果 PNG；原圖仍交給 journal 與 server 保存，見 [瀏覽器交接](browser-chat.md#boundaries)。
+舊的瀏覽器成果 PNG、server／chat 副本、舊 runtime 的檔案、孤兒程序與正式恢復仍須另行處理。
 這個結果也不是 server 的獨立停止回報，不能代替完整來源清除或實機接受。
 
 ## 私有檔案
@@ -126,6 +127,7 @@ PULSE_TEST_BROWSER_DRIVER=/ABSOLUTE/PATH/chromedriver cargo test -p pulse-link -
 2026-11-04 的正常關閉元件驗證使用 Chrome 與 ChromeDriver `156.0.8078.80`。
 兩個自有頁面回傳同一個隨機標記；關閉後兩份 profile 消失，原 KEEP 檔案保留。
 再次關閉及關閉後的新讀取也已核對。
+同一實機檢查另核對新 runtime 不建立額外 PNG 目錄；舊目錄已有 128 份檔案時仍能擷取，原圖可交接，舊檔的內容與權限保持原樣。
 預設工具沙箱內建立 Chrome session 失敗；相同測試在正常主機環境通過。
 這是程序與 profile 清理證據，不代表完整桌面、provider、強制終止復原或 8 小時驗收通過。
 

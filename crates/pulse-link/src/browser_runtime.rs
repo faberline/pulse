@@ -4,7 +4,7 @@ use crate::{
     browser::{BrowserSnapshot, FixtureBrowser},
     browser_network::{BrowserProxy, NetworkPolicy},
     ensure,
-    journal::{private_dir, private_write},
+    journal::private_dir,
     owned_process::{OwnedProcess, ProcessTracker, SourceScope},
 };
 use std::{
@@ -44,7 +44,6 @@ impl BrowserRuntime {
         let policy = NetworkPolicy::new(fixture.as_deref())?;
         let directory = directory.join("browser");
         private_dir(&directory)?;
-        private_dir(&directory.join("artifacts"))?;
         Ok(Some(Self {
             driver,
             policy,
@@ -60,7 +59,6 @@ impl BrowserRuntime {
             "browser driver unavailable",
         )?;
         private_dir(&directory)?;
-        private_dir(&directory.join("artifacts"))?;
         Ok(Self {
             driver,
             policy,
@@ -73,7 +71,6 @@ impl BrowserRuntime {
     pub async fn read(&self, url: &Url) -> Result<BrowserSnapshot> {
         ensure(!self.processes.closed(), "browser executor is closing")?;
         self.policy.validate_url(url)?;
-        self.artifact_room()?;
         tokio::time::timeout(Duration::from_secs(35), self.read_inner(url, None))
             .await
             .map_err(|_| crate::Error::Rejected("browser read timed out".into()))?
@@ -85,20 +82,10 @@ impl BrowserRuntime {
     ) -> Result<BrowserSnapshot> {
         ensure(!self.processes.closed(), "browser executor is closing")?;
         self.policy.validate_url(url)?;
-        self.artifact_room()?;
         let scope = SourceScope::new(&binding.task_id, &binding.revision)?;
         tokio::time::timeout(Duration::from_secs(35), self.read_inner(url, Some(scope)))
             .await
             .map_err(|_| crate::Error::Rejected("browser read timed out".into()))?
-    }
-    pub(crate) fn artifact_room(&self) -> Result<()> {
-        ensure(
-            std::fs::read_dir(self.directory.join("artifacts"))?
-                .take(128)
-                .count()
-                < 128,
-            "browser artifact limit reached",
-        )
     }
     pub fn with_interactions(mut self, enabled: bool) -> Self {
         self.interactions = enabled;
@@ -115,7 +102,8 @@ impl BrowserRuntime {
         session.owner.shutdown().await?;
         let snapshot = result?;
         closed?;
-        self.store_snapshot(&snapshot)?;
+        // The caller owns these bytes. The local journal commits image chunks
+        // with its receipt; a second unbound filesystem copy cannot recover work.
         Ok(snapshot)
     }
     pub(crate) async fn start(
@@ -186,36 +174,6 @@ impl BrowserRuntime {
             owner,
             proxy,
         })
-    }
-    pub(crate) fn store_snapshot(&self, snapshot: &BrowserSnapshot) -> Result<()> {
-        let artifact = self
-            .directory
-            .join("artifacts")
-            .join(format!("{}.png", snapshot.screenshot_digest));
-        if artifact.exists() {
-            use std::os::unix::fs::OpenOptionsExt;
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(&artifact)?;
-            ensure(
-                file.metadata()?.is_file() && file.metadata()?.len() <= 4 * 1024 * 1024,
-                "invalid browser artifact",
-            )?;
-            let mut bytes = Vec::new();
-            std::io::Read::read_to_end(
-                &mut std::io::Read::take(file, 4 * 1024 * 1024 + 1),
-                &mut bytes,
-            )?;
-            ensure(
-                crate::protocol::hash_bytes(&bytes) == snapshot.screenshot_digest,
-                "browser artifact conflict",
-            )?;
-        } else {
-            self.artifact_room()?;
-            private_write(&artifact, &snapshot.png)?;
-        }
-        Ok(())
     }
 }
 pub(crate) struct OwnedBrowser {

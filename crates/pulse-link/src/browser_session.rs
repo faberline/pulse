@@ -188,7 +188,6 @@ impl BrowserRuntime {
     pub async fn inspect(&self, url: &Url, binding: &WorkBinding) -> Result<ExecutedRead> {
         ensure(!self.processes.closed(), "browser executor is closing")?;
         ensure(self.interactions, "browser interaction not configured")?;
-        self.artifact_room()?;
         tokio::time::timeout(Duration::from_secs(35), async {
             let mut sessions = self.sessions.lock().await;
             sessions.retain(|_, s| s.until > Instant::now() && s.task_id != binding.task_id);
@@ -209,7 +208,6 @@ impl BrowserRuntime {
                 Url::parse(&snapshot.url)?.origin() == url.origin(),
                 "interaction redirect changed origin",
             )?;
-            self.store_snapshot(&snapshot)?;
             let session_id = uuid::Uuid::new_v4().to_string();
             let observation = observation(session_id.clone(), &snapshot, elements)?;
             sessions.insert(
@@ -254,9 +252,6 @@ impl BrowserRuntime {
         }
         if !self.interactions {
             return rejected("browser interaction disabled");
-        }
-        if self.artifact_room().is_err() {
-            return rejected("browser artifact storage full; no effect executed");
         }
         let mut sessions = self.sessions.lock().await;
         let Some(session) = sessions.get(session_id) else {
@@ -346,8 +341,7 @@ impl BrowserRuntime {
                 Url::parse(&snapshot.url)?.origin() == session.authorized.origin(),
                 "interaction left origin",
             )?;
-            stage = "evidence storage";
-            self.store_snapshot(&snapshot)?;
+            stage = "evidence validation";
             let next = observation(session_id.into(), &snapshot, elements)?;
             Ok::<_, crate::Error>((snapshot, next))
         })
