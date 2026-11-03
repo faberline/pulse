@@ -202,11 +202,24 @@ impl PickerChannel {
                         "permission request replay or capacity",
                     )?;
                 }
+                if let Some(permission) = request {
+                    eprintln!(
+                        "Pulse permission request={request_id} stage=accepted kind={}",
+                        permission.as_str()
+                    );
+                }
                 let mut extra = [0];
-                let permissions = tokio::select! {
-                    result=async {match request {Some(permission)=>runtime.request_permission(permission).await,None=>runtime.permissions().await}}=>result?,
-                    _=stream.read(&mut extra)=>return Err(crate::Error::Rejected("permission request cancelled or extra input".into())),
+                let result = tokio::select! {
+                    result=async {match request {Some(permission)=>runtime.request_permission(permission).await,None=>runtime.permissions().await}}=>result,
+                    _=stream.read(&mut extra)=>Err(crate::Error::Rejected("permission request cancelled or extra input".into())),
                 };
+                if request.is_some() {
+                    eprintln!(
+                        "Pulse permission request={request_id} stage=returned valid={}",
+                        result.is_ok()
+                    );
+                }
+                let permissions = result?;
                 stream
                     .write_all(&serde_json::to_vec(&PermissionResponse {
                         version: 1,

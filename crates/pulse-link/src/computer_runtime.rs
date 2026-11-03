@@ -667,6 +667,15 @@ impl ComputerRuntime {
                     .env("PULSE_COMPUTER_WINDOW_ID", target.window_id.to_string());
             }
             let mut owner = self.processes.spawn(&mut command, source, None)?;
+            let permission_request = args
+                .first()
+                .is_some_and(|arg| arg == "--request-permission");
+            if permission_request {
+                eprintln!(
+                    "Pulse permission stage=helper_started pid={:?}",
+                    owner.child().id()
+                );
+            }
             let mut stdout = owner
                 .child()
                 .stdout
@@ -703,6 +712,12 @@ impl ComputerRuntime {
                 }
             )?;
             let status = owner.wait().await?;
+            if permission_request {
+                eprintln!(
+                    "Pulse permission stage=helper_exited code={:?}",
+                    status.code()
+                );
+            }
             ensure(
                 status.success(),
                 "native helper exited without a valid result",

@@ -26,9 +26,18 @@ struct PulseApp: App {
 }
 final class AppDelegate: NSObject, NSApplicationDelegate {
   weak var model: ChatModel?
-  func applicationDidFinishLaunching(_ notification: Notification) { signal(SIGPIPE, SIG_IGN) }
-  func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
-  func applicationWillTerminate(_ notification: Notification) { model?.stop() }
+  func applicationDidFinishLaunching(_ notification: Notification) {
+    signal(SIGPIPE, SIG_IGN)
+    uiDiagnostic("launched")
+  }
+  func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+    uiDiagnostic("last_window_closed")
+    return true
+  }
+  func applicationWillTerminate(_ notification: Notification) {
+    uiDiagnostic("will_terminate")
+    model?.stop()
+  }
 }
 struct ChatView: View {
   @ObservedObject var model: ChatModel

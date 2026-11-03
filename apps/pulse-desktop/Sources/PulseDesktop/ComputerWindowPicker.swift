@@ -33,7 +33,9 @@ struct ComputerWindowPicker: View {
   }
   private func requestPermission(_ permission: String) {
     guard !busy else { return }
+    uiDiagnostic("permission_button")
     permissionID = model.requestComputerPermission(permission)
+    uiDiagnostic(permissionID == nil ? "permission_not_queued" : "permission_queued")
   }
   private var message: String {
     if started && requestID == nil { return "本機對話連線尚未就緒。請重新連線。" }
@@ -96,8 +98,12 @@ struct ComputerWindowPicker: View {
         Spacer(); Button("取消") { dismiss() }
       }
     }.padding(22).frame(width: 560, height: 540)
-      .task { started = true; requestID = model.requestComputerWindows() }
+      .task {
+        uiDiagnostic("window_picker_opened")
+        started = true; requestID = model.requestComputerWindows()
+      }
       .onDisappear {
+        uiDiagnostic("window_picker_closed")
         if let requestID { model.cancelComputerWindows(requestID) }
         if let permissionID { model.cancelComputerPermissions(permissionID) }
       }

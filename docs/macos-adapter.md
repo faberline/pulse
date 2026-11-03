@@ -62,4 +62,9 @@ A direct command-line status check reported no Accessibility or screen-capture g
 This is not proof of the GUI app's permission state. No real capture or effect was accepted from that check.
 Actual owned-fixture capture, counters/text, original-image approval, both providers and restart faults remain required.
 The new Human permission UI and OS prompt flow are also unaccepted until checked on the machine.
+The Human reported no prompt and a closed Pulse window in the isolated test scene.
+That UI process exited with code 0. Its old logs do not establish which step ran.
+Local diagnostics now record fixed UI lifecycle events, permission queue status,
+and the Rust request/helper stages. They omit chat content, paths, window titles and credentials.
+These records help locate a failure. They do not prove a prompt appeared or a grant was made.
 Passing builds, contract tests and CI does not accept D04, D05, D08 or the full D01–D10 goal.

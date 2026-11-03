@@ -61,11 +61,15 @@ final class ChatTransport: @unchecked Sendable {
                 onState(id, try JSONDecoder().decode(NativeState.self, from: frame))
               }
             }
-          } catch { if process.isRunning { process.terminate() } }
+          } catch {
+            uiDiagnostic("chat_decode_failed")
+            if process.isRunning { process.terminate() }
+          }
           process.waitUntilExit()
+          uiDiagnostic("chat_exited", code: process.terminationStatus)
           onExit(id)
         }
-      } catch { onExit(id) }
+      } catch { uiDiagnostic("chat_launch_failed"); onExit(id) }
     }
   }
   func send(_ command: [String: Any], generation id: UUID) -> Bool {
