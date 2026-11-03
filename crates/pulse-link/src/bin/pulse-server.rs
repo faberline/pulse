@@ -5,7 +5,7 @@ use pulse_link::{
     protocol::ClientRole,
     server::{Hub, router},
 };
-use std::path::PathBuf;
+use std::{future::IntoFuture, path::PathBuf, time::Duration};
 
 #[tokio::main]
 async fn main() {
@@ -89,14 +89,29 @@ async fn run() -> Result<()> {
             let remote = pulse_link::remote::run(hub.clone());
             let maintenance = pulse_link::maintenance::run(hub.core.clone());
             let schedules = pulse_link::schedules::run(hub.clone());
-            let server = axum::serve(listener, router(hub)).with_graceful_shutdown(async {
-                let _ = tokio::signal::ctrl_c().await;
-            });
+            let (shutdown, stopping) = tokio::sync::oneshot::channel::<()>();
+            let server = axum::serve(listener, router(hub))
+                .with_graceful_shutdown(async {
+                    let _ = stopping.await;
+                })
+                .into_future();
+            tokio::pin!(server);
             tokio::select! {
                 result = remote => result?,
                 result = maintenance => result?,
                 result = schedules => result?,
-                result = server => result?,
+                result = &mut server => result?,
+                signal = tokio::signal::ctrl_c() => {
+                    signal?;
+                    let _ = shutdown.send(());
+                    // Stop polling the work loops and bound HTTP draining. An
+                    // incomplete request body must not keep this process alive.
+                    // Cancelling a provider future never clears its reservation.
+                    match tokio::time::timeout(Duration::from_secs(2), &mut server).await {
+                        Ok(result) => result?,
+                        Err(_) => eprintln!("HTTP drain deadline reached. Pending results remain unconfirmed."),
+                    }
+                }
             }
         }
         "pair-chat" | "pair-local" => {
