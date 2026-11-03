@@ -213,6 +213,11 @@ impl ReadOp {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HumanAction {
+    SubmitTextFile {
+        id: String,
+        goal: String,
+        input: crate::text_input::TextInput,
+    },
     /// A Human changed topics locally. No memory text or task instruction.
     ConversationBoundary {},
     Schedule {
@@ -509,6 +514,22 @@ pub(crate) fn secret() -> crate::Result<String> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeCommand {
+    SelectTextFile {
+        request_id: String,
+        path: String,
+    },
+    CancelTextFileSelection {
+        request_id: String,
+    },
+    ClearTextFile {
+        input_id: String,
+    },
+    SubmitTextFile {
+        source_id: String,
+        id: String,
+        goal: String,
+        input_id: String,
+    },
     ComputerPermissions {
         request_id: String,
         request: Option<pulse_core::ComputerPermission>,
@@ -593,6 +614,10 @@ pub struct DesktopNotifications {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NativeState {
+    #[serde(default)]
+    pub text_input: Option<crate::text_input::TextInputRef>,
+    #[serde(default)]
+    pub text_input_request: Option<TextInputRequest>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub memory_sources: Vec<pulse_core::TaskMemorySource>,
     #[serde(default)]
@@ -647,6 +672,14 @@ pub struct ComputerPermissionState {
     pub loading: bool,
     pub failed: bool,
     pub permissions: Option<crate::computer_runtime::ComputerPermissions>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TextInputRequest {
+    pub request_id: String,
+    pub loading: bool,
+    pub failed: bool,
+    #[serde(default)]
+    pub cancelled: bool,
 }
 
 pub fn hash(value: &impl Serialize) -> Result<String> {

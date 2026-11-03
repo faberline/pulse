@@ -70,6 +70,10 @@ SwiftUI 是可替換的顯示與輸入層。任務關聯、記憶、批准核對
 目前 `pulse-chat` 的 JSON Lines 入口已不依賴 Swift。命令與回覆定義在 `crates/pulse-link/src/protocol.rs` 的 `NativeCommand`／`NativeState`；名稱是歷史名稱，不限制介面語言。
 這個入口使用 chat 身分，不能當作 executor 身分或新增工具授權。
 
+文字附件候選也沿用此邊界。Swift 只選擇路徑、顯示副本資料及送出副本識別。
+Rust 讀取與保存固定 UTF-8 副本，並核對來源、任務及模型內容。
+選檔不會上傳；按傳送才進入既有待送佇列。詳見 [文字檔案輸入](text-input.md)。
+
 2026-11-02 的 Rust adapter 候選已將 macOS 擷取、AX 操作與私有 PNG 儲存搬到 `crates/pulse-macos`。
 `pulse-computer` 由 Cargo 建置。舊 Swift helper 與其執行 target 已移除。
 `ComputerWindowPicker` 只透過 Rust chat 的命令查詢地端 executor，顯示回傳選項，不再直接讀取系統視窗清單。

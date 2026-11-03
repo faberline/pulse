@@ -285,6 +285,12 @@ impl Device {
             tokio::task::JoinHandle<Result<crate::computer_runtime::ComputerPermissions>>,
         > = None;
         let mut permissions: Option<ComputerPermissionState> = None;
+        let file_slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let mut file_read: Option<
+            tokio::task::JoinHandle<Result<(crate::text_input::TextInput, String)>>,
+        > = None;
+        let mut file_request: Option<TextInputRequest> = None;
+        let mut file_selected_id: Option<String> = None;
         let result=async {loop {tokio::select! {
             changed=link_rx.changed()=>{
                 changed.map_err(|_|crate::Error::Rejected("connection state stopped".into()))?;
@@ -294,6 +300,7 @@ impl Device {
                     lease_tx.send_replace(Lease::default());
                     let mut cleared=states.borrow().clone();
                     cleared.connected=false;cleared.paired=false;cleared.memories.clear();cleared.memory_synced_at=None;
+                    cleared.text_input=None;cleared.text_input_request=None;
                     cleared.message="對話身分已失效，正在清除本機記憶。請重新配對。".into();
                     states.send_replace(cleared);
                     if let Some(task)=connection.take(){task.abort();let _=task.await;}
@@ -304,6 +311,9 @@ impl Device {
                     windows=None;
                     if let Some(task)=permission_task.take(){task.abort();let _=task.await;}
                     permissions=None;
+                    if let Some(task)=file_read.take(){task.abort();let _=task.await;}
+                    file_request=None;
+                    file_selected_id=None;
                     computer_selection.abort_all();while computer_selection.join_next().await.is_some(){}
                     computer_selecting=None;
                     self.journal.deny_memory_access().await?;
@@ -316,6 +326,20 @@ impl Device {
                     state.loading=false;
                     match completed {Ok(Ok(value))=>{state.permissions=Some(value);state.failed=false;},_=>{state.permissions=None;state.failed=true;}}
                 }
+            }
+            completed=async {match file_read.as_mut(){Some(task)=>task.await,None=>std::future::pending().await}}=>{
+                file_read=None;
+                let result=match completed {
+                    Ok(Ok((input,identity)))=>{
+                        let selected=input.id.clone();
+                        let result=self.journal.store_text_input(input,&identity).await;
+                        if result.is_ok(){file_selected_id=Some(selected);}
+                        result
+                    },
+                    _=>Err(crate::Error::Rejected("file selection failed".into())),
+                };
+                if let Some(state)=file_request.as_mut(){state.loading=false;state.failed=result.is_err();}
+                message=if result.is_ok(){"已選入文字檔案。傳送訊息後才會交給模型。"}else{"檔案未選入。請核對格式、大小與配對狀態；原選擇與草稿會保留。"}.into();
             }
             completed=async {match window_list.as_mut(){Some(task)=>task.await,None=>std::future::pending().await}}=>{
                 window_list=None;
@@ -395,6 +419,7 @@ impl Device {
                 state.artifact_loading=artifact_loading.clone();state.artifact_failure=artifact_failure.clone();
                 state.computer_windows=windows.clone();
                 state.computer_permissions=permissions.clone();
+                state.text_input_request=file_request.clone();
                 if computer_selection.is_empty() && let Some(entry)=self.journal.take_computer_selection(crate::now()).await? {
                     computer_selecting=Some(entry.source_id.clone());let server=self.config.server.to_string();
                     computer_selection.spawn(async move {crate::computer_control::prepare(&server,entry.permit,entry.replace).await});
@@ -414,6 +439,43 @@ impl Device {
                             Ok(())=>{},
                             Err(crate::Error::Rejected(_))=>message="通知回覆無法核對；提醒仍保存在對話中。".into(),
                             Err(e)=>return Err(e),
+                        }
+                    }
+                    Some(NativeCommand::SelectTextFile{request_id,path})=>{
+                        ensure(self.journal.role==ClientRole::Chat && uuid::Uuid::parse_str(&request_id).is_ok(),"file selection requires Human chat")?;
+                        if file_read.is_some(){continue;}
+                        let identity=self.journal.text_input_identity();
+                        let ticket=file_slots.clone().try_acquire_owned();
+                        file_selected_id=None;
+                        file_request=Some(TextInputRequest{request_id,loading:false,failed:true,cancelled:false});
+                        if let (Ok(identity),Ok(ticket))=(identity,ticket) {
+                            if let Some(state)=file_request.as_mut(){state.loading=true;state.failed=false;}
+                            file_read=Some(tokio::spawn(async move {
+                                let input=tokio::task::spawn_blocking(move ||{let _ticket=ticket;crate::text_input::TextInput::read(std::path::Path::new(&path))}).await
+                                    .map_err(|_|crate::Error::Rejected("file reader stopped".into()))??;
+                                Ok((input,identity))
+                            }));
+                        } else {message="請先完成配對，或等待上一份檔案讀取結束。".into();}
+                    }
+                    Some(NativeCommand::CancelTextFileSelection{request_id})=>{
+                        ensure(self.journal.role==ClientRole::Chat,"file selection requires chat")?;
+                        if file_request.as_ref().is_some_and(|s|s.request_id==request_id){
+                            if let Some(task)=file_read.take(){task.abort();let _=task.await;}
+                            if let Some(id)=file_selected_id.take(){self.journal.clear_text_input(Some(&id)).await?;}
+                            if let Some(state)=file_request.as_mut(){state.loading=false;state.failed=false;state.cancelled=true;}
+                        }
+                    }
+                    Some(NativeCommand::ClearTextFile{input_id})=>{
+                        ensure(self.journal.role==ClientRole::Chat,"file selection requires chat")?;
+                        self.journal.clear_text_input(Some(&input_id)).await?;
+                    }
+                    Some(NativeCommand::SubmitTextFile{source_id,id,goal,input_id})=>{
+                        let result=self.journal.submit_text_input(&source_id,id,goal,&input_id).await;
+                        match result {
+                            Ok(())=>{input_failure=None;message="訊息與選定的檔案副本已存入本機待送佇列。".into();},
+                            Err(crate::Error::Rejected(_)|crate::Error::CredentialRejected|crate::Error::Capacity)=>{
+                                input_failure=Some(source_id);message="檔案訊息未保存。請核對配對、檔案、訊息大小及待送數量；草稿已保留。".into();
+                            },Err(e)=>return Err(e),
                         }
                     }
                     Some(NativeCommand::ComputerPermissions{request_id,request})=>{
@@ -502,6 +564,10 @@ impl Device {
                         if let Some(task)=memory_sync.take(){task.abort();let _=task.await;}
                         if let Some(task)=permission_task.take(){task.abort();let _=task.await;}
                         permissions=None;
+                        if let Some(task)=file_read.take(){task.abort();let _=task.await;}
+                        file_request=None;
+                        file_selected_id=None;
+                        if self.journal.role==ClientRole::Chat{self.journal.clear_text_input(None).await?;}
                         link_tx.send_replace(LinkState::default());
                         pairing=Some(tokio::spawn(pairing::begin(self.config.clone(),self.journal.clone(),self.vault.clone(),self.account.clone(),code)));
                         message="正在配對。本機停止工具仍可用。".into();
@@ -537,6 +603,10 @@ impl Device {
             let _ = task.await;
         }
         if let Some(task) = permission_task {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = file_read {
             task.abort();
             let _ = task.await;
         }

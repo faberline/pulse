@@ -1,6 +1,7 @@
 import AppKit
 import ImageIO
 import SwiftUI
+import UniformTypeIdentifiers
 
 @MainActor
 final class ChatModel: ObservableObject {
@@ -13,6 +14,8 @@ final class ChatModel: ObservableObject {
   @Published var showProgress = false
   @Published var showComputerPicker = false
   @Published var selectedComputer: ComputerWindowChoice?
+  @Published private(set) var textInputSelecting: String?
+  @Published private(set) var textInputClearing: String?
   @Published var reselectingTask: PulseTask?
   @Published private(set) var pendingWindowReselection: PendingWindowReselection?
   private var reselectionGeneration: UUID?
@@ -43,6 +46,8 @@ final class ChatModel: ObservableObject {
         self.notificationPresenter.cancelPending()
         self.state.connected = false
         self.state.memories = []; self.state.memory_synced_at = nil
+        self.state.text_input = nil
+        self.textInputSelecting = nil; self.textInputClearing = nil
         self.notice = "對話連線已停止。草稿會保留，可在設定重新連線。"
       }
     })
@@ -53,7 +58,7 @@ final class ChatModel: ObservableObject {
   }
   var canSend: Bool {
     !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.utf8.count <= 4096
-      && pending == nil
+      && pending == nil && textInputSelecting == nil && textInputClearing == nil
   }
   var task: PulseTask? { state.tasks.first { $0.id == selectedTask } }
   var connectionLabel: String {
@@ -75,6 +80,7 @@ final class ChatModel: ObservableObject {
     }
     activeBinding = settings.binding
     notificationPresenter.reset()
+    textInputSelecting = nil; textInputClearing = nil
     notificationAuthorization = UUID()
     authorizingNotifications = false
     state.memories = []; state.memory_synced_at = nil
@@ -116,14 +122,15 @@ final class ChatModel: ObservableObject {
     guard canSend, let binding = activeBinding else { return }
     let value = PendingSubmit(
       sourceID: UUID().uuidString, taskID: UUID().uuidString, text: draft, binding: binding,
-      computer: selectedComputer?.selection, selectedAt: selectedComputer == nil ? nil : Int64(Date().timeIntervalSince1970 * 1000))
+      computer: selectedComputer?.selection, selectedAt: selectedComputer == nil ? nil : Int64(Date().timeIntervalSince1970 * 1000),
+      textInputID: selectedComputer == nil ? state.text_input?.id : nil)
     if send(value.command) {
       pending = value
       retriedGeneration = generation
     }
   }
   func chooseComputerWindow(_ window: ComputerWindowChoice) {
-    guard let task = reselectingTask else {selectedComputer = window;return}
+    guard let task = reselectingTask else {selectedComputer = window;clearTextInput();return}
     guard task.canReselectWindow, state.tasks.contains(where: { $0.id == task.id && $0.revision == task.revision && $0.canReselectWindow }),
       let binding = activeBinding, pendingWindowReselection == nil else {
       notice = "任務已變更。請更新進度後重新選擇。";return
@@ -150,6 +157,14 @@ final class ChatModel: ObservableObject {
   func receive(_ value: NativeState, generation id: UUID) {
     guard generation == id else { return }
     state = value
+    if let request = textInputSelecting,
+      let result = value.text_input_request, result.request_id == request, !result.loading {
+      textInputSelecting = nil
+      if result.failed { notice = value.message }
+      else if result.cancelled == true { notice = "選檔已取消。" }
+      else { selectedComputer = nil; image = nil; notice = "已選入檔案副本。按傳送後才會交給模型。" }
+    }
+    if let clearing = textInputClearing, value.text_input?.id != clearing { textInputClearing = nil }
     if let offer = value.desktop_notifications?.current {
       notificationPresenter.present(offer) { [weak self] outcome in
         guard let self, self.generation == id else { return }
@@ -191,6 +206,7 @@ final class ChatModel: ObservableObject {
       if let remaining = pending.confirmedDraft(draft, by: value) {
         draft = remaining
         if selectedComputer?.selection == pending.computer { selectedComputer = nil }
+        if let file = pending.textInputID, value.text_input?.id == file { clearTextInput() }
         self.pending = nil
       } else if value.computer_failure == pending.sourceID || value.input_failure == pending.sourceID {
         self.pending = nil; notice = value.message
@@ -258,6 +274,7 @@ final class ChatModel: ObservableObject {
     if panel.runModal() == .OK, let url = panel.url { settings.dataDir = url.path }
   }
   func pickImage() {
+    guard pending == nil, textInputSelecting == nil, textInputClearing == nil else { return }
     let panel = NSOpenPanel()
     panel.allowedContentTypes = [.png, .jpeg]
     guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -282,8 +299,27 @@ final class ChatModel: ObservableObject {
         width * height * 4 <= 64 * 1024 * 1024,
         let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil)
       else { throw CocoaError(.fileReadCorruptFile) }
+      clearTextInput()
       image = NSImage(cgImage: decoded, size: NSSize(width: width, height: height))
       imageName = url.lastPathComponent
     } catch { notice = "圖片無法開啟。只接受 5 MiB 內、最多 4096×4096 的 PNG 或 JPEG。" }
+  }
+  func pickTextFile() {
+    guard pending == nil, textInputSelecting == nil, textInputClearing == nil else { return }
+    let panel = NSOpenPanel()
+    panel.title = "選擇 UTF-8 文字檔案（最多 32 KiB）"
+    panel.canChooseDirectories = false
+    panel.allowsMultipleSelection = false
+    panel.allowedContentTypes = [.text, .json] + ["md","rs","toml","yaml","yml","csv"].compactMap { UTType(filenameExtension:$0) }
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+    let id = UUID().uuidString
+    if send(["kind":"select_text_file","request_id":id,"path":url.path]) { textInputSelecting = id }
+  }
+  func cancelTextFileSelection() {
+    if let id = textInputSelecting { send(["kind":"cancel_text_file_selection","request_id":id]) }
+  }
+  func clearTextInput() {
+    guard let file = state.text_input, textInputClearing == nil else { return }
+    if send(["kind":"clear_text_file","input_id":file.id]) { textInputClearing = file.id }
   }
 }

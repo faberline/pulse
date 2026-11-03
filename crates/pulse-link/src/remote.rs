@@ -9,9 +9,9 @@ pub fn versions() -> Versions {
 }
 fn manifest(provider: Option<&Provider>) -> Versions {
     Versions {
-        workflow: "pulse-remote-17".into(),
+        workflow: "pulse-remote-18".into(),
         schema: "1".into(),
-        prompt: "effective-read-6".into(),
+        prompt: "effective-read-7".into(),
         tools: "pulse-tools-6".into(),
         model: provider.map(|p| p.model).unwrap_or("unconfigured").into(),
         provider_api: "function-call-1".into(),

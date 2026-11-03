@@ -243,10 +243,9 @@ impl Hub {
         let Ok(outcome) = serde_json::from_str::<Outcome>(&outcome) else {
             return Ok(None);
         };
-        let Ok(HumanAction::Submit { goal, .. }) =
-            serde_json::from_value::<HumanAction>(payload["native_action"].clone())
-        else {
-            return Ok(None);
+        let goal = match serde_json::from_value::<HumanAction>(payload["native_action"].clone()) {
+            Ok(HumanAction::Submit { goal, .. } | HumanAction::SubmitTextFile { goal, .. }) => goal,
+            _ => return Ok(None),
         };
         let pending_text = if saved.pending {
             if !matches!(outcome, Outcome::Clarification { .. }) {

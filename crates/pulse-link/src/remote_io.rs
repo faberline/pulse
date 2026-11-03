@@ -84,13 +84,22 @@ impl Hub {
                 ensure(outcome.valid(), "invalid prior evidence")?;
                 trim_evidence(&mut outcome);
                 let operation: ReadOp = serde_json::from_str(&row.get::<String, _>("request"))?;
+                ensure(
+                    operation.permitted_by(&task.scope),
+                    "prior evidence outside Human scope",
+                )?;
                 prior_evidence.push(json!({"operation_id":row.get::<String,_>("id"),"operation":operation,"outcome":outcome}));
             }
         }
+        let input = {
+            let mut db = self.db.acquire().await?;
+            Self::task_input_in(&mut db, &task).await?
+        };
         let prompt = serde_json::to_string(&json!({
             "goal":task.goal,"effective_decision":task.decisions.last(),
             "task_id":task.id,"revision":task.revision.to_string(),
-            "authorization_event":task.authorization_event,"scope":task.scope,"prior_read_evidence":prior_evidence
+            "authorization_event":task.authorization_event,"scope":task.scope,"prior_read_evidence":prior_evidence,
+            "selected_file_data":input
         }))?;
         Ok((prompt, history))
     }

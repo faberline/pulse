@@ -116,6 +116,22 @@ struct ChatView: View {
             }.padding(.horizontal)
           }
           VStack(spacing: 8) {
+            if let file = model.state.text_input {
+              HStack {
+                Image(systemName:"doc.text")
+                VStack(alignment:.leading) {
+                  Text(file.name).lineLimit(1)
+                  Text("\(file.length) 位元組 · 僅使用這份副本，傳送後可供模型使用")
+                    .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("移除檔案") { model.clearTextInput() }
+                  .disabled(model.pending != nil || model.textInputClearing != nil)
+              }
+            }
+            if model.textInputSelecting != nil {
+              HStack {Text("正在選入文字檔案…").font(.caption);Spacer();Button("取消選檔") {model.cancelTextFileSelection()} }
+            }
             if let selected = model.selectedComputer {
               HStack {
                 Image(systemName: "macwindow")
@@ -128,13 +144,13 @@ struct ChatView: View {
               .frame(height: 104).clipShape(RoundedRectangle(cornerRadius: 8))
               .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.25)))
             HStack {
-              Button {
-                model.pickImage()
-              } label: {
-                Label("圖片", systemImage: "photo")
-              }
+              Menu {
+                Button("文字檔案") {model.pickTextFile()}
+                Button("圖片（本機預覽）") {model.pickImage()}
+              } label: {Label("附加",systemImage:"paperclip")}
+                .disabled(model.pending != nil || model.textInputSelecting != nil || model.textInputClearing != nil)
               Button { model.reselectingTask = nil; model.showComputerPicker = true } label: { Label("程式視窗", systemImage: "macwindow") }
-                .disabled(model.pending != nil)
+                .disabled(model.pending != nil || model.textInputSelecting != nil || model.textInputClearing != nil)
                 .sheet(isPresented: $model.showComputerPicker) { ComputerWindowPicker(model: model, taskGoal: model.reselectingTask?.goal, choose: model.chooseComputerWindow) }
               Spacer()
               Text("⌘ Enter 傳送").font(.caption).foregroundStyle(.secondary)

@@ -212,7 +212,7 @@ impl Store {
             sqlx::query("DELETE FROM local_memory_cache")
                 .execute(&mut *tx)
                 .await?;
-            sqlx::query("DELETE FROM local_meta WHERE key IN ('memory_dirty','memory_synced_at')")
+            sqlx::query("DELETE FROM local_meta WHERE key IN ('memory_dirty','memory_synced_at','selected_text_input_v1')")
                 .execute(&mut *tx)
                 .await?;
         }

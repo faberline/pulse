@@ -254,6 +254,10 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         Ok(())
     }
     pub async fn action(&self, source_id: &str, action: HumanAction) -> Result<()> {
+        if let HumanAction::SubmitTextFile { goal, input, .. } = &action {
+            ensure(self.role == ClientRole::Chat, "file input requires chat")?;
+            input.validate_goal(goal)?;
+        }
         if let HumanAction::Submit { goal, .. } | HumanAction::SubmitComputer { goal, .. } = &action
             && self.memory_control(source_id, goal, crate::now()).await?
         {
@@ -295,6 +299,7 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         }
         if let HumanAction::Submit { goal, .. }
         | HumanAction::SubmitComputer { goal, .. }
+        | HumanAction::SubmitTextFile { goal, .. }
         | HumanAction::Schedule { text: goal, .. } = &action
         {
             ensure(
@@ -303,7 +308,12 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
             )?;
             sqlx::query("INSERT OR IGNORE INTO local_pending(id,body) VALUES(?,?)")
                 .bind(source_id)
-                .bind(goal)
+                .bind(match &action {
+                    HumanAction::SubmitTextFile { input, .. } => {
+                        format!("{goal}\n\n{}", input.source_label())
+                    }
+                    _ => goal.clone(),
+                })
                 .execute(&mut *tx)
                 .await?;
         }
@@ -314,6 +324,7 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
             action,
             HumanAction::Submit { .. }
                 | HumanAction::SubmitComputer { .. }
+                | HumanAction::SubmitTextFile { .. }
                 | HumanAction::Schedule { .. }
         ) {
             self.enqueue_conversation_boundary_in(&mut tx).await?;
@@ -791,6 +802,10 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
             .map(|s| serde_json::from_str::<NativeState>(&s))
             .transpose()?
             .unwrap_or_default();
+        state.text_input = self
+            .selected_text_input()
+            .await?
+            .map(|input| input.reference());
         if !state.memory_sources.is_empty()
             && !self
                 .projection_sources_allowed(&state.memory_sources, crate::now())

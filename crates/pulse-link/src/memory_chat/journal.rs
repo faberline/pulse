@@ -595,7 +595,7 @@ impl Journal {
             .await?;
         ensure(row.get::<i64, _>(0) == 0, "memory cache checkpoint busy")
     }
-    fn require_memory_copy(&self) -> Result<()> {
+    pub(crate) fn require_memory_copy(&self) -> Result<()> {
         if self
             .memory_denied
             .load(std::sync::atomic::Ordering::Acquire)

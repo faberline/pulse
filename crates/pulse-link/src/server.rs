@@ -214,10 +214,14 @@ impl Hub {
             .bind(&token.run_id)
             .execute(&mut *tx)
             .await?;
+        let input = Self::task_input_in(&mut tx, &task).await?;
+        let source = input
+            .map(|input| format!("\n\n{}", input.source_label()))
+            .unwrap_or_default();
         sqlx::query("INSERT OR IGNORE INTO link_chat VALUES(?,?,?)")
             .bind(&id)
             .bind(format!(
-                "模型回覆（{model} · {}）：\n\n{}\n\n分析已保存，任務待確認。",
+                "模型回覆（{model} · {}）：\n\n{}{source}\n\n分析已保存，任務待確認。",
                 crate::conversation::label(&task),
                 reply.text
             ))
@@ -919,6 +923,41 @@ impl Hub {
                 };
                 let mut pending_targets = None;
                 let commands = match action {
+                    HumanAction::SubmitTextFile { id, goal, input } => {
+                        input.validate_goal(goal)?;
+                        ensure(
+                            id.len() <= 128 && !id.is_empty(),
+                            "file input task ID invalid",
+                        )?;
+                        let prior:Option<String>=sqlx::query_scalar("SELECT payload FROM events WHERE source=? AND source_id=? AND origin='human'")
+                            .bind(format!("device:{device}")).bind(source_id).fetch_optional(&self.db).await?;
+                        if let Some(prior) = prior {
+                            let prior: serde_json::Value = serde_json::from_str(&prior)?;
+                            ensure(
+                                prior["native_action"] == serde_json::to_value(action)?,
+                                "file source identity conflict",
+                            )?;
+                            serde_json::from_value(prior["commands"].clone())?
+                        } else {
+                            let mut commands = crate::conversation::plan(
+                                id,
+                                goal,
+                                &self.core.list_tasks(100).await?,
+                            );
+                            for command in &mut commands {
+                                if let Command::Create {
+                                    scope,
+                                    requires_device,
+                                    ..
+                                } = command
+                                {
+                                    *scope = input.scope();
+                                    *requires_device = false;
+                                }
+                            }
+                            commands
+                        }
+                    }
                     HumanAction::Schedule { request, text } => {
                         ensure(text.len() <= 4096, "schedule input size")?;
                         let expected =
@@ -1058,7 +1097,12 @@ impl Hub {
                     )
                     .await?;
                 let outcome = self.core.route(&event.event_id).await?;
-                if !replay && matches!(action, HumanAction::Submit { .. }) {
+                if !replay
+                    && matches!(
+                        action,
+                        HumanAction::Submit { .. } | HumanAction::SubmitTextFile { .. }
+                    )
+                {
                     self.save_conversation_context(
                         device,
                         &event.event_id,
@@ -1071,6 +1115,7 @@ impl Hub {
                 if let (
                     pulse_core::Outcome::Rejected { reason },
                     HumanAction::Submit { goal, .. }
+                    | HumanAction::SubmitTextFile { goal, .. }
                     | HumanAction::SubmitComputer { goal, .. }
                     | HumanAction::Schedule { text: goal, .. },
                 ) = (&outcome, action)
@@ -1129,6 +1174,7 @@ impl Hub {
                         .await?;
                     }
                     HumanAction::Submit { goal, .. }
+                    | HumanAction::SubmitTextFile { goal, .. }
                     | HumanAction::SubmitComputer { goal, .. }
                     | HumanAction::Schedule { text: goal, .. } => {
                         let body = match &outcome {
@@ -1170,8 +1216,13 @@ impl Hub {
                             }
                             pulse_core::Outcome::Rejected { .. } => unreachable!("rejected above"),
                         };
-                        self.chat(source_id, &format!("已保存訊息：{goal}"), time)
-                            .await?;
+                        let saved = match action {
+                            HumanAction::SubmitTextFile { input, .. } => {
+                                format!("已保存訊息：{goal}\n\n{}", input.source_label())
+                            }
+                            _ => format!("已保存訊息：{goal}"),
+                        };
+                        self.chat(source_id, &saved, time).await?;
                         self.chat(&format!("reply:{source_id}"), &body, time)
                             .await?
                     }

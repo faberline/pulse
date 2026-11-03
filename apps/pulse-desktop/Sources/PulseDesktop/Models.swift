@@ -52,7 +52,7 @@ struct PulseTask: Decodable, Identifiable, Sendable {
 }
 struct NativeState: Decodable, Sendable {
   enum CodingKeys: String, CodingKey {
-    case server, connected, stopped, paired, message, pending, tasks, messages, artifacts, artifact_loading, artifact_failure, computer_selecting, computer_failure, computer_selections, memories, memory_synced_at, input_failure, computer_windows, computer_permissions
+    case server, connected, stopped, paired, message, pending, tasks, messages, artifacts, artifact_loading, artifact_failure, computer_selecting, computer_failure, computer_selections, memories, memory_synced_at, input_failure, computer_windows, computer_permissions, text_input, text_input_request
     case localConnected = "local_connected"
     case desktop_notifications
     case syncedAt = "synced_at"
@@ -78,7 +78,22 @@ struct NativeState: Decodable, Sendable {
   var computer_selections: [ComputerSelectionStatus]?
   var computer_windows: ComputerWindowList?
   var computer_permissions: ComputerPermissionState?
+  var text_input: TextInputReference?
+  var text_input_request: TextInputRequest?
   var desktop_notifications: DesktopNotifications?
+}
+struct TextInputReference: Decodable, Equatable, Sendable {
+  let id: String
+  let name: String
+  let digest: String
+  let length: UInt32
+  let captured_at: Int64
+}
+struct TextInputRequest: Decodable, Sendable {
+  let request_id: String
+  let loading: Bool
+  let failed: Bool
+  let cancelled: Bool?
 }
 struct ComputerPermissionState: Decodable, Sendable {
   let request_id: String
@@ -168,7 +183,11 @@ struct PendingSubmit {
   let binding: [String]
   var computer: ComputerArtifactSource.Selection? = nil
   var selectedAt: Int64? = nil
+  var textInputID: String? = nil
   var command: [String: Any] {
+    if let textInputID {
+      return ["kind":"submit_text_file","source_id":sourceID,"id":taskID,"goal":text,"input_id":textInputID]
+    }
     if let computer, let selectedAt {
       return ["kind":"submit_computer", "source_id":sourceID,"id":taskID,"goal":text,
         "selection":computer.wireValue,"selected_at":selectedAt]

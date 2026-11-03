@@ -25,9 +25,18 @@ pub fn browser_url(scope: &str) -> Option<Url> {
 }
 pub fn read_scope(scope: &str) -> bool {
     scope == "pulse:read"
+        || input_digest(scope).is_some()
         || browser_url(scope).is_some()
         || interaction_url(scope).is_some()
         || crate::ComputerSelection::from_scope(scope).is_some()
+}
+pub fn input_digest(scope: &str) -> Option<&str> {
+    let digest = scope.strip_prefix("input:")?;
+    (digest.len() == 64
+        && digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    .then_some(digest)
 }
 pub fn interaction_url(scope: &str) -> Option<Url> {
     browser_url(&format!(

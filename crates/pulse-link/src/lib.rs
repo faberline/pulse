@@ -28,6 +28,7 @@ mod remote_io;
 mod schedule_chat;
 pub mod schedules;
 pub mod server;
+pub mod text_input;
 pub mod worker_erasure;
 
 #[derive(Debug, thiserror::Error)]

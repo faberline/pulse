@@ -2,7 +2,7 @@
 
 這是 D06 的前置工作。模型仍不會收到記憶正文。
 Swift 只處理介面。來源核對、保存、清除與恢復由 Rust 處理。
-schema 為 17，remote workflow 為 `pulse-remote-17`。
+schema 為 17，remote workflow 為 `pulse-remote-18`。
 policy 為 `approved-effects-memory-fences-5`。
 
 ## 保存與清除
