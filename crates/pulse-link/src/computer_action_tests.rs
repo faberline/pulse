@@ -129,8 +129,11 @@ async fn missing_human_binding_altered_local_view_and_expired_grants_stop_before
                     serde_json::from_value(grant.operation.intent.clone()).unwrap();
                 std::fs::write(
                     runtime
-                        .directory
-                        .join("artifacts")
+                        .images
+                        .existing(&binding.task_id, &binding.revision)
+                        .await
+                        .unwrap()
+                        .path
                         .join(format!("{}.png", intent.observation.image.digest)),
                     b"corrupt",
                 )

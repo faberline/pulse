@@ -8,6 +8,7 @@ pub mod browser_session;
 pub mod cli;
 pub mod client;
 mod computer_admission;
+mod computer_cache;
 mod computer_control;
 pub mod computer_runtime;
 pub mod computer_selection;

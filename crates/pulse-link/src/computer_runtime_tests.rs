@@ -1,5 +1,6 @@
 //! Mock process fixtures verify the IPC boundary, not native macOS capture acceptance.
 use super::*;
+use crate::journal::private_dir;
 use rustix::process::Pid;
 use std::{os::unix::fs::PermissionsExt, time::Instant};
 
@@ -94,6 +95,7 @@ if sys.argv[1:]!=['--status']:
  if mode=='secure':observation['elements'][0]['role']='AXSecureTextField';observation['elements'][0]['can_press']=False
  if mode!='no-observation':response['observation']=observation
  if mode=='error':response['error']='permissions_required'
+ if mode=='cache-hang':publish(script.with_suffix('.cache'),str(cache));time.sleep(60)
 print(json.dumps(response))
 publish(script.with_suffix('.done'),'response constructed')
 "#;
@@ -538,4 +540,80 @@ async fn local_window_inventory_is_bounded_scoped_and_never_grants_a_task_permit
         assert!(runtime.selections().is_empty());
         assert_reaped(&runtime).await;
     }
+}
+
+#[tokio::test]
+async fn scoped_image_erasure_keeps_equal_pixels_for_another_task_and_denies_recreation() {
+    let (_root, runtime) = fixture("good");
+    let mut a = binding();
+    a.task_id = "A".into();
+    let mut b = a.clone();
+    b.task_id = "B".into();
+    let image_a = runtime.observe(&a).await.unwrap();
+    let image_b = runtime.observe(&b).await.unwrap();
+    assert_eq!(image_a.png, image_b.png);
+    let path_a = runtime
+        .images
+        .existing("A", "1")
+        .await
+        .unwrap()
+        .path
+        .clone();
+    let path_b = runtime
+        .images
+        .existing("B", "1")
+        .await
+        .unwrap()
+        .path
+        .clone();
+    assert_ne!(path_a, path_b);
+    assert!(
+        path_a
+            .join(format!("{}.png", image_a.observation.image.digest))
+            .exists()
+    );
+    runtime.invalidate_source("A", "1").unwrap();
+    runtime.wait_source("A", "1").await.unwrap();
+    assert!(!path_a.exists());
+    assert!(
+        path_b
+            .join(format!("{}.png", image_b.observation.image.digest))
+            .exists()
+    );
+    assert!(runtime.observe(&a).await.is_err());
+    assert!(!path_a.exists());
+    assert!(runtime.observe(&b).await.is_ok());
+    assert_reaped(&runtime).await;
+}
+
+#[tokio::test]
+async fn source_erasure_reaps_a_png_writer_before_removing_its_cache() {
+    let (_root, runtime) = fixture("cache-hang");
+    let source = binding();
+    let worker = runtime.clone();
+    let work_source = source.clone();
+    let work = tokio::spawn(async move { worker.observe(&work_source).await });
+    let marker = runtime.helper.with_extension("cache");
+    let path = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(path) = std::fs::read_to_string(&marker) {
+                break PathBuf::from(path);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        std::fs::read_dir(&path).unwrap().any(|p| p
+            .unwrap()
+            .path()
+            .extension()
+            .is_some_and(|s| s == "png"))
+    );
+    runtime.invalidate_source(&source.task_id, "1").unwrap();
+    runtime.wait_source(&source.task_id, "1").await.unwrap();
+    assert!(work.await.unwrap().is_err());
+    assert!(!path.exists());
+    assert_reaped(&runtime).await;
 }

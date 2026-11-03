@@ -1,6 +1,6 @@
 //! Fixed native helper IPC. The model cannot select its executable, arguments or cache path.
 use crate::owned_process::{ProcessTracker, SourceScope};
-use crate::{Result, artifact::png_dimensions, ensure, journal::private_dir, protocol::hash_bytes};
+use crate::{Result, artifact::png_dimensions, ensure, protocol::hash_bytes};
 use pulse_core::{ComputerBinding, ComputerImageRef, ComputerObservation, ComputerTarget};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -151,6 +151,7 @@ pub struct ComputerRuntime {
     activity: tokio::sync::watch::Sender<bool>,
     observations: std::sync::Arc<std::sync::Mutex<Vec<ComputerObservation>>>,
     processes: ProcessTracker,
+    images: crate::computer_cache::ImageCaches,
 }
 impl ComputerRuntime {
     pub async fn list_windows(&self) -> Result<Vec<pulse_core::ComputerWindowChoice>> {
@@ -251,6 +252,7 @@ impl ComputerRuntime {
             permits: Default::default(),
             observations: Default::default(),
             processes: Default::default(),
+            images: Default::default(),
             activity: tokio::sync::watch::channel(false).0,
         })
     }
@@ -426,6 +428,7 @@ impl ComputerRuntime {
     }
     pub(crate) fn invalidate_source(&self, task: &str, revision: &str) -> Result<()> {
         self.processes.fence(&SourceScope::new(task, revision)?)?;
+        self.images.fence(task, revision)?;
         self.permits
             .lock()
             .map_err(|_| crate::Error::Rejected("local selections unavailable".into()))?
@@ -439,7 +442,8 @@ impl ComputerRuntime {
     pub(crate) async fn wait_source(&self, task: &str, revision: &str) -> Result<()> {
         self.processes
             .wait_source(&SourceScope::new(task, revision)?)
-            .await
+            .await?;
+        self.images.clear(&self.directory, task, revision).await
     }
     pub(crate) fn maintain(&self, tasks: &[pulse_core::Task]) {
         if let Ok(mut entries) = self.permits.lock() {
@@ -523,14 +527,15 @@ impl ComputerRuntime {
         target: &ComputerTarget,
     ) -> Result<ComputerEvidence> {
         ensure(binding.valid(), "invalid computer work binding")?;
-        private_dir(&self.directory)?;
-        let directory = self.directory.canonicalize()?;
-        let cache = directory.join("artifacts");
-        private_dir(&cache)?;
-        ensure(
-            std::fs::read_dir(&cache)?.take(128).count() < 128,
-            "computer artifact capacity",
-        )?;
+        let image_lease = self
+            .images
+            .acquire(
+                &self.directory,
+                &binding.task_id,
+                &binding.revision.to_string(),
+            )
+            .await?;
+        let cache = image_lease.path.clone();
         let mut request = serde_json::json!({"kind":"observe","binding":binding});
         if let Some(selection) = selection {
             request["expected_process_launched_at"] =
@@ -561,7 +566,7 @@ impl ComputerRuntime {
         let raw = response
             .observation
             .ok_or_else(|| crate::Error::Rejected("native observation missing".into()))?;
-        self.validate_evidence(raw, binding, selection, target, started, &cache)
+        self.validate_evidence(raw, binding, selection, target, started, image_lease)
             .await
     }
     async fn validate_evidence(
@@ -571,9 +576,10 @@ impl ComputerRuntime {
         selection: Option<&pulse_core::ComputerSelection>,
         target: &ComputerTarget,
         started: i64,
-        cache: &Path,
+        image_lease: crate::computer_cache::ImageLease,
     ) -> Result<ComputerEvidence> {
-        let expected = cache.join(format!("{}.png", raw.image.digest));
+        image_lease.valid()?;
+        let expected = image_lease.path.join(format!("{}.png", raw.image.digest));
         let observation = ComputerObservation {
             binding: raw.binding,
             target: raw.target,
@@ -602,9 +608,15 @@ impl ComputerRuntime {
             "native computer evidence source mismatch",
         )?;
         let meta = observation.image.clone();
-        let png = tokio::task::spawn_blocking(move || read_image(&expected, &meta))
-            .await
-            .map_err(|_| crate::Error::Rejected("native image worker failed".into()))??;
+        let png = tokio::task::spawn_blocking(move || {
+            // The guard stays with the blocking reader even if its caller is cancelled.
+            image_lease.valid()?;
+            let result = read_image(&expected, &meta);
+            drop(image_lease);
+            result
+        })
+        .await
+        .map_err(|_| crate::Error::Rejected("native image worker failed".into()))??;
         ensure(
             observation.valid(crate::now()),
             "native observation expired before delivery",
@@ -643,6 +655,9 @@ impl ComputerRuntime {
         source: Option<SourceScope>,
     ) -> Result<NativeResponse> {
         tokio::time::timeout(timeout, async {
+            if source.is_some() {
+                self.images.capacity(&self.directory, 1)?;
+            }
             let mut command = Command::new(&self.helper);
             command
                 .env_clear()

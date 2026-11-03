@@ -90,6 +90,14 @@ impl ComputerRuntime {
                 Ok(Ok(permit)) => permit,
                 _ => return result(false, "computer helper busy; no command sent"),
             };
+        let image_lease = match self
+            .images
+            .existing(&binding.task_id, &binding.revision)
+            .await
+        {
+            Ok(lease) => lease,
+            Err(_) => return result(false, "computer image source unavailable; no command sent"),
+        };
         let admission = (|| -> Result<_> {
             let intent = grant.intent(binding)?;
             let selection = intent.observation.selection();
@@ -101,13 +109,10 @@ impl ComputerRuntime {
                         .is_none_or(|target| *target == selection.target),
                 "computer local selection unavailable",
             )?;
-            private_dir(&self.directory)?;
-            let cache = self.directory.canonicalize()?.join("artifacts");
-            private_dir(&cache)?;
-            ensure(
-                std::fs::read_dir(&cache)?.take(128).count() < 128,
-                "computer artifact capacity",
-            )?;
+            image_lease.valid()?;
+            // Native preflight and post-effect observation can each save one PNG.
+            self.images.capacity(&self.directory, 2)?;
+            let cache = image_lease.path.clone();
             let current = ComputerBinding {
                 operation_id: binding.operation_id.clone(),
                 task_id: binding.task_id.clone(),
@@ -136,9 +141,9 @@ impl ComputerRuntime {
             let image = cache.join(format!("{}.png", intent.observation.image.digest));
             read_image(&image, &intent.observation.image)?;
             views.remove(index);
-            Ok((intent, selection, cache, current, request, args))
+            Ok((intent, selection, current, request, args))
         })();
-        let (intent, selection, cache, current, request, args) = match admission {
+        let (intent, selection, current, request, args) = match admission {
             Ok(value) => value,
             Err(_) => {
                 return result(
@@ -208,7 +213,7 @@ impl ComputerRuntime {
                         Some(&selection),
                         &selection.target,
                         started,
-                        &cache,
+                        image_lease,
                     )
                     .await
                     .and_then(|evidence| executed_observation_kind(evidence, true))

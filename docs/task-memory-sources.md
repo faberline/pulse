@@ -2,7 +2,7 @@
 
 這是 D06 的必要前置工作。它不開啟模型記憶，也不代表 D06、D08 或 K15 已接受。
 Swift 沒有新增任務或記憶規則。這些規則由 Rust Core 處理。
-schema 為 17。remote workflow 為 `pulse-remote-21`，policy 為 `approved-effects-memory-fences-8`。
+schema 為 17。remote workflow 為 `pulse-remote-22`，policy 為 `approved-effects-memory-fences-9`。
 地端工作與雙向傳輸清除見 [地端工作清除](worker-source-erasure.md)。
 模型聊天的來源追蹤與清除候選見 [衍生聊天清除](derived-chat-erasure.md)。
 版本不符的舊 run 需重新核對，不能自動視為新規則已驗收。
@@ -133,5 +133,5 @@ Core 核對完整 run token、任務修訂、Planning 階段、讀取範圍與�
 
 checkpoint、task evidence、模型／工具聊天、提議事件與 server 圖片已有清除候選。
 操作 intent、原派工內容與地端 journal 也已加入清除候選。
-原操作帳本保留。runtime 的 PNG、瀏覽器 profile 與關閉副本仍未完整清除。
+原操作帳本保留。目前 process 持有的原生 PNG 已加入依任務／修訂清除候選；見 [程序生命週期](owned-process-lifecycle.md)。舊 PNG、硬退出資源、瀏覽器 profile 與關閉副本仍未完整清除。
 不能把這個候選當作已可安全將記憶加入模型提示的證據。
