@@ -278,6 +278,7 @@ impl Device {
         let mut computer_selecting: Option<String> = None;
         let mut computer_failure: Option<String> = None;
         let mut input_failure: Option<String> = None;
+        let mut input_receipt: Option<InputReceipt> = None;
         let mut memory_sync: Option<tokio::task::JoinHandle<Result<()>>> = None;
         let mut memory_retry = Instant::now();
         let mut window_list: Option<
@@ -299,6 +300,7 @@ impl Device {
                 changed.map_err(|_|crate::Error::Rejected("connection state stopped".into()))?;
                 let denied=link_rx.borrow().credential_rejected;
                 if denied {
+                    input_receipt=None;
                     exports.invalidate();
                     credential=None;
                     lease_tx.send_replace(Lease::default());
@@ -306,6 +308,7 @@ impl Device {
                     cleared.connected=false;cleared.paired=false;cleared.memories.clear();cleared.memory_synced_at=None;
                     cleared.text_input=None;cleared.text_input_request=None;
                     cleared.text_result_export=exports.state();
+                    cleared.input_receipt=None;
                     cleared.message="對話身分已失效，正在清除本機記憶。請重新配對。".into();
                     states.send_replace(cleared);
                     if let Some(task)=connection.take(){task.abort();let _=task.await;}
@@ -429,6 +432,7 @@ impl Device {
                 state.computer_permissions=permissions.clone();
                 state.text_input_request=file_request.clone();
                 state.text_result_export=exports.state();
+                state.input_receipt=input_receipt.clone();
                 if computer_selection.is_empty() && let Some(entry)=self.journal.take_computer_selection(crate::now()).await? {
                     computer_selecting=Some(entry.source_id.clone());let server=self.config.server.to_string();
                     computer_selection.spawn(async move {crate::computer_control::prepare(&server,entry.permit,entry.replace).await});
@@ -568,11 +572,14 @@ impl Device {
                     }
                     Some(NativeCommand::Action{source_id,action})=>{
                         if self.journal.role != ClientRole::Chat {message="executor 不接受人類輸入。請使用對話框。".into();continue;}
+                        let receipt_id=source_id.clone();
                         let memory_control=matches!(&action,HumanAction::Submit{goal,..} if crate::memory_chat::parse(goal).is_some());
                         if matches!(&action,HumanAction::Submit{..}) {computer_failure=None;}
                         match self.journal.action(&source_id,action).await {Ok(())=>{input_failure=None;message="已存入本機待送佇列。".into();},Err(crate::Error::CredentialRejected)=>{input_failure=Some(source_id);message="記憶要求未保存，草稿已保留。請重新配對。".into();},Err(crate::Error::Rejected(_)|crate::Error::Capacity)=>{input_failure=Some(source_id);message=if memory_control {"記憶要求未保存。請先查詢目前來源，並核對名稱及內容長度；草稿已保留。"}else{"要求未保存：內容或待送數量已超過限制；草稿已保留。"}.into();},Err(e)=>return Err(e)}
+                        input_receipt=Some(InputReceipt{source_id:receipt_id,saved:input_failure.is_none()});
                     }
                     Some(NativeCommand::Pair{code})=>{
+                        input_receipt=None;
                         exports.invalidate();
                         if pairing.is_some(){message="配對仍在進行。".into();continue;}
                         lease_tx.send_replace(Lease::default());

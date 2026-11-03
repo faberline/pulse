@@ -18,6 +18,10 @@ Anthropic API 已通過小額文字與只讀工具實測。相關研究 issue �
 
 ## 執行本機示例
 
+先驗證 server 時，可使用 Rust `pulse-cli` 傳送文字及查閱回覆。
+它與桌面沿用同一套 chat／journal／配對，不依賴 Swift。
+啟動、管線輸入、收件意義與重啟方式見 [server 與 CLI](docs/server-cli.md)。
+
 需要 Rust 1.96.1。從 repository 根目錄執行：
 
 ```sh

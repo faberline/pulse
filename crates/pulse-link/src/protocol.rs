@@ -622,6 +622,9 @@ pub struct DesktopNotifications {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NativeState {
+    /// Local journal receipt only. This is not server acceptance or task success.
+    #[serde(default)]
+    pub input_receipt: Option<InputReceipt>,
     #[serde(default)]
     pub text_result_export: Option<crate::text_result_client::ExportState>,
     #[serde(default)]
@@ -668,6 +671,11 @@ pub struct NativeState {
     pub synced_at: Option<i64>,
     pub tasks: Vec<pulse_core::Task>,
     pub messages: Vec<ChatMessage>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InputReceipt {
+    pub source_id: String,
+    pub saved: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ComputerWindowList {
