@@ -489,6 +489,7 @@ impl Device {
                         self.journal.clear_text_input(Some(&input_id)).await?;
                     }
                     Some(NativeCommand::SubmitTextFile{source_id,id,goal,input_id})=>{
+                        let receipt_id=source_id.clone();
                         let result=self.journal.submit_text_input(&source_id,id,goal,&input_id).await;
                         match result {
                             Ok(())=>{input_failure=None;message="訊息與選定的檔案副本已存入本機待送佇列。".into();},
@@ -496,6 +497,7 @@ impl Device {
                                 input_failure=Some(source_id);message="檔案訊息未保存。請核對配對、檔案、訊息大小及待送數量；草稿已保留。".into();
                             },Err(e)=>return Err(e),
                         }
+                        input_receipt=Some(InputReceipt{source_id:receipt_id,saved:input_failure.is_none()});
                     }
                     Some(NativeCommand::ComputerPermissions{request_id,request})=>{
                         ensure(self.journal.role==ClientRole::Chat && uuid::Uuid::parse_str(&request_id).is_ok(),"permission control requires Human chat")?;

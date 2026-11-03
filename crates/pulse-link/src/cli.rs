@@ -10,7 +10,7 @@ use tokio::{
     sync::{mpsc, watch},
 };
 
-pub const HELP: &str = "pulse-cli [--watch] --server HTTPS_ORIGIN [--data-dir PRIVATE_DIR] [--pair-code-file PRIVATE_FILE] [--dev-loopback]\nType one message per line. :quit ends after server receipt. --watch accepts no new input; existing pending messages still send.\n";
+pub const HELP: &str = "pulse-cli [--watch] --server HTTPS_ORIGIN [--data-dir PRIVATE_DIR] [--pair-code-file PRIVATE_FILE] [--dev-loopback]\nType one message per line. :file ABSOLUTE_PATH selects a fixed text copy for the next message. :clear removes that selection. :quit ends after server receipt. --watch accepts no new input; existing pending messages still send.\n";
 
 fn terminal_text(text: &str) -> String {
     text.chars()
@@ -91,6 +91,11 @@ pub async fn run(
     };
     let mut ready = false;
     let mut pending: Option<String> = None;
+    // Only an explicit selection in this process can attach to the next line.
+    // A selection left in the journal by another frontend is not implicit consent.
+    let mut selected_input: Option<String> = None;
+    let mut selecting: Option<String> = None;
+    let mut clearing: Option<String> = None;
     let mut ending = false;
     let mut shutdown_sent = false;
     let mut messages = BTreeMap::<String, String>::new();
@@ -99,17 +104,32 @@ pub async fn run(
     tokio::pin!(startup);
     let finish = tokio::time::sleep(Duration::from_secs(30));
     tokio::pin!(finish);
+    let file_deadline = tokio::time::sleep(Duration::from_secs(30));
+    tokio::pin!(file_deadline);
     let signal = tokio::signal::ctrl_c();
     tokio::pin!(signal);
     let result=async {loop {tokio::select! {
         result=&mut device=>{device_done=true;return result;},
         _=&mut startup,if !ready=>return Err(crate::Error::Rejected("CLI startup unconfirmed; check pairing and Keychain".into())),
         _=&mut finish,if ending=>return Err(crate::Error::Rejected("server receipt unconfirmed; check the original private data directory before resubmitting".into())),
+        _=&mut file_deadline,if selecting.is_some() || clearing.is_some()=>return Err(crate::Error::Rejected("file selection unconfirmed; no new message submitted".into())),
         _=&mut signal,if !ending=>{ending=true;finish.as_mut().reset(tokio::time::Instant::now()+Duration::from_secs(30));},
         changed=state.changed()=>{
             changed.map_err(|_|crate::Error::Rejected("CLI state stopped".into()))?;
             let value=state.borrow_and_update().clone();
             ready=value.paired;
+            if let Some(request_id)=&selecting
+                && let Some(request)=value.text_input_request.as_ref().filter(|r| &r.request_id==request_id && !r.loading) {
+                crate::ensure(!request.failed && !request.cancelled,"text file selection rejected; no new message submitted")?;
+                let input=value.text_input.as_ref().ok_or_else(||crate::Error::Rejected("selected text unavailable".into()))?;
+                selected_input=Some(input.id.clone());
+                output.write_all(format!("已選取固定副本：{} · {} bytes · {}\n下一則訊息會附上此副本。:clear 可移除。\n",terminal_text(&input.name),input.length,input.digest).as_bytes()).await?;
+                selecting=None;
+            }
+            if clearing.as_ref().is_some_and(|id|value.text_input.as_ref().is_none_or(|input|&input.id!=id)) {
+                clearing=None;
+                output.write_all("未送出的檔案選擇已移除。\n".as_bytes()).await?;
+            }
             if link!=Some((value.paired,value.connected)) {
                 link=Some((value.paired,value.connected));
                 output.write_all(if value.connected {"server 已連線。\n".as_bytes()}else if value.paired {"離線；訊息會保存在本機。\n".as_bytes()}else{"尚未配對；請先產生 private 配對檔案。\n".as_bytes()}).await?;
@@ -119,6 +139,11 @@ pub async fn run(
                 crate::ensure(receipt.saved,"input was not saved; check connection identity, size and queue capacity")?;
                 output.write_all(format!("本機已保存：{}\n",receipt.source_id).as_bytes()).await?;
                 pending=None;
+                if let Some(input_id)=selected_input.take() {
+                    commands.send(NativeCommand::ClearTextFile{input_id:input_id.clone()}).await.map_err(|_|crate::Error::Rejected("CLI file clear stopped".into()))?;
+                    clearing=Some(input_id);
+                    file_deadline.as_mut().reset(tokio::time::Instant::now()+Duration::from_secs(30));
+                }
             }
             for message in &value.messages {
                 let digest=hash_bytes(message.body.as_bytes());
@@ -129,21 +154,42 @@ pub async fn run(
             }
             // Keep only IDs and digests for the current bounded projection.
             messages.retain(|id,_|value.messages.iter().any(|m|&m.id==id));
-            if ending && pending.is_none() && value.pending==0 && value.connected && !shutdown_sent {
+            if ending && pending.is_none() && selecting.is_none() && clearing.is_none() && value.pending==0 && value.connected && !shutdown_sent {
                 output.write_all("server 已收件；這不表示任務已完成。\n".as_bytes()).await?;
                 commands.send(NativeCommand::Shutdown).await.map_err(|_|crate::Error::Rejected("CLI stopped before shutdown".into()))?;
                 shutdown_sent=true;
             }
             output.flush().await?;
         },
-        value=input.line(),if ready && pending.is_none() && !ending && !watch_only=>{
+        value=input.line(),if ready && pending.is_none() && selecting.is_none() && clearing.is_none() && !ending && !watch_only=>{
             match value? {
                 None=>{ending=true;finish.as_mut().reset(tokio::time::Instant::now()+Duration::from_secs(30));},
                 Some(text) if text==":quit"=>{ending=true;finish.as_mut().reset(tokio::time::Instant::now()+Duration::from_secs(30));},
                 Some(text) if text.trim().is_empty()=>{},
+                Some(text) if text.starts_with(":file ")=>{
+                    let path=text[6..].trim().to_owned();
+                    crate::ensure(std::path::Path::new(&path).is_absolute(),"file selection requires an absolute path")?;
+                    let request_id=uuid::Uuid::new_v4().to_string();
+                    commands.send(NativeCommand::SelectTextFile{request_id:request_id.clone(),path}).await.map_err(|_|crate::Error::Rejected("CLI file selection stopped".into()))?;
+                    selecting=Some(request_id);
+                    selected_input=None;
+                    file_deadline.as_mut().reset(tokio::time::Instant::now()+Duration::from_secs(30));
+                },
+                Some(text) if text==":clear"=>{
+                    if let Some(input_id)=selected_input.take() {
+                        commands.send(NativeCommand::ClearTextFile{input_id:input_id.clone()}).await.map_err(|_|crate::Error::Rejected("CLI file clear stopped".into()))?;
+                        clearing=Some(input_id);
+                        file_deadline.as_mut().reset(tokio::time::Instant::now()+Duration::from_secs(30));
+                    }
+                },
+                Some(text) if text.starts_with(':')=>return Err(crate::Error::Rejected("unknown CLI command; use :file, :clear or :quit".into())),
                 Some(goal)=>{
                     let source_id=uuid::Uuid::new_v4().to_string();
-                    let command=NativeCommand::Action{source_id:source_id.clone(),action:HumanAction::Submit{id:uuid::Uuid::new_v4().to_string(),goal}};
+                    let id=uuid::Uuid::new_v4().to_string();
+                    let command=match &selected_input {
+                        Some(input_id)=>NativeCommand::SubmitTextFile{source_id:source_id.clone(),id,goal,input_id:input_id.clone()},
+                        None=>NativeCommand::Action{source_id:source_id.clone(),action:HumanAction::Submit{id,goal}},
+                    };
                     commands.send(command).await.map_err(|_|crate::Error::Rejected("CLI input channel stopped".into()))?;
                     pending=Some(source_id);
                 }
