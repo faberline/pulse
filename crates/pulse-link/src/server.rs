@@ -1302,6 +1302,11 @@ impl Hub {
                                 .fetch_one(&mut *tx)
                                 .await?;
                         if existing == 0 {
+                            ensure(
+                                !operation.captures_image()
+                                    || Self::artifact_room_in(&mut tx, None).await?,
+                                "server artifact capacity reached",
+                            )?;
                             let pending:i64=sqlx::query_scalar("SELECT COUNT(*) FROM link_reads WHERE device=? AND state IN ('sent','accepted','unknown')").bind(&worker_id).fetch_one(&mut *tx).await?;
                             ensure(pending == 0, "device worker already has unresolved work")?;
                             Store::authorize_device_read(

@@ -262,6 +262,49 @@ impl Fixture {
     }
 }
 #[tokio::test]
+async fn full_image_store_does_not_consume_a_browser_action_approval() {
+    let f = setup().await;
+    let request = f.propose().await;
+    f.decide(&request, true).await;
+    let db = f.hub.core.application_pool();
+    sqlx::query("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<127) INSERT INTO link_reads SELECT 'capacity-'||x,device,epoch,task_id,task_revision,request,state,result FROM link_reads,n WHERE id=(SELECT operation_id FROM link_artifacts LIMIT 1)")
+        .execute(&db).await.unwrap();
+    sqlx::query("INSERT INTO link_artifacts SELECT r.id,a.metadata,a.png FROM link_reads r,link_artifacts a WHERE r.id LIKE 'capacity-%'")
+        .execute(&db).await.unwrap();
+    assert!(!remote::step(&f.hub, pulse_link::now()).await.unwrap());
+    assert_eq!(
+        f.hub
+            .core
+            .operation_request(&request.proposal.id)
+            .await
+            .unwrap()
+            .state,
+        pulse_core::ApprovalState::Approved
+    );
+    assert_eq!(f.hub.core.task("task").await.unwrap().tool_calls, 1);
+    let operations: i64 = sqlx::query_scalar("SELECT count(*) FROM operations")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(operations, 0);
+    sqlx::query("DELETE FROM link_artifacts WHERE operation_id='capacity-127'")
+        .execute(&db)
+        .await
+        .unwrap();
+    assert!(remote::step(&f.hub, pulse_link::now()).await.unwrap());
+    assert_eq!(
+        f.hub
+            .core
+            .operation_request(&request.proposal.id)
+            .await
+            .unwrap()
+            .state,
+        pulse_core::ApprovalState::Dispatched
+    );
+    assert_eq!(f.hub.core.task("task").await.unwrap().tool_calls, 2);
+}
+
+#[tokio::test]
 async fn browser_action_waits_for_human_and_known_receipt_continues_same_run_once() {
     let mut f = setup().await;
     let request = f.propose().await;

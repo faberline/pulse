@@ -11,6 +11,9 @@ use pulse_link::{
 use serde_json::json;
 use std::future::IntoFuture;
 
+#[path = "artifacts/capacity.rs"]
+mod capacity;
+
 fn image(multipart: bool) -> CapturedImage {
     let mut png=STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=").unwrap();
     if multipart {

@@ -224,6 +224,9 @@ impl Hub {
                     && read.operation_id == format!("approved:{}", request.proposal.id),
                 "approved call mismatch",
             )?;
+            if !Self::artifact_room_in(&mut tx, None).await? {
+                continue;
+            }
             let operation = match Store::prepare_approved_operation_in(
                 &mut tx,
                 token,

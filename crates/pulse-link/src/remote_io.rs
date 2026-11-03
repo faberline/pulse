@@ -212,6 +212,11 @@ impl Hub {
                 read.call.operation.permitted_by(&task.scope),
                 "dispatch outside Human scope",
             )?;
+            if read.call.operation.captures_image()
+                && !Self::artifact_room_in(&mut tx, None).await?
+            {
+                continue;
+            }
             let workers=sqlx::query("SELECT id,epoch FROM link_device WHERE role='local_executor' AND revoked=0 AND stopped=0 AND lease_until>? AND NOT EXISTS(SELECT 1 FROM link_reads WHERE device=link_device.id AND state IN ('sent','accepted','unknown')) ORDER BY id").bind(time).fetch_all(&mut *tx).await?;
             if workers.is_empty() {
                 return Ok(false);

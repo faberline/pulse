@@ -71,6 +71,16 @@ pub enum ReadOp {
     },
 }
 impl ReadOp {
+    pub(crate) fn captures_image(&self) -> bool {
+        match self {
+            Self::Browser { .. }
+            | Self::BrowserInspect { .. }
+            | Self::BrowserAction { .. }
+            | Self::ComputerInspect { .. }
+            | Self::ComputerAction { .. } => true,
+            Self::List { .. } | Self::Text { .. } | Self::GitStatus | Self::GitDiff { .. } => false,
+        }
+    }
     pub fn is_effect(&self) -> bool {
         matches!(
             self,

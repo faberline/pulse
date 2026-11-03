@@ -1,7 +1,30 @@
 use crate::{Result, artifact::*, ensure, protocol::*, server::Hub};
-use sqlx::Row;
+use sqlx::{Row, SqliteConnection};
 
 impl Hub {
+    /// The dispatch transaction reserves a slot through its durable read row.
+    /// Unknown work never releases it. A stored/partial image counts only once.
+    pub(crate) async fn artifact_room_in(
+        db: &mut SqliteConnection,
+        receiving: Option<&str>,
+    ) -> Result<bool> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM (
+                SELECT operation_id AS id FROM link_artifacts
+                UNION
+                SELECT id FROM link_reads WHERE state IN ('sent','accepted','unknown')
+                  AND coalesce(json_extract(request,'$.kind'),'') NOT IN
+                    ('list','text','git_status','git_diff')
+             ) WHERE (? IS NULL OR id<>?)",
+        )
+        .bind(receiving)
+        .bind(receiving)
+        .fetch_one(db)
+        .await?;
+        // A scrubbed request has an unknown kind. Keep its slot until a known receipt.
+        Ok(count < 128)
+    }
+
     pub(crate) async fn artifact_chunk(
         &self,
         device: &str,
@@ -70,10 +93,10 @@ impl Hub {
                 return Ok(());
             }
         } else {
-            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM link_artifacts")
-                .fetch_one(&mut *tx)
-                .await?;
-            ensure(count < 128, "server artifact capacity reached")?;
+            ensure(
+                Self::artifact_room_in(&mut tx, Some(operation_id)).await?,
+                "server artifact capacity reached",
+            )?;
             sqlx::query("INSERT INTO link_artifacts VALUES(?,?,NULL)")
                 .bind(operation_id)
                 .bind(&metadata)
