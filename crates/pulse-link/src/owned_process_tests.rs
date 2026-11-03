@@ -138,6 +138,51 @@ async fn owned_process_failed_cleanup_is_never_a_stopped_result() {
     .await
     .unwrap();
     assert!(!tracker.source_idle(&scope).unwrap());
+    assert!(tracker.shutdown().await.is_err());
+    assert!(!tracker.stopped());
+}
+
+#[tokio::test]
+async fn owned_process_shutdown_signals_all_groups_but_waits_for_their_real_completion() {
+    let tracker = ProcessTracker::default();
+    let scope = SourceScope::new("A", "1").unwrap();
+    let mut bound = hanging(&tracker, &scope, None).await;
+    let mut command = Command::new("/bin/sh");
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .args(["-c", "exec sleep 60"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut unbound = tracker.spawn(&mut command, None, None).unwrap();
+    let groups = [bound.entry.group, unbound.entry.group];
+    let next = tracker.clone();
+    let shutdown = tokio::spawn(async move { next.shutdown().await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !tracker.closed() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!tracker.stopped());
+    assert!(!shutdown.is_finished());
+    for source in [None, Some(scope.clone())] {
+        assert!(
+            tracker
+                .spawn(&mut Command::new("/usr/bin/true"), source, None)
+                .is_err()
+        );
+    }
+    let (a, b) = tokio::join!(bound.wait(), unbound.wait());
+    assert!(!a.unwrap().success() && !b.unwrap().success());
+    shutdown.await.unwrap().unwrap();
+    assert!(tracker.stopped());
+    for group in groups {
+        assert_eq!(test_kill_process_group(group), Err(rustix::io::Errno::SRCH));
+    }
+    tracker.shutdown().await.unwrap();
 }
 #[test]
 fn owned_process_source_requires_a_bounded_canonical_revision() {

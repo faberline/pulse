@@ -148,6 +148,19 @@ pub(crate) fn evidence(
     })
 }
 impl BrowserRuntime {
+    pub(crate) fn begin_shutdown(&self) -> Result<()> {
+        self.processes.close_admission()
+    }
+    pub(crate) async fn finish_shutdown(&self) -> Result<()> {
+        let sessions = std::mem::take(&mut *self.sessions.lock().await);
+        let results =
+            futures_util::future::join_all(sessions.into_values().map(|s| s.browser.stop())).await;
+        let mut failure = results.into_iter().find_map(Result::err);
+        if let Err(error) = self.processes.shutdown().await {
+            failure.get_or_insert(error);
+        }
+        failure.map_or(Ok(()), Err)
+    }
     pub(crate) async fn invalidate_source(&self, task: &str, revision: &str) -> Result<()> {
         let scope = crate::owned_process::SourceScope::new(task, revision)?;
         let mut results = vec![self.processes.block(&scope)];
@@ -173,6 +186,7 @@ impl BrowserRuntime {
     }
 
     pub async fn inspect(&self, url: &Url, binding: &WorkBinding) -> Result<ExecutedRead> {
+        ensure(!self.processes.closed(), "browser executor is closing")?;
         ensure(self.interactions, "browser interaction not configured")?;
         self.artifact_room()?;
         tokio::time::timeout(Duration::from_secs(35), async {
@@ -235,6 +249,9 @@ impl BrowserRuntime {
             },
             image: None,
         };
+        if self.processes.closed() {
+            return rejected("browser executor is closing");
+        }
         if !self.interactions {
             return rejected("browser interaction disabled");
         }

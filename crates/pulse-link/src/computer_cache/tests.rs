@@ -167,3 +167,48 @@ async fn unverified_entries_are_not_removed_or_followed() {
         assert_eq!(std::fs::read(outside).unwrap(), b"KEEP");
     }
 }
+
+#[tokio::test]
+async fn shutdown_waits_for_readers_and_requires_global_process_stop_before_removing_owned_images()
+{
+    let root = private_root();
+    let caches = ImageCaches::default();
+    let processes = crate::owned_process::ProcessTracker::default();
+    let lease = caches.acquire(root.path(), "A", "1").await.unwrap();
+    let file = write(&lease.path, &png_name(1));
+    caches.begin_shutdown().unwrap();
+    assert!(lease.valid().is_err());
+    assert!(caches.acquire(root.path(), "new", "1").await.is_err());
+    assert!(caches.existing("A", "1").await.is_err());
+    assert!(caches.finish_shutdown(&processes).await.is_err());
+    assert!(file.exists());
+    processes.shutdown().await.unwrap();
+    let clear = caches.finish_shutdown(&processes);
+    tokio::pin!(clear);
+    tokio::select! {
+        _=&mut clear=>panic!("shutdown cleared an active image reader"),
+        _=tokio::time::sleep(Duration::from_millis(60))=>{},
+    }
+    assert!(file.exists());
+    drop(lease);
+    clear.await.unwrap();
+    assert!(!file.exists());
+    caches.finish_shutdown(&processes).await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_keeps_unverified_files_and_repeats_the_failure_without_losing_ownership() {
+    let root = private_root();
+    let caches = ImageCaches::default();
+    let processes = crate::owned_process::ProcessTracker::default();
+    let lease = caches.acquire(root.path(), "A", "1").await.unwrap();
+    let unknown = lease.path.join("KEEP");
+    std::fs::write(&unknown, b"KEEP").unwrap();
+    drop(lease);
+    caches.begin_shutdown().unwrap();
+    processes.shutdown().await.unwrap();
+    for _ in 0..2 {
+        assert!(caches.finish_shutdown(&processes).await.is_err());
+        assert_eq!(std::fs::read(&unknown).unwrap(), b"KEEP");
+    }
+}

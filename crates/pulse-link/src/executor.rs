@@ -16,6 +16,44 @@ pub struct Executor {
     processes: crate::owned_process::ProcessTracker,
 }
 impl Executor {
+    pub(crate) async fn shutdown(&self) -> Result<()> {
+        // Fence every adapter before waiting for any one adapter to finish.
+        let mut results = vec![self.processes.close_admission()];
+        if let Some(runtime) = &self.computer {
+            results.push(runtime.begin_shutdown());
+        }
+        if let Some(runtime) = &self.browser {
+            results.push(runtime.begin_shutdown());
+        }
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(25), async {
+            let (processes, computer, browser) = tokio::join!(
+                self.processes.shutdown(),
+                async {
+                    match &self.computer {
+                        Some(runtime) => runtime.finish_shutdown().await,
+                        None => Ok(()),
+                    }
+                },
+                async {
+                    match &self.browser {
+                        Some(runtime) => runtime.finish_shutdown().await,
+                        None => Ok(()),
+                    }
+                },
+            );
+            [processes, computer, browser]
+                .into_iter()
+                .find_map(Result::err)
+                .map_or(Ok(()), Err)
+        })
+        .await
+        .map_err(|_| crate::Error::Rejected("executor shutdown unverified".into()));
+        results.push(finished.and_then(|value| value));
+        results
+            .into_iter()
+            .find_map(Result::err)
+            .map_or(Ok(()), Err)
+    }
     pub(crate) async fn invalidate_source(
         &self,
         context: &pulse_core::WorkerErasure,
@@ -162,6 +200,9 @@ impl Executor {
             },
             image: None,
         };
+        if self.processes.closed() {
+            return rejected("local executor is closing");
+        }
         match operation {
             ReadOp::Browser { url } => self
                 .browser_read(&url, Some(binding))
@@ -484,6 +525,14 @@ impl Executor {
         self.execute_work(operation).await.outcome
     }
     pub async fn execute_work(&self, operation: ReadOp) -> crate::artifact::ExecutedRead {
+        if self.processes.closed() {
+            return crate::artifact::ExecutedRead {
+                outcome: ReadOutcome::Rejected {
+                    reason: "local executor is closing".into(),
+                },
+                image: None,
+            };
+        }
         if let ReadOp::Browser { url } = operation {
             return self.browser_read(&url, None).await.unwrap_or_else(|_| {
                 crate::artifact::ExecutedRead {

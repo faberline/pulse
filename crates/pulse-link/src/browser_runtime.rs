@@ -71,6 +71,7 @@ impl BrowserRuntime {
         })
     }
     pub async fn read(&self, url: &Url) -> Result<BrowserSnapshot> {
+        ensure(!self.processes.closed(), "browser executor is closing")?;
         self.policy.validate_url(url)?;
         self.artifact_room()?;
         tokio::time::timeout(Duration::from_secs(35), self.read_inner(url, None))
@@ -82,6 +83,7 @@ impl BrowserRuntime {
         url: &Url,
         binding: &crate::browser_session::WorkBinding,
     ) -> Result<BrowserSnapshot> {
+        ensure(!self.processes.closed(), "browser executor is closing")?;
         self.policy.validate_url(url)?;
         self.artifact_room()?;
         let scope = SourceScope::new(&binding.task_id, &binding.revision)?;
@@ -122,6 +124,7 @@ impl BrowserRuntime {
         source: Option<SourceScope>,
     ) -> Result<OwnedBrowser> {
         use std::os::unix::fs::PermissionsExt;
+        ensure(!self.processes.closed(), "browser executor is closing")?;
         self.policy.validate_url(url)?;
         let profile = tempfile::Builder::new()
             .prefix("session-")

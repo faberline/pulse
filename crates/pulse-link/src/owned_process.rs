@@ -38,6 +38,7 @@ struct State {
     next: u64,
     entries: BTreeMap<u64, Arc<Entry>>,
     blocked: BTreeSet<SourceScope>,
+    closed: bool,
 }
 struct Entry {
     source: Option<SourceScope>,
@@ -51,6 +52,39 @@ struct Entry {
 pub(crate) struct ProcessTracker(Arc<Mutex<State>>);
 
 impl ProcessTracker {
+    pub(crate) fn closed(&self) -> bool {
+        self.0.lock().map_or(true, |state| state.closed)
+    }
+    pub(crate) fn stopped(&self) -> bool {
+        self.0
+            .lock()
+            .is_ok_and(|state| state.closed && state.entries.is_empty())
+    }
+    pub(crate) fn close_admission(&self) -> Result<()> {
+        self.0
+            .lock()
+            .map_err(|_| crate::Error::Rejected("process registry unavailable".into()))?
+            .closed = true;
+        Ok(())
+    }
+    pub(crate) async fn shutdown(&self) -> Result<()> {
+        let entries = {
+            let mut state = self
+                .0
+                .lock()
+                .map_err(|_| crate::Error::Rejected("process registry unavailable".into()))?;
+            state.closed = true;
+            state.entries.values().cloned().collect::<Vec<_>>()
+        };
+        let mut failure = None;
+        for entry in &entries {
+            if let Err(error) = terminate(entry) {
+                failure.get_or_insert(error);
+            }
+        }
+        let waited = wait_entries(entries).await;
+        failure.map_or(waited, Err)
+    }
     /// Callers must separately prevent new source work while using this result.
     pub(crate) fn source_idle(&self, source: &SourceScope) -> Result<bool> {
         let state = self
@@ -72,6 +106,7 @@ impl ProcessTracker {
             .0
             .lock()
             .map_err(|_| crate::Error::Rejected("process registry unavailable".into()))?;
+        ensure(!state.closed, "executor process admission closed")?;
         ensure(state.entries.len() < 64, "process registry capacity")?;
         ensure(
             source.as_ref().is_none_or(|s| !state.blocked.contains(s)),
@@ -170,22 +205,7 @@ impl ProcessTracker {
                 .cloned()
                 .collect::<Vec<_>>()
         };
-        tokio::time::timeout(Duration::from_secs(15), async {
-            for entry in entries {
-                let mut result = entry.done.subscribe();
-                let value = *result
-                    .wait_for(|v| v.is_some())
-                    .await
-                    .map_err(|_| crate::Error::Rejected("process completion lost".into()))?;
-                ensure(
-                    value == Some(true),
-                    "process stop or private resource cleanup unverified",
-                )?;
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|_| crate::Error::Rejected("process stop deadline exceeded".into()))?
+        wait_entries(entries).await
     }
     fn finish(&self, id: u64, entry: &Entry, success: bool) {
         entry.done.send_replace(Some(success));
@@ -193,6 +213,24 @@ impl ProcessTracker {
             state.entries.remove(&id);
         }
     }
+}
+async fn wait_entries(entries: Vec<Arc<Entry>>) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        for entry in entries {
+            let mut result = entry.done.subscribe();
+            let value = *result
+                .wait_for(|v| v.is_some())
+                .await
+                .map_err(|_| crate::Error::Rejected("process completion lost".into()))?;
+            ensure(
+                value == Some(true),
+                "process stop or private resource cleanup unverified",
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| crate::Error::Rejected("process stop deadline exceeded".into()))?
 }
 fn terminate(entry: &Entry) -> Result<()> {
     let mut live = entry

@@ -63,8 +63,12 @@ pub(crate) struct PickerChannel {
 }
 pub(crate) struct PickerWorker(tokio::task::JoinHandle<Result<()>>);
 impl PickerWorker {
-    pub(crate) async fn start(server: &str, runtime: ComputerRuntime) -> Result<Self> {
-        let channel = PickerChannel::bind(server).await?;
+    pub(crate) async fn start(
+        server: &str,
+        directory: &Path,
+        runtime: ComputerRuntime,
+    ) -> Result<Self> {
+        let channel = PickerChannel::bind_at(directory, server).await?;
         Ok(Self(tokio::spawn(channel.serve(runtime))))
     }
     pub(crate) async fn stop(mut self) {
@@ -108,9 +112,6 @@ fn same_user(stream: &UnixStream) -> Result<()> {
     )
 }
 impl PickerChannel {
-    pub(crate) async fn bind(server: &str) -> Result<Self> {
-        Self::bind_at(&control_directory(), server).await
-    }
     pub(crate) async fn bind_at(directory: &Path, server: &str) -> Result<Self> {
         private_dir(directory)?;
         let directory = directory.canonicalize()?;

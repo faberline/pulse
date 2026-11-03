@@ -154,6 +154,33 @@ pub struct ComputerRuntime {
     images: crate::computer_cache::ImageCaches,
 }
 impl ComputerRuntime {
+    pub(crate) fn begin_shutdown(&self) -> Result<()> {
+        let mut results = vec![
+            self.images.begin_shutdown(),
+            self.processes.close_admission(),
+        ];
+        self.set_live(false);
+        results.push(
+            self.permits
+                .lock()
+                .map_err(|_| crate::Error::Rejected("local selections unavailable".into()))
+                .map(|mut entries| entries.clear()),
+        );
+        results.push(
+            self.observations
+                .lock()
+                .map_err(|_| crate::Error::Rejected("local observations unavailable".into()))
+                .map(|mut entries| entries.clear()),
+        );
+        results
+            .into_iter()
+            .find_map(Result::err)
+            .map_or(Ok(()), Err)
+    }
+    pub(crate) async fn finish_shutdown(&self) -> Result<()> {
+        self.processes.shutdown().await?;
+        self.images.finish_shutdown(&self.processes).await
+    }
     pub async fn list_windows(&self) -> Result<Vec<pulse_core::ComputerWindowChoice>> {
         let response = self.call(&["--list".into()], None, self.timeout).await?;
         ensure(
@@ -339,7 +366,8 @@ impl ComputerRuntime {
         revision: &str,
         selection: &pulse_core::ComputerSelection,
     ) -> bool {
-        *self.activity.borrow()
+        !self.images.closed()
+            && *self.activity.borrow()
             && self.permits.lock().is_ok_and(|entries| {
                 entries.iter().any(|entry| {
                     entry.valid(crate::now())
@@ -370,7 +398,7 @@ impl ComputerRuntime {
     }
     fn admit_local(&self, permit: pulse_core::ComputerPermit, replace: bool) -> Result<()> {
         ensure(
-            *self.activity.borrow(),
+            *self.activity.borrow() && !self.images.closed(),
             "local computer executor is not live",
         )?;
         ensure(
@@ -410,6 +438,9 @@ impl ComputerRuntime {
         Ok(())
     }
     pub(crate) fn selections(&self) -> Vec<pulse_core::ComputerPermit> {
+        if self.images.closed() {
+            return vec![];
+        }
         self.permits
             .lock()
             .map(|entries| {

@@ -14,7 +14,10 @@ use std::{
 use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 
 #[derive(Clone, Default)]
-pub(crate) struct ImageCaches(Arc<Mutex<BTreeMap<SourceScope, Arc<Cache>>>>);
+pub(crate) struct ImageCaches(
+    Arc<Mutex<BTreeMap<SourceScope, Arc<Cache>>>>,
+    Arc<AtomicBool>,
+);
 struct Cache {
     path: Option<PathBuf>,
     identity: Option<(u64, u64)>,
@@ -176,6 +179,51 @@ impl Cache {
     }
 }
 impl ImageCaches {
+    pub(crate) fn closed(&self) -> bool {
+        self.1.load(Ordering::Acquire)
+    }
+    pub(crate) fn begin_shutdown(&self) -> Result<()> {
+        self.1.store(true, Ordering::Release);
+        let entries = self
+            .0
+            .lock()
+            .map_err(|_| crate::Error::Rejected("image registry unavailable".into()))?;
+        for cache in entries.values() {
+            cache.blocked.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+    pub(crate) async fn finish_shutdown(
+        &self,
+        processes: &crate::owned_process::ProcessTracker,
+    ) -> Result<()> {
+        ensure(
+            self.closed() && processes.stopped(),
+            "native process stop unverified",
+        )?;
+        let caches = self
+            .0
+            .lock()
+            .map_err(|_| crate::Error::Rejected("image registry unavailable".into()))?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut failure = None;
+        for cache in caches {
+            let result = async {
+                let _exclusive =
+                    tokio::time::timeout(Duration::from_secs(5), cache.io.clone().write_owned())
+                        .await
+                        .map_err(|_| crate::Error::Rejected("image read stop unverified".into()))?;
+                cache.clear()
+            }
+            .await;
+            if let Err(error) = result {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
     /// Expiry collection is not source erasure. Fenced revisions keep their tombstones.
     pub(crate) fn collect_idle(
         &self,
@@ -242,6 +290,7 @@ impl ImageCaches {
                 .0
                 .lock()
                 .map_err(|_| crate::Error::Rejected("image registry unavailable".into()))?;
+            ensure(!self.closed(), "native image admission closed")?;
             if !entries.contains_key(&scope) {
                 ensure(entries.len() < 1000, "image source capacity")?;
                 private_dir(directory)?;
@@ -256,6 +305,7 @@ impl ImageCaches {
         Self::lease(cache).await
     }
     pub(crate) async fn existing(&self, task: &str, revision: &str) -> Result<ImageLease> {
+        ensure(!self.closed(), "native image admission closed")?;
         let scope = SourceScope::new(task, revision)?;
         let cache = self
             .0

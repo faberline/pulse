@@ -120,6 +120,9 @@ pub use vault::{NativeVault, Vault};
 mod pairing;
 #[cfg(test)]
 mod pairing_tests;
+#[cfg(test)]
+#[path = "client/shutdown_tests.rs"]
+mod shutdown_tests;
 
 #[derive(Clone, Default)]
 struct Lease {
@@ -188,19 +191,38 @@ impl Device {
     }
     pub async fn run(
         self,
+        commands: mpsc::Receiver<NativeCommand>,
+        states: watch::Sender<NativeState>,
+    ) -> Result<()> {
+        let mut computer_control = None;
+        let result = async {
+            if let Some(runtime) = self.executor.as_ref().and_then(Executor::computer_runtime) {
+                computer_control = Some(
+                    crate::computer_control::PickerWorker::start(
+                        self.config.server.as_str(),
+                        &self.control_directory,
+                        runtime,
+                    )
+                    .await?,
+                );
+            }
+            self.run_inner(commands, states).await
+        }
+        .await;
+        if let Some(task) = computer_control {
+            task.stop().await;
+        }
+        let cleanup = match &self.executor {
+            Some(executor) => executor.shutdown().await,
+            None => Ok(()),
+        };
+        result.and(cleanup)
+    }
+    async fn run_inner(
+        &self,
         mut commands: mpsc::Receiver<NativeCommand>,
         states: watch::Sender<NativeState>,
     ) -> Result<()> {
-        let computer_control = if let Some(runtime) =
-            self.executor.as_ref().and_then(Executor::computer_runtime)
-        {
-            Some(
-                crate::computer_control::PickerWorker::start(self.config.server.as_str(), runtime)
-                    .await?,
-            )
-        } else {
-            None
-        };
         let vault = self.vault.clone();
         let account = self.account.clone();
         let (mut credential, pending) = tokio::task::spawn_blocking(move || {
@@ -615,9 +637,6 @@ impl Device {
         lease_tx.send_replace(Lease::default());
         computer_selection.abort_all();
         while computer_selection.join_next().await.is_some() {}
-        if let Some(task) = computer_control {
-            task.stop().await;
-        }
         if let Some(task) = artifact_download {
             task.abort();
             let _ = task.await;

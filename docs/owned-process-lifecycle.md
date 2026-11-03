@@ -24,6 +24,28 @@ Rust 要求有效回覆、成功退出與程序群組消失。
 這個端點會處理所有 session，見 [Chromium 實作](https://chromium.googlesource.com/chromium/src/+/main/chrome/test/chromedriver/server/http_handler.cc)。
 單獨收到關閉回覆，仍不能通過停止檢查。
 
+## 正常關閉
+
+Rust 地端收到關閉命令或輸入結束後，先結束連線、工作與本機控制通道。
+資料目錄的鎖會保留到收尾結束，避免新的地端程序提早使用同一份資料。
+憑證讀取或初始化失敗時，也會執行收尾。
+控制通道使用建立 Device 時已選定的私有目錄。
+
+收尾先禁止所有 adapter 接受新工作，再等待任何一個 adapter。
+Git 與原生 helper 會收到停止要求，並核對子程序回收與程序群組消失。
+瀏覽器會關閉目前持有的 session，再要求各自的 Driver 關閉。
+已關閉的 executor 及其分身不能再次啟動工作；新的地端程序使用新的 runtime。
+
+原生 helper 全部確認停止後，Rust 等待真正的圖片讀取結束。
+之後立即清理目前持有且已核對的 PNG 目錄，不必等待到期回收。
+遇到未知檔案、目錄替換、程序停止失敗或讀取尚未結束時，保留資料並回傳錯誤。
+整個 executor 收尾有 25 秒上限。逾時不能當成已停止或已清除。
+操作帳本與未知結果不會因此改寫，也不會自動重做效果。
+
+直接中止 `Device::run` future 或強制終止程序，不會完成這個正常關閉流程。
+瀏覽器成果 PNG、舊 runtime 的檔案、孤兒程序與正式恢復仍須另行處理。
+這個結果也不是 server 的獨立停止回報，不能代替完整來源清除或實機接受。
+
 ## 私有檔案
 
 新的 Chrome profile 明確以 `0700` 建立，只供目前帳號存取。
@@ -86,11 +108,13 @@ runtime 結束時，沒有完整停止證據的目錄會保留。
 `cargo test -p pulse-link --lib computer_ --locked` 另核對分任務 PNG、取消中的讀取、寫圖 helper 退出、未知資源保留與全域容量。這些 helper 是受控 fixture，不是實際 AX 擷取或操作。
 到期測試使用固定時間，涵蓋 130 個任務的容量回收、最後一次讀取、待取鎖工作、仍有效的批准、撤銷紀錄與程序回收。這不是 8 小時實機驗收。
 假 Driver 回覆成功、但子程序仍存活時，profile 必須保留，停止檢查必須失敗。
+關閉測試另核對有／無任務來源的程序、在途寫圖、正在讀取的 PNG、輸入結束、初始化失敗、資料鎖及錯誤回傳。
 
 真正 Chrome 測試另須明確指定已安裝的 Driver：
 
 ```sh
 PULSE_TEST_BROWSER_DRIVER=/ABSOLUTE/PATH/chromedriver cargo test -p pulse-link --lib real_chrome_source_stop_reaps_and_clears_only_its_owned_profile --locked -- --ignored
+PULSE_TEST_BROWSER_DRIVER=/ABSOLUTE/PATH/chromedriver cargo test -p pulse-link --lib real_chrome_executor_shutdown_closes_both_owned_sessions_and_rejects_new_work --locked -- --ignored
 ```
 
 測試使用自有 loopback 頁面與獨立 profile。
@@ -98,6 +122,12 @@ PULSE_TEST_BROWSER_DRIVER=/ABSOLUTE/PATH/chromedriver cargo test -p pulse-link -
 它也重查 profile 沒有立刻再次出現，且其他檔案未被移除。
 測試不呼叫 provider，也不擷取真實 macOS 視窗。
 既有雙任務點擊與輸入範例也須通過。
+
+2026-11-04 的正常關閉元件驗證使用 Chrome 與 ChromeDriver `156.0.8078.80`。
+兩個自有頁面回傳同一個隨機標記；關閉後兩份 profile 消失，原 KEEP 檔案保留。
+再次關閉及關閉後的新讀取也已核對。
+預設工具沙箱內建立 Chrome session 失敗；相同測試在正常主機環境通過。
+這是程序與 profile 清理證據，不代表完整桌面、provider、強制終止復原或 8 小時驗收通過。
 
 ## 剩餘工作
 

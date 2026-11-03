@@ -175,6 +175,12 @@ fn binding() -> ComputerBinding {
         epoch: 2,
     }
 }
+pub(crate) async fn image_reader(
+    runtime: &ComputerRuntime,
+    task: &str,
+) -> crate::computer_cache::ImageLease {
+    runtime.images.existing(task, "1").await.unwrap()
+}
 
 #[tokio::test]
 async fn fixture_replacement_can_spawn_while_the_old_inode_has_a_writer() {
@@ -659,4 +665,67 @@ async fn maintenance_keeps_live_approval_images_then_reclaims_expired_capacity_w
     assert_ne!(fresh.path, path);
     fresh.valid().unwrap();
     assert_reaped(&runtime).await;
+}
+
+#[tokio::test]
+async fn executor_shutdown_reaps_an_active_native_writer_and_allows_a_new_runtime_to_start_clean() {
+    let (root, runtime) = fixture("cache-hang");
+    std::fs::write(
+        root.path().join("anything"),
+        b"must not read after shutdown",
+    )
+    .unwrap();
+    let worker = runtime.clone();
+    let work = tokio::spawn(async move { worker.observe(&binding()).await });
+    let marker = runtime.helper.with_extension("cache");
+    let path = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(path) = std::fs::read_to_string(&marker) {
+                break PathBuf::from(path);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let executor = crate::executor::Executor::new(root.path())
+        .unwrap()
+        .with_computer(Some(runtime.clone()));
+    executor.shutdown().await.unwrap();
+    assert!(work.await.unwrap().is_err());
+    assert!(!path.exists());
+    assert_reaped(&runtime).await;
+    runtime.set_live(true);
+    assert!(runtime.observe(&binding()).await.is_err());
+    assert!(runtime.permissions().await.is_err());
+    assert!(matches!(
+        executor
+            .execute(crate::protocol::ReadOp::Text {
+                path: "anything".into()
+            })
+            .await,
+        crate::protocol::ReadOutcome::Rejected { .. }
+    ));
+    executor.shutdown().await.unwrap();
+    publish_helper(
+        &runtime.helper,
+        &std::fs::read_to_string(&runtime.helper)
+            .unwrap()
+            .replace("mode=script.stem", "mode='good'"),
+    );
+    let fresh = ComputerRuntime::new(
+        runtime.helper.clone(),
+        runtime.directory.clone(),
+        runtime.target.clone(),
+    )
+    .unwrap();
+    fresh.observe(&binding()).await.unwrap();
+    fresh.begin_shutdown().unwrap();
+    fresh.finish_shutdown().await.unwrap();
+    assert_eq!(
+        std::fs::read_dir(runtime.directory.join("artifacts"))
+            .unwrap()
+            .count(),
+        0
+    );
 }

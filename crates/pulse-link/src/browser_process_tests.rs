@@ -115,3 +115,71 @@ async fn real_chrome_source_stop_reaps_and_clears_only_its_owned_profile() {
     server.abort();
     let _ = server.await;
 }
+
+#[tokio::test]
+#[ignore = "explicit real Chrome shutdown fixture; set PULSE_TEST_BROWSER_DRIVER; no provider calls"]
+async fn real_chrome_executor_shutdown_closes_both_owned_sessions_and_rejects_new_work() {
+    use axum::{Router, response::Html, routing::get};
+    let driver =
+        std::env::var_os("PULSE_TEST_BROWSER_DRIVER").expect("explicit installed driver required");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}/", listener.local_addr().unwrap());
+    let marker = uuid::Uuid::new_v4().to_string();
+    let value = marker.clone();
+    let app = Router::new().route(
+        "/",
+        get(move || {
+            let value = value.clone();
+            async move {
+                Html(format!(
+                    "<!doctype html><title>Owned shutdown fixture</title><p>{value}</p>"
+                ))
+            }
+        }),
+    );
+    let server = tokio::spawn(axum::serve(listener, app).into_future());
+    let root = tempfile::tempdir().unwrap();
+    let runtime = BrowserRuntime::new(
+        driver.into(),
+        NetworkPolicy::new(Some(&origin)).unwrap(),
+        root.path().join("browser"),
+    )
+    .unwrap()
+    .with_interactions(true);
+    let unrelated = root.path().join("browser/KEEP");
+    std::fs::write(&unrelated, b"KEEP").unwrap();
+    let binding = |task: &str| WorkBinding {
+        operation_id: format!("observe-{task}"),
+        task_id: task.into(),
+        revision: "1".into(),
+        device: uuid::Uuid::new_v4().to_string(),
+        epoch: 1,
+    };
+    let url: Url = origin.parse().unwrap();
+    for task in ["A", "B"] {
+        let read = runtime.inspect(&url, &binding(task)).await.unwrap();
+        assert!(
+            matches!(read.outcome, ReadOutcome::Completed { text, .. } if text.contains(&marker))
+        );
+    }
+    assert_eq!(profiles(&root.path().join("browser")).len(), 2);
+    let executor = crate::executor::Executor::new(root.path())
+        .unwrap()
+        .with_browser(Some(runtime.clone()));
+    executor.shutdown().await.unwrap();
+    assert!(runtime.processes.stopped());
+    assert!(runtime.sessions.lock().await.is_empty());
+    assert!(profiles(&root.path().join("browser")).is_empty());
+    assert!(runtime.inspect(&url, &binding("C")).await.is_err());
+    assert!(runtime.read(&url).await.is_err());
+    assert!(matches!(
+        executor.execute(ReadOp::Browser { url: origin }).await,
+        ReadOutcome::Rejected { .. }
+    ));
+    executor.shutdown().await.unwrap();
+    assert_eq!(std::fs::read(&unrelated).unwrap(), b"KEEP");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(profiles(&root.path().join("browser")).is_empty());
+    server.abort();
+    let _ = server.await;
+}
