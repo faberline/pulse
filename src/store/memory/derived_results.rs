@@ -12,7 +12,15 @@ impl Store {
     ) -> Result<Option<super::task_sources::TaskMemoryLease<'_>>> {
         let bound:i64=sqlx::query_scalar("SELECT count(*) FROM link_reads r JOIN task_memory_sources b ON b.task_id=r.task_id AND b.task_revision=r.task_revision WHERE r.id=?").bind(operation_id).fetch_one(&self.pool).await?;
         if bound == 0 {
-            return Ok(None);
+            let task: Option<String> =
+                sqlx::query_scalar("SELECT task_id FROM link_reads WHERE id=?")
+                    .bind(operation_id)
+                    .fetch_optional(&self.pool)
+                    .await?;
+            return match task {
+                Some(id) => self.lease_retained_task_data(Some(&id)).await,
+                None => Ok(None),
+            };
         }
         let lease = self.memory_guard.lease().await?;
         let mut restrictions = self
@@ -133,6 +141,15 @@ pub(super) async fn erase(db: &mut SqliteConnection, task: &str, revision: u64) 
                 .await?;
         }
     }
+    erase_registered(db, task, revision).await
+}
+
+/// Shared payload scrub after a trusted erasure context was durably registered.
+pub(super) async fn erase_registered(
+    db: &mut SqliteConnection,
+    task: &str,
+    revision: u64,
+) -> Result<()> {
     sqlx::query("UPDATE link_reads SET request='null' WHERE id IN (SELECT id FROM memory_erased_reads WHERE context IS NOT NULL)").execute(&mut *db).await?;
     let revision_text = revision.to_string();
     let values:Vec<(String,String,String)>=sqlx::query_as("SELECT 'operation',id,data FROM operations UNION ALL SELECT 'request',id,data FROM operation_requests").fetch_all(&mut *db).await?;
@@ -160,7 +177,7 @@ pub(super) async fn erase(db: &mut SqliteConnection, task: &str, revision: u64) 
     }
     // Register existing chat evidence before the common projection scrub. This
     // also covers the old result-save/chat-save gap during schema migration.
-    sqlx::query("INSERT OR IGNORE INTO memory_derived_messages(id,task_id,task_revision,redacted) SELECT c.id,r.task_id,r.task_revision,1 FROM link_chat c JOIN link_reads r ON r.id=c.id JOIN memory_erased_reads e ON e.id=r.id WHERE r.task_id=? AND r.task_revision=?").bind(task).bind(revision.to_string()).execute(&mut *db).await?;
+    sqlx::query("INSERT OR IGNORE INTO memory_derived_messages(id,task_id,task_revision,redacted) SELECT c.id,r.task_id,r.task_revision,1 FROM link_chat c JOIN link_reads r ON r.id=c.id JOIN memory_erased_reads e ON e.id=r.id JOIN task_memory_sources b ON b.task_id=r.task_id AND b.task_revision=r.task_revision WHERE r.task_id=? AND r.task_revision=?").bind(task).bind(revision.to_string()).execute(&mut *db).await?;
     sqlx::query("DELETE FROM link_artifact_parts WHERE operation_id IN (SELECT id FROM memory_erased_reads)").execute(&mut *db).await?;
     sqlx::query(
         "DELETE FROM link_artifacts WHERE operation_id IN (SELECT id FROM memory_erased_reads)",

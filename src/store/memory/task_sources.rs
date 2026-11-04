@@ -29,7 +29,7 @@ impl Store {
     ) -> Result<Option<TaskMemoryLease<'_>>> {
         let revision:Option<String>=sqlx::query_scalar("SELECT b.task_revision FROM task_memory_sources b JOIN tasks t ON t.id=b.task_id WHERE b.task_id=? AND b.task_revision=json_extract(t.data,'$.revision')").bind(task_id).fetch_optional(&self.pool).await?;
         let Some(revision) = revision else {
-            return Ok(None);
+            return self.lease_retained_task_data(Some(task_id)).await;
         };
         let revision = revision
             .parse()
@@ -376,6 +376,10 @@ pub(in crate::store) async fn validate(
     revision: u64,
     now: i64,
 ) -> Result<()> {
+    require(
+        !super::super::task_retention_expired(db, task_id).await?,
+        "task data was retired",
+    )?;
     validate_lineage(db, task_id, revision, now)
         .await
         .map(|_| ())

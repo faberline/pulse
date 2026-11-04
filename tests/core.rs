@@ -799,7 +799,7 @@ async fn cancel_unknown_is_not_reported_stopped_until_evidence_arrives() {
         evidence: "effect finished before cancel".into(),
     };
     assert_eq!(
-        store.record_receipt(&receipt).await.unwrap(),
+        store.record_receipt_at(&receipt, NOW + 6).await.unwrap(),
         ReceiptEffect::Late
     );
     let task = store.task("a").await.unwrap();

@@ -33,7 +33,7 @@ pub async fn step_with(hub: &Hub, provider: Option<&Provider>, time: i64) -> Res
     if !pending.is_empty() {
         // Finish durable ingress (including cancellation) before starting more work.
         for event in pending {
-            hub.core.route(&event).await?;
+            hub.core.route_at(&event, time).await?;
             hub.notify_change();
         }
         return Ok(true);

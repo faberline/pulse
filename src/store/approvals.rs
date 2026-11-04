@@ -57,6 +57,12 @@ impl Store {
         .await
     }
     pub async fn operation_request(&self, request_id: &str) -> Result<OperationRequest> {
+        let task: String = sqlx::query_scalar("SELECT task_id FROM operation_requests WHERE id=?")
+            .bind(request_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| Error::Missing("operation request".into()))?;
+        let _retention = self.lease_retained_task_data(Some(&task)).await?;
         let mut db = self.pool.acquire().await?;
         request(&mut db, request_id).await
     }

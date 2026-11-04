@@ -10,11 +10,12 @@ use sqlx::{
 use std::{collections::BTreeMap, path::Path, time::Duration};
 
 const TASK_LIMIT: usize = 100;
+const TASK_HISTORY_LIMIT: i64 = 10_000;
 const OUTBOX_LIMIT: i64 = 1_000;
 const DAY_LIMIT: i64 = 1_000_000;
 const TASK_BUDGET: i64 = 250_000;
 const DEADLINE_MS: i64 = 15 * 60 * 1_000;
-const SCHEMA: i64 = 18;
+const SCHEMA: i64 = 19;
 
 mod approvals;
 mod database_access;
@@ -98,6 +99,7 @@ impl Store {
     }
 
     pub async fn list_tasks(&self, limit: u32) -> Result<Vec<Task>> {
+        let _retention = self.lease_retained_task_data(None).await?;
         require((1..=100).contains(&limit), "task page must be 1..100")?;
         let rows: Vec<String> = sqlx::query_scalar(
             "SELECT data FROM tasks ORDER BY json_extract(data,'$.created_at') DESC,id LIMIT ?",
@@ -187,7 +189,22 @@ impl Store {
         receipt_id: &str,
         unknown: bool,
     ) -> Result<()> {
+        Self::device_observation_in_at(db, id, revision, receipt_id, unknown, observed_time()?)
+            .await
+    }
+    pub async fn device_observation_in_at(
+        db: &mut SqliteConnection,
+        id: &str,
+        revision: u64,
+        receipt_id: &str,
+        unknown: bool,
+        now: i64,
+    ) -> Result<()> {
+        if task_retention_expired(db, id).await? {
+            return Ok(());
+        }
         let mut task: Task = load(db, "tasks", id).await?;
+        let was_terminal = task.state.terminal();
         let evidence = format!("device:{receipt_id}");
         if !task.evidence.contains(&evidence) {
             task.evidence.push(evidence);
@@ -220,7 +237,11 @@ impl Store {
                 approvals::invalidate(db, id, "local_result_changed_run").await?;
             }
         }
-        put(db, "tasks", id, &task).await
+        put(db, "tasks", id, &task).await?;
+        if !was_terminal {
+            Self::record_task_terminal_in(db, id, now).await?;
+        }
+        Ok(())
     }
 
     /// Durable receipt only. Routing is a separate, replayable transaction.
@@ -248,6 +269,11 @@ impl Store {
                 .await?
         {
             let id: String = row.get("id");
+            let retired: i64 = sqlx::query_scalar("SELECT count(*) FROM settings WHERE key=?")
+                .bind(format!("retention_erased_event:{id}"))
+                .fetch_one(&mut *tx)
+                .await?;
+            require(retired == 0, "source data was retired")?;
             if row.get::<String, _>("digest") != digest {
                 sqlx::query("INSERT INTO conflicts VALUES(?,?,?)")
                     .bind(&id)
@@ -279,6 +305,19 @@ impl Store {
 
     /// Commands must be part of the persisted source payload, not a second proposal.
     pub async fn route(&self, event_id: &str) -> Result<Outcome> {
+        self.route_with_clock(event_id, None).await
+    }
+    /// Preserve the source clock for decisions/deadlines; use the trusted
+    /// processing clock for a terminal transition after delayed routing.
+    pub async fn route_at(&self, event_id: &str, now: i64) -> Result<Outcome> {
+        require(now >= 0, "invalid routing clock")?;
+        self.route_with_clock(event_id, Some(now)).await
+    }
+    async fn route_with_clock(
+        &self,
+        event_id: &str,
+        processing_at: Option<i64>,
+    ) -> Result<Outcome> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query("SELECT origin,payload,received_at,outcome FROM events WHERE id=?")
             .bind(event_id)
@@ -291,12 +330,13 @@ impl Store {
         let payload: Value = serde_json::from_str(&row.get::<String, _>("payload"))?;
         let origin: String = row.get("origin");
         let now: i64 = row.get("received_at");
+        let terminal_at = processing_at.unwrap_or(now).max(now);
         let commands = serde_json::from_value::<Vec<Command>>(
             payload.get("commands").cloned().unwrap_or(json!([])),
         );
         sqlx::query("SAVEPOINT routing").execute(&mut *tx).await?;
         let result = match commands {
-            Ok(commands) => apply(&mut tx, event_id, &origin, commands, now).await,
+            Ok(commands) => apply(&mut tx, event_id, &origin, commands, now, terminal_at).await,
             Err(_) => Err(Error::Rejected("invalid commands".into())),
         };
         let outcome = match result {
@@ -321,6 +361,7 @@ impl Store {
         .await?;
         tx.commit().await?;
         self.wake_schedules();
+        self.wake_task_retention();
         Ok(outcome)
     }
 
@@ -335,12 +376,14 @@ impl Store {
     }
 
     pub async fn task(&self, id: &str) -> Result<Task> {
+        let _retention = self.lease_retained_task_data(Some(id)).await?;
         let mut db = self.pool.acquire().await?;
         load(&mut db, "tasks", id).await
     }
 
     /// Durable tool observations, including failures and late results, for context recovery.
     pub async fn receipts(&self, task_id: &str) -> Result<Vec<Receipt>> {
+        let _retention = self.lease_retained_task_data(Some(task_id)).await?;
         let rows:Vec<String>=sqlx::query_scalar("SELECT receipts.data FROM receipts JOIN operations ON operations.id=receipts.operation_id WHERE json_extract(operations.data,'$.token.task_id')=? ORDER BY operations.id").bind(task_id).fetch_all(&self.pool).await?;
         rows.into_iter()
             .map(|s| serde_json::from_str(&s).map_err(Error::from))
@@ -609,6 +652,7 @@ impl Store {
         task.evidence.push(evidence.into());
         approvals::invalidate(&mut tx, &task.id, "task_finished").await?;
         put(&mut tx, "tasks", &task.id, &task).await?;
+        Self::record_task_terminal_in(&mut tx, &task.id, now).await?;
         notify(
             &mut tx,
             &format!("terminal:{}:{}", task.id, task.revision),
@@ -616,6 +660,7 @@ impl Store {
         )
         .await?;
         tx.commit().await?;
+        self.wake_task_retention();
         Ok(())
     }
 
@@ -781,21 +826,23 @@ impl Store {
             "settlement requires usage evidence",
         )?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let row = sqlx::query("SELECT state,charged,evidence FROM budget WHERE call_id=?")
+        let row = sqlx::query("SELECT task_id,state,charged,evidence FROM budget WHERE call_id=?")
             .bind(call_id)
             .fetch_optional(&mut *tx)
             .await?
             .ok_or_else(|| Error::Missing("call".into()))?;
+        let retired = task_retention_expired(&mut tx, &row.get::<String, _>("task_id")).await?;
         if row.get::<String, _>("state") == "settled" {
             require(
                 row.get::<i64, _>("charged") == actual_micro_usd
-                    && row.get::<Option<String>, _>("evidence").as_deref() == Some(evidence),
+                    && (retired
+                        || row.get::<Option<String>, _>("evidence").as_deref() == Some(evidence)),
                 "settlement conflict",
             )?;
         } else {
             sqlx::query("UPDATE budget SET state='settled',charged=?,evidence=? WHERE call_id=?")
                 .bind(actual_micro_usd)
-                .bind(evidence)
+                .bind((!retired).then_some(evidence))
                 .bind(call_id)
                 .execute(&mut *tx)
                 .await?;
@@ -854,10 +901,14 @@ impl Store {
 
     /// Old tokens may supply evidence for their original operation, never a new one.
     pub async fn record_receipt(&self, receipt: &Receipt) -> Result<ReceiptEffect> {
+        self.record_receipt_at(receipt, observed_time()?).await
+    }
+    pub async fn record_receipt_at(&self, receipt: &Receipt, now: i64) -> Result<ReceiptEffect> {
         require(!receipt.evidence.is_empty(), "receipt needs evidence")?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let effect = receipt_in(&mut tx, receipt).await?;
+        let effect = receipt_in(&mut tx, receipt, now).await?;
         tx.commit().await?;
+        self.wake_task_retention();
         Ok(effect)
     }
     /// Adapter receipt and transport acknowledgement can share one transaction.
@@ -865,7 +916,14 @@ impl Store {
         db: &mut SqliteConnection,
         receipt: &Receipt,
     ) -> Result<ReceiptEffect> {
-        receipt_in(db, receipt).await
+        receipt_in(db, receipt, observed_time()?).await
+    }
+    pub async fn record_receipt_in_at(
+        db: &mut SqliteConnection,
+        receipt: &Receipt,
+        now: i64,
+    ) -> Result<ReceiptEffect> {
+        receipt_in(db, receipt, now).await
     }
     /// A trusted local adapter rejected this grant before issuing any effect command.
     pub async fn browser_not_executed_in(
@@ -918,6 +976,14 @@ impl Store {
         resolution: Resolution,
         now: i64,
     ) -> Result<()> {
+        let task_id: String = sqlx::query_scalar(
+            "SELECT json_extract(data,'$.token.task_id') FROM operations WHERE id=?",
+        )
+        .bind(operation_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| Error::Missing(format!("operations:{operation_id}")))?;
+        let _retention = self.lease_retained_task_data(Some(&task_id)).await?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut op: Operation = load(&mut tx, "operations", operation_id).await?;
         require(
@@ -928,18 +994,40 @@ impl Store {
             "operation already reconciled",
         )?;
         let mut task: Task = load(&mut tx, "tasks", &op.token.task_id).await?;
+        let retired = task_retention_expired(&mut tx, &task.id).await?;
+        let was_terminal = task.state.terminal();
         match resolution {
             Resolution::Executed(receipt) => {
                 require(
                     receipt.operation_id == operation_id,
                     "wrong operation receipt",
                 )?;
-                receipt_in(&mut tx, &receipt).await?;
+                if retired {
+                    require(
+                        receipt.token == op.token && !receipt.evidence.is_empty(),
+                        "invalid retired operation proof",
+                    )?;
+                    let mut opaque = receipt.clone();
+                    opaque.evidence.clear();
+                    sqlx::query("INSERT INTO receipts(operation_id,digest,data) VALUES(?,'',?)")
+                        .bind(operation_id)
+                        .bind(serde_json::to_string(&opaque)?)
+                        .execute(&mut *tx)
+                        .await?;
+                    op.state = OperationState::Completed;
+                    put(&mut tx, "operations", &op.id, &op).await?;
+                } else {
+                    receipt_in(&mut tx, &receipt, now).await?;
+                }
                 // A verified conclusion may recover an old epoch, not complete a new goal.
                 task = load(&mut tx, "tasks", &task.id).await?;
                 if !task.state.terminal() {
                     if task.cancel_requested {
-                        task.state = State::Cancelled;
+                        task.state = if unresolved(&mut tx, &task.id).await? {
+                            State::OutcomeUnknown
+                        } else {
+                            State::Cancelled
+                        };
                     } else if task.revision == op.token.revision {
                         task.state = State::Queued;
                     } else {
@@ -953,7 +1041,9 @@ impl Store {
                 require(!evidence.is_empty(), "reconciliation requires proof")?;
                 op.state = OperationState::NotExecuted;
                 put(&mut tx, "operations", &op.id, &op).await?;
-                task.evidence.push(evidence);
+                if !retired {
+                    task.evidence.push(evidence);
+                }
                 if !task.state.terminal() {
                     task.state = if task.cancel_requested {
                         State::Cancelled
@@ -974,10 +1064,20 @@ impl Store {
                 if !task.state.terminal() {
                     task.state = State::Blocked;
                     task.reason = Some("operation_ambiguous".into());
-                    task.evidence.push(evidence);
+                    if !retired {
+                        task.evidence.push(evidence);
+                    }
                     put(&mut tx, "tasks", &task.id, &task).await?;
                 }
             }
+        }
+        if retired {
+            task.reason = Some("task_retention_expired".into());
+            task.evidence.clear();
+            put(&mut tx, "tasks", &task.id, &task).await?;
+        }
+        if !was_terminal {
+            Self::record_task_terminal_in(&mut tx, &task.id, now).await?;
         }
         notify(
             &mut tx,
@@ -990,6 +1090,7 @@ impl Store {
     }
 
     pub async fn pending_operations(&self, task_id: &str) -> Result<Vec<Operation>> {
+        let _retention = self.lease_retained_task_data(Some(task_id)).await?;
         let rows:Vec<String>=sqlx::query_scalar("SELECT data FROM operations WHERE json_extract(data,'$.token.task_id')=? AND json_extract(data,'$.state') IN ('unknown','ambiguous') ORDER BY id").bind(task_id).fetch_all(&self.pool).await?;
         rows.into_iter()
             .map(|s| serde_json::from_str(&s).map_err(Error::from))
@@ -997,6 +1098,7 @@ impl Store {
     }
 
     pub async fn outbox(&self, limit: u32) -> Result<Vec<OutboxItem>> {
+        let _retention = self.lease_retained_task_data(None).await?;
         require((1..=100).contains(&limit), "outbox page must be 1..100")?;
         let rows=sqlx::query("SELECT sequence,dedupe_key,payload FROM outbox WHERE acknowledged=0 ORDER BY sequence LIMIT ?").bind(limit).fetch_all(&self.pool).await?;
         rows.into_iter()
@@ -1058,6 +1160,7 @@ async fn apply(
     origin: &str,
     commands: Vec<Command>,
     now: i64,
+    terminal_at: i64,
 ) -> Result<Outcome> {
     require(commands.len() <= 100, "too many commands")?;
     require(
@@ -1126,13 +1229,20 @@ async fn apply(
                 dependencies,
             } => {
                 require(
-                    !id.is_empty() && !goal.trim().is_empty() && crate::read_scope(&scope),
+                    !id.is_empty()
+                        && id.len() <= 128
+                        && !goal.trim().is_empty()
+                        && crate::read_scope(&scope),
                     "invalid task goal/scope/ID",
                 )?;
                 let existing: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE id=?")
                     .bind(&id)
                     .fetch_one(&mut *db)
                     .await?;
+                require(
+                    task_history_room(db).await?,
+                    "task history capacity; retirement space unavailable",
+                )?;
                 require(existing == 0, "task ID already exists")?;
                 require(
                     !retired_task(db, &id).await?,
@@ -1249,6 +1359,7 @@ async fn apply(
                     task.state == State::Cancelled
                 ));
                 put(db, "tasks", &id, &task).await?;
+                Store::record_task_terminal_in(db, &id, terminal_at).await?;
                 id
             }
             Command::ReconcileRead {
@@ -1366,13 +1477,28 @@ async fn current(db: &mut SqliteConnection, token: &Token, now: i64) -> Result<(
     Ok((task, run))
 }
 
-async fn receipt_in(db: &mut SqliteConnection, receipt: &Receipt) -> Result<ReceiptEffect> {
+fn observed_time() -> Result<i64> {
+    let value = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| Error::Rejected("invalid task observation clock".into()))?;
+    i64::try_from(value.as_millis())
+        .map_err(|_| Error::Rejected("invalid task observation clock".into()))
+}
+
+async fn receipt_in(
+    db: &mut SqliteConnection,
+    receipt: &Receipt,
+    now: i64,
+) -> Result<ReceiptEffect> {
     require(!receipt.evidence.is_empty(), "empty receipt evidence")?;
     let mut operation: Operation = load(db, "operations", &receipt.operation_id).await?;
     require(
         operation.token == receipt.token,
         "receipt token does not match operation",
     )?;
+    if task_retention_expired(db, &receipt.token.task_id).await? {
+        return Ok(ReceiptEffect::Late);
+    }
     let hash = digest(receipt)?;
     if let Some(existing) =
         sqlx::query_scalar::<_, String>("SELECT digest FROM receipts WHERE operation_id=?")
@@ -1399,6 +1525,7 @@ async fn receipt_in(db: &mut SqliteConnection, receipt: &Receipt) -> Result<Rece
     operation.state = OperationState::Completed;
     put(db, "operations", &operation.id, &operation).await?;
     let mut task: Task = load(db, "tasks", &receipt.token.task_id).await?;
+    let was_terminal = task.state.terminal();
     task.evidence.push(receipt.evidence.clone());
     let run: Run = load(db, "runs", &receipt.token.run_id).await?;
     let applicable = !retired_task(db, &task.id).await?
@@ -1420,6 +1547,9 @@ async fn receipt_in(db: &mut SqliteConnection, receipt: &Receipt) -> Result<Rece
         task.reason = Some("late_operation_result_requires_review".into());
     }
     put(db, "tasks", &task.id, &task).await?;
+    if !was_terminal {
+        Store::record_task_terminal_in(db, &task.id, now).await?;
+    }
     notify(
         db,
         &format!("receipt:{}", operation.id),
@@ -1543,12 +1673,28 @@ async fn unresolved(db: &mut SqliteConnection, task_id: &str) -> Result<bool> {
 
 async fn retired_task(db: &mut SqliteConnection, id: &str) -> Result<bool> {
     Ok(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM settings WHERE key=?")
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM settings WHERE key IN (?,?)")
             .bind(format!("restore_retired_task:{id}"))
+            .bind(format!("retention_retired_task:{id}"))
             .fetch_one(db)
             .await?
             != 0,
     )
+}
+
+async fn task_retention_expired(db: &mut SqliteConnection, id: &str) -> Result<bool> {
+    Ok(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM settings WHERE key=?")
+            .bind(format!("retention_retired_task:{id}"))
+            .fetch_one(db)
+            .await?
+            != 0,
+    )
+}
+
+async fn task_history_room(db: &mut SqliteConnection) -> Result<bool> {
+    let count:i64=sqlx::query_scalar("SELECT (SELECT count(*) FROM tasks)+(SELECT count(*) FROM settings s WHERE s.key GLOB 'retention_retired_task:*' AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=substr(s.key,length('retention_retired_task:')+1)))").fetch_one(db).await?;
+    Ok(count < TASK_HISTORY_LIMIT)
 }
 
 async fn tasks(db: &mut SqliteConnection) -> Result<Vec<Task>> {

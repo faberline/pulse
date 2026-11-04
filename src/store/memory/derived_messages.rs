@@ -79,6 +79,22 @@ impl Store {
             )?;
         }
         super::task_sources::validate(db, task_id, revision, now).await?;
+        let retained_owner: Option<String> =
+            sqlx::query_scalar("SELECT task_id FROM task_retention_messages WHERE id=?")
+                .bind(message)
+                .fetch_optional(&mut *db)
+                .await?;
+        require(
+            retained_owner
+                .as_deref()
+                .is_none_or(|owner| owner == task_id),
+            "task message ownership conflict",
+        )?;
+        sqlx::query("INSERT OR IGNORE INTO task_retention_messages(id,task_id) VALUES(?,?)")
+            .bind(message)
+            .bind(task_id)
+            .execute(&mut *db)
+            .await?;
         let bound: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM task_memory_sources WHERE task_id=? AND task_revision=?",
         )

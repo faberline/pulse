@@ -719,7 +719,7 @@ async fn dispatched_effects_stay_unknown_on_cancel_until_the_original_receipt_ar
         evidence: "counted once".into(),
     };
     assert_eq!(
-        store.record_receipt(&receipt).await.unwrap(),
+        store.record_receipt_at(&receipt, NOW + 7).await.unwrap(),
         ReceiptEffect::Late
     );
     assert_eq!(store.task("task").await.unwrap().state, State::Cancelled);
@@ -963,6 +963,7 @@ async fn schema_three_fixture_upgrades_without_losing_existing_task_data() {
     .await
     .unwrap();
     // Reconstruct the previous empty approval schema in this disposable fixture only.
+    db.execute("DROP TRIGGER task_retention_reopened; DROP TABLE task_retention_messages; DROP TABLE task_retention; DELETE FROM _sqlx_migrations WHERE version=19;").await.unwrap();
     db.execute("DROP TABLE link_worker_cleanup; ALTER TABLE link_device DROP COLUMN worker_cleanup; DROP TABLE link_worker_fences; DROP TABLE link_erased_work; ALTER TABLE link_device DROP COLUMN worker_erasure; DROP TABLE memory_erased_reads; DROP TABLE memory_derived_messages; DROP TABLE link_erased_frames; ALTER TABLE link_device DROP COLUMN projection_erasure; DROP TABLE task_memory_sources; DROP TABLE local_schedule_delivery; ALTER TABLE link_device DROP COLUMN schedule_notices; DROP TABLE schedules; DROP TABLE local_schedule_notices; DROP TABLE local_schedule_inputs; DROP TABLE link_pair_claims; DROP TABLE link_pair_tokens; DROP INDEX link_credential_digest; DROP TABLE local_memory_access; DROP TABLE local_memory_queue; DROP TABLE local_memory_cache; DROP TABLE memories; DROP TABLE memory_events; DELETE FROM settings WHERE key LIKE 'memory_%'; DROP TABLE link_artifact_parts; DROP TABLE link_artifacts; DROP TABLE operation_requests; DELETE FROM _sqlx_migrations WHERE version IN (4,5,6,7,8,9,10,11,12,13,14,15,16,17,18); PRAGMA user_version=3;").await.unwrap();
     db.close().await.unwrap();
     let store = Store::open(dir.path().join("db"), "owner").await.unwrap();
@@ -970,7 +971,7 @@ async fn schema_three_fixture_upgrades_without_losing_existing_task_data() {
         .fetch_one(&store.application_pool())
         .await
         .unwrap();
-    assert_eq!(schema, 18);
+    assert_eq!(schema, 19);
     assert_eq!(
         serde_json::to_value(store.task("task").await.unwrap()).unwrap(),
         before

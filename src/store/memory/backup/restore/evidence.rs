@@ -295,7 +295,7 @@ pub(super) async fn merge(candidate: &Store, source: &Path) -> Result<()> {
         // Both images have already passed migration, integrity, foreign key,
         // current restriction and work-fence checks. Only known app tables
         // enter the candidate. Original receipt digests must match above.
-        for table in ["events","conflicts","event_tasks","runs","operation_requests","task_memory_sources","memories","memory_events","link_pairings","link_device","link_pair_tokens","link_pair_claims","link_inbox","link_outbox","link_reads","link_chat","link_artifacts","link_artifact_parts","memory_derived_messages","memory_erased_reads","link_erased_frames","link_erased_work","link_worker_fences","link_worker_cleanup","schedules","budget"] {
+        for table in ["events","conflicts","event_tasks","runs","operation_requests","task_memory_sources","memories","memory_events","link_pairings","link_device","link_pair_tokens","link_pair_claims","link_inbox","link_outbox","link_reads","link_chat","link_artifacts","link_artifact_parts","memory_derived_messages","memory_erased_reads","link_erased_frames","link_erased_work","link_worker_fences","link_worker_cleanup","schedules","budget","task_retention","task_retention_messages"] {
             let columns: Vec<(String,i64)> = sqlx::query_as("SELECT name,pk FROM pragma_table_xinfo(?) WHERE hidden=0 ORDER BY cid").bind(table).fetch_all(&mut *tx).await?;
             require(!columns.is_empty() && columns.len() <= 32 && columns.iter().all(|(name,_)| name.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')), "unexpected recovery table columns")?;
             let names = columns.iter().map(|(name,_)| format!("\"{name}\"")).collect::<Vec<_>>().join(",");

@@ -439,6 +439,7 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         }
         let _lifecycle = self.memory_lifecycle.lock().await;
         self.ensure_worker_access().await?;
+        self.flush_task_retention().await?;
         if let ServerPayload::Snapshot { messages, .. }
         | ServerPayload::DerivedSnapshot { messages, .. } = &envelope.payload
         {
@@ -603,6 +604,20 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                         .execute(&mut *tx)
                         .await?;
                 }
+                for task in tasks.iter().filter(|task| {
+                    task.reason.as_deref() == Some("task_retention_expired")
+                        && task.cancel_requested
+                        && task.active_run.is_none()
+                }) {
+                    ensure(
+                        self.role == ClientRole::Chat,
+                        "task retention projection requires chat",
+                    )?;
+                    sqlx::query("UPDATE local_meta SET value=json_object('erased',json('true'),'file',json_extract(value,'$.file'),'writing',coalesce(json_extract(value,'$.writing'),0)) WHERE key GLOB 'image:*' AND json_extract(value,'$.artifact.task_id')=? AND coalesce(json_extract(value,'$.erased'),0)=0")
+                        .bind(&task.id).execute(&mut *tx).await?;
+                    sqlx::query("INSERT INTO local_meta(key,value) VALUES('task_retention_cleanup_pending','true') ON CONFLICT(key) DO UPDATE SET value='true'")
+                        .execute(&mut *tx).await?;
+                }
             }
             ServerPayload::Read {
                 operation_id,
@@ -680,7 +695,22 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        self.flush_task_retention().await?;
         Ok(true)
+    }
+    async fn flush_task_retention(&self) -> Result<()> {
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM local_meta WHERE key='task_retention_cleanup_pending'",
+        )
+        .fetch_one(&self.db)
+        .await?;
+        if pending != 0 {
+            self.flush_memory().await?;
+            sqlx::query("DELETE FROM local_meta WHERE key='task_retention_cleanup_pending'")
+                .execute(&self.db)
+                .await?;
+        }
+        Ok(())
     }
     pub async fn take_work(&self) -> Result<Option<Envelope<ServerPayload>>> {
         let _lifecycle = self.memory_lifecycle.lock().await;

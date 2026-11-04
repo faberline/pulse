@@ -195,6 +195,7 @@ impl Store {
                             .filter(|t| !t.state.terminal())
                             .count()
                             >= TASK_LIMIT
+                            || !task_history_room(&mut tx).await?
                         {
                             return Ok(ScheduleTick {
                                 fired: false,
@@ -216,6 +217,7 @@ impl Store {
                                     dependencies: vec![],
                                 }],
                                 due,
+                                now,
                             )
                             .await?;
                             message = "排程工作已建立，將依原範圍、期限與費用上限處理。".into();

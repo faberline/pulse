@@ -255,6 +255,7 @@ async fn readable_source_identity_is_checked_without_migration_or_source_replace
         sqlx::SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&database))
             .await
             .unwrap();
+    sqlx::raw_sql("DROP TRIGGER task_retention_reopened; DROP TABLE task_retention_messages; DROP TABLE task_retention; DELETE FROM _sqlx_migrations WHERE version=19;").execute(&mut old).await.unwrap();
     sqlx::raw_sql("DROP TABLE link_worker_cleanup; ALTER TABLE link_device DROP COLUMN worker_cleanup; DELETE FROM _sqlx_migrations WHERE version=18; PRAGMA user_version=17;")
         .execute(&mut old).await.unwrap();
     old.close().await.unwrap();

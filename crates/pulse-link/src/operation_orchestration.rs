@@ -311,6 +311,7 @@ impl Hub {
         operation: &ReadOp,
         before: &Task,
         outcome: &ReadOutcome,
+        time: i64,
     ) -> Result<bool> {
         let grant = match operation {
             ReadOp::BrowserAction {
@@ -336,7 +337,7 @@ impl Hub {
         match outcome {
             ReadOutcome::Unknown { .. } => Ok(false),
             ReadOutcome::Completed { .. } => {
-                Store::record_receipt_in(
+                Store::record_receipt_in_at(
                     db,
                     &pulse_core::Receipt {
                         operation_id: operation_id.into(),
@@ -344,6 +345,7 @@ impl Hub {
                         success: true,
                         evidence: format!("{kind}-action:{operation_id}:{}", hash(outcome)?),
                     },
+                    time,
                 )
                 .await?;
                 Ok(true)

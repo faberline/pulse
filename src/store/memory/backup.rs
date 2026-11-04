@@ -76,14 +76,23 @@ impl Store {
             .memory_guard
             .read()?
             .ok_or_else(|| Error::Rejected("memory restrictions missing".into()))?;
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        reconcile(&mut tx, &manifest).await?;
-        self.expire_memory_in(&mut tx, &mut manifest, now).await?;
-        let next_expiry: Option<i64> = sqlx::query_scalar("SELECT min(expires_at) FROM memories")
-            .fetch_one(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        self.checkpoint_memory_redaction().await?;
+        let (next_task_expiry, next_expiry) = loop {
+            let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+            reconcile(&mut tx, &manifest).await?;
+            self.expire_memory_in(&mut tx, &mut manifest, now).await?;
+            let expired = self.expire_tasks_in(&mut tx, &mut manifest, now).await?;
+            let next_task_expiry = Self::next_task_expiry_in(&mut tx).await?;
+            let next_expiry: Option<i64> =
+                sqlx::query_scalar("SELECT min(expires_at) FROM memories")
+                    .fetch_one(&mut *tx)
+                    .await?;
+            tx.commit().await?;
+            super::retention::crash_boundary(self, "retention-committed");
+            self.checkpoint_memory_redaction().await?;
+            if expired < 64 {
+                break (next_task_expiry, next_expiry);
+            }
+        };
         let key = self.backup_secret(&manifest.keeper, true).await?;
         let directory = self.backup_directory()?;
         let last: Option<String> =
@@ -192,6 +201,7 @@ impl Store {
             backup,
             next_at: ((now / DAY + 1) * DAY)
                 .min(next_expiry.unwrap_or(i64::MAX))
+                .min(next_task_expiry.unwrap_or(i64::MAX))
                 .min(next_removal),
             removed_backups: removed,
         })

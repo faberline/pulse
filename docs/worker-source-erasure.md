@@ -5,7 +5,7 @@ Swift 只處理介面與輸入。
 來源核對、清除、傳輸與取消均由 Rust 處理。
 其他介面可以使用同一套核心。
 
-資料庫 schema 為 18。
+資料庫 schema 為 19。
 remote workflow 為 `pulse-remote-22`。
 policy 為 `approved-effects-memory-fences-9`。
 

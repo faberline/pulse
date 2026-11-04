@@ -8,6 +8,7 @@ mod identity_tests;
 mod image_tests;
 #[path = "projection_tests.rs"]
 mod projection_tests;
+mod retention;
 #[path = "topic_tests.rs"]
 mod topic_tests;
 #[path = "withdrawal_tests.rs"]

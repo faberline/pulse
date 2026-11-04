@@ -21,6 +21,7 @@ mod copy;
 pub(super) mod derived_messages;
 mod derived_results;
 mod peer_restore;
+mod retention;
 mod revocations;
 pub(super) mod task_sources;
 mod withdrawals;
@@ -54,6 +55,8 @@ struct Restrictions {
     restore: Option<RestoreFence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     peer_restore: Option<peer_restore::PeerRestore>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    expired_tasks: BTreeMap<String, retention::ExpiredTask>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -232,6 +235,7 @@ impl MemoryGuard {
                     .as_ref()
                     .is_none_or(|c| value.format >= 3 && c.valid())
                 && withdrawals::valid(&value)
+                && retention::valid(&value.expired_tasks)
                 && value.removed.iter().all(|(id, revision)| {
                     uuid::Uuid::parse_str(id).is_ok()
                         && *revision > 0
@@ -311,6 +315,7 @@ impl Store {
                             worker: None,
                             restore: None,
                             peer_restore: None,
+                            expired_tasks: BTreeMap::new(),
                         };
                         self.memory_guard.write(&manifest)?;
                         manifest
@@ -618,6 +623,7 @@ async fn reconcile(db: &mut SqliteConnection, manifest: &Restrictions) -> Result
             .fetch_one(&mut *db)
             .await?;
     require(keeper == manifest.keeper, "wrong memory restriction keeper")?;
+    retention::reconcile(db, &manifest.expired_tasks).await?;
     let epoch: String =
         sqlx::query_scalar("SELECT value FROM settings WHERE key='memory_redaction_epoch'")
             .fetch_one(&mut *db)

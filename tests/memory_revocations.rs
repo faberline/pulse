@@ -359,6 +359,7 @@ async fn legacy_manifest(dir: &std::path::Path) {
         SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(dir.join("db")))
             .await
             .unwrap();
+    db.execute("DROP TRIGGER task_retention_reopened; DROP TABLE task_retention_messages; DROP TABLE task_retention; DELETE FROM _sqlx_migrations WHERE version=19;").await.unwrap();
     db.execute("DROP TABLE link_worker_cleanup; ALTER TABLE link_device DROP COLUMN worker_cleanup; DROP TABLE link_worker_fences; DROP TABLE link_erased_work; ALTER TABLE link_device DROP COLUMN worker_erasure; DROP TABLE memory_erased_reads; DROP TABLE memory_derived_messages; DROP TABLE link_erased_frames; ALTER TABLE link_device DROP COLUMN projection_erasure; DROP TABLE task_memory_sources; DROP TABLE local_schedule_delivery; ALTER TABLE link_device DROP COLUMN schedule_notices; DROP TABLE schedules; DROP TABLE local_schedule_notices; DROP TABLE local_schedule_inputs; DROP TABLE link_pair_claims; DROP TABLE link_pair_tokens; DROP INDEX link_credential_digest; DROP TABLE local_memory_access; DROP INDEX memory_event_uuid; DROP INDEX memory_live_uuid; DROP INDEX local_memory_uuid; ALTER TABLE memory_events DROP COLUMN source_uuid; ALTER TABLE memories DROP COLUMN source_uuid; ALTER TABLE local_memory_queue DROP COLUMN source_uuid; DELETE FROM _sqlx_migrations WHERE version IN (8,9,10,11,12,13,14,15,16,17,18); PRAGMA user_version=7;").await.unwrap();
     db.close().await.unwrap();
     let path = dir.join("db.memory-restrictions.json");
@@ -396,7 +397,7 @@ async fn schema_seven_upgrade_captures_deleted_sources_before_a_pre_source_resto
         .fetch_one(&store.application_pool())
         .await
         .unwrap();
-    assert_eq!(schema, 18);
+    assert_eq!(schema, 19);
     store.close().await;
     fs::copy(dir.path().join("snapshot"), dir.path().join("db")).unwrap();
     let store = Store::open(dir.path().join("db"), "owner").await.unwrap();

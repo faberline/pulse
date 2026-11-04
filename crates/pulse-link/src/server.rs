@@ -395,7 +395,15 @@ impl Hub {
         // Never wait for the keeper while holding the single SQL writer.
         let time = time.max(now());
         let (_source, covered, mut retry_projection) =
-            self.projection_lease(device, epoch, time).await?;
+            match self.projection_lease(device, epoch, time).await {
+                Ok(lease) => lease,
+                Err(crate::Error::Core(pulse_core::Error::Busy)) => {
+                    self.projection_retry
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
         // Projection reads and the domain-notification handoff share one committed view.
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
         let time = time.max(now());
@@ -472,7 +480,11 @@ impl Hub {
                 task.evidence.clear();
                 if !matches!(
                     task.reason.as_deref(),
-                    None | Some("memory_source_withdrawn" | "memory_source_unavailable")
+                    None | Some(
+                        "memory_source_withdrawn"
+                            | "memory_source_unavailable"
+                            | "task_retention_expired"
+                    )
                 ) {
                     task.reason = Some("memory_context_review".into());
                 }
@@ -485,11 +497,16 @@ impl Hub {
         for row in rows {
             let id: String = row.get("id");
             let redacted: i64 = row.get("redacted");
-            if redacted == 1 {
+            if redacted != 0 {
                 messages.push(ChatMessage {
                     memory_sources: Some(vec![]),
                     id,
-                    body: "記憶來源已移除，回覆內容已清除。".into(),
+                    body: if redacted == 2 {
+                        "內容已到期並清除。"
+                    } else {
+                        "記憶來源已移除，回覆內容已清除。"
+                    }
+                    .into(),
                     approval: None,
                     artifact: None,
                     artifact_operation_id: None,
@@ -1139,7 +1156,7 @@ impl Hub {
                         time,
                     )
                     .await?;
-                let outcome = self.core.route(&event.event_id).await?;
+                let outcome = self.core.route_at(&event.event_id, time).await?;
                 if !replay
                     && matches!(
                         action,
@@ -1174,6 +1191,9 @@ impl Hub {
                             "請先核對已保存的工具證據，再要求繼續。"
                         }
                         "no local outcome to review" => "沒有待核對的本機結果。任務保持原狀。",
+                        "task history capacity; retirement space unavailable" => {
+                            "工作歷史容量已滿，目前不能新增工作。仍可查詢與取消。"
+                        }
                         _ => "要求未執行。請查詢目前任務狀態，核對對象與限制。",
                     };
                     self.chat(source_id, &format!("已保存訊息：{goal}"), time)
@@ -1442,7 +1462,7 @@ impl Hub {
                     ensure(old == encoded, "result conflict")?;
                 }
                 let source=self.core.ingest(Origin::Tool,&format!("device-result:{device}"),operation_id,json!({"commands":[Command::Query{ids:vec![task_id.clone()]}],"result":outcome}),time).await?;
-                self.core.route(&source.event_id).await?;
+                self.core.route_at(&source.event_id, time).await?;
                 let state = match outcome {
                     ReadOutcome::Unknown { .. } => "unknown",
                     ReadOutcome::Completed { .. } => "completed",
@@ -1464,15 +1484,22 @@ impl Hub {
                 .await?
                 .rows_affected();
                 if changed == 1 {
-                    let continue_run =
-                        Self::action_receipt(&mut tx, operation_id, &operation, &before, outcome)
-                            .await?;
-                    Store::device_observation_in(
+                    let continue_run = Self::action_receipt(
+                        &mut tx,
+                        operation_id,
+                        &operation,
+                        &before,
+                        outcome,
+                        time,
+                    )
+                    .await?;
+                    Store::device_observation_in_at(
                         &mut tx,
                         task_id,
                         number(revision)?,
                         operation_id,
                         matches!(outcome, ReadOutcome::Unknown { .. }),
+                        time,
                     )
                     .await?;
                     if continue_run {
@@ -1803,14 +1830,14 @@ async fn session(hub: Arc<Hub>, device: String, mut socket: WebSocket) {
                                     let permitted=hub.permitted_current(&envelope,epoch,now()).await?;
                                     send(&mut socket,&ServerWire::Data{envelope,permitted}).await?;
                                 }
-                            } else if let ServerPayload::DerivedSnapshot{sources,..}=&envelope.payload {
-                                match hub.core.lease_projection_sources(sources,now()).await {
-                                    Ok(_lease)=>send(&mut socket,&ServerWire::Data{envelope,permitted:true}).await?,
-                                    Err(pulse_core::Error::Rejected(reason))=>{
-                                        if let Some(header)=hub.erased_projection(&device,&envelope.sequence).await? {send(&mut socket,&ServerWire::ErasedProjection{header}).await?;}
-                                        else{return Err(crate::Error::Rejected(reason));}
+                            } else if matches!(&envelope.payload,ServerPayload::Snapshot{..}|ServerPayload::DerivedSnapshot{..}) {
+                                match hub.projection_delivery(&envelope,now()).await {
+                                    Ok((_lease,erased))=>{
+                                        if let Some(header)=erased {send(&mut socket,&ServerWire::ErasedProjection{header}).await?;}
+                                        else {let permitted=hub.permitted(&envelope,epoch,now()).await?;send(&mut socket,&ServerWire::Data{envelope,permitted}).await?;}
                                     }
-                                    Err(error)=>return Err(error.into()),
+                                    Err(crate::Error::Core(pulse_core::Error::Busy))=>break,
+                                    Err(error)=>return Err(error),
                                 }
                             } else {let permitted=hub.permitted(&envelope,epoch,now()).await?;send(&mut socket,&ServerWire::Data{envelope,permitted}).await?;}
                         }
