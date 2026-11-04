@@ -10,6 +10,8 @@ use serde_json::json;
 const BODY: &str = "WORKER_SOURCE_BODY";
 #[path = "worker_cleanup_tests.rs"]
 mod cleanup;
+#[path = "worker_denial_tests.rs"]
+mod denial;
 struct Fixture {
     _root: tempfile::TempDir,
     hub: Hub,

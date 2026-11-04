@@ -61,6 +61,7 @@ Rust／Swift 邊界、共用本機協定與驗證缺口見 [macOS adapter](macos
 - Rust 已加入地端工作與雙向傳輸的來源清除候選。server 移除 read 要求與操作 intent；地端移除工作、待送結果與圖片分塊，保留原確認識別。來源撤銷也會停止工作 future 並撤銷快取選擇。runtime 檔案、實際程序停止證據、其他 adapter 送出核對、自動規劃的完整來源繼承與正式還原仍待完成；模型記憶保持關閉。見 [地端工作清除](worker-source-erasure.md)。
 - Rust 已接上目前持有的子程序退出核對與 Chrome profile 清理。真正 Chrome 測試涵蓋跨任務隔離與載入中取消；既有批准後單次操作範例也已通過。server 另有綁定原派工的自有 runtime 清除回報候選。舊 PNG、舊 profile、硬退出孤兒程序與完整副本清除仍待完成。見 [程序生命週期候選](owned-process-lifecycle.md) 與 [地端來源清除](worker-source-erasure.md)。
 - 連線身分的明確拒絕已接上地端記憶清除、停送與重新配對限制。認證儲存故障回覆 503，模糊的 401／403 不觸發清除。Core 的目前限制檔另保存副本世代、序號與配對指紋，能擋住舊資料庫重送。Rust 已接上請求前保存候選密鑰、可重送 claim 與重開核對；見 [配對恢復候選](pairing-recovery.md)。格式 4 另保存無正文取消要求與確認，可承受只還原到取消前的本機資料庫；見 [取消恢復候選](memory-withdrawal-recovery.md)。實際 Keychain、關閉副本與正式還原切換仍待完成。
+- local executor 的明確憑證拒絕另已接上格式 7 的外部禁止重送紀錄、本機工作／結果清除及自有 runtime 收尾候選。SQL 失敗、舊 SQLite 還原及停止按鈕不能清除這項限制。未知舊檔、關閉副本、其他副本與正式還原仍未接受；見 [地端來源清除](worker-source-erasure.md)。
 - 原 v0.1–v0.4 issue／PR 仍保留原狀。milestone 名稱已改為純版本號，原 description 與需求完整保留。v0.1 尚有三項開啟的工作，發布判定仍為 HOLD，沒有 RC 或發布接受。
 
 - Rust remote 已加入 provider 送出前與等待期間的任務、來源鏈及費用保留核對候選。取消、修訂、恢復或撤銷後停止本機等待；保留未知費用，不自動重試。受控 HTTP 測試不證明 provider 停止或退款，也不開啟模型記憶。完整 provider 記憶流程及 D06 仍待驗收；見 [任務來源核對](task-memory-sources.md#provider-送出與等待核對)。

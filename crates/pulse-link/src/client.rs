@@ -123,6 +123,9 @@ mod pairing_tests;
 #[cfg(test)]
 #[path = "client/shutdown_tests.rs"]
 mod shutdown_tests;
+#[cfg(test)]
+#[path = "client/worker_denial_tests.rs"]
+mod worker_denial_tests;
 
 #[derive(Clone, Default)]
 struct Lease {
@@ -224,7 +227,12 @@ impl Device {
             },
             None => Ok(()),
         };
-        result.and(cleanup)
+        match (result, cleanup) {
+            (Err(crate::Error::CredentialRejected), Err(error)) => {
+                Err(crate::Error::CredentialCleanup(Box::new(error)))
+            }
+            (result, cleanup) => result.and(cleanup),
+        }
     }
     async fn run_inner(
         &self,
@@ -331,6 +339,12 @@ impl Device {
                 changed.map_err(|_|crate::Error::Rejected("connection state stopped".into()))?;
                 let denied=link_rx.borrow().credential_rejected;
                 if denied {
+                    if self.journal.role==ClientRole::LocalExecutor {
+                        lease_tx.send_replace(Lease::default());
+                        states.send_replace(NativeState{stopped:true,message:"地端身分已失效，正在停止並清除本機工作。".into(),..Default::default()});
+                        self.journal.deny_worker_access().await.map_err(|error|crate::Error::CredentialCleanup(Box::new(error)))?;
+                        return Err(crate::Error::CredentialRejected);
+                    }
                     pairing_failure=None;
                     input_receipt=None;
                     exports.invalidate();

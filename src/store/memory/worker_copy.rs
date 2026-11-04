@@ -9,6 +9,11 @@ pub(super) struct WorkerCopy {
     groups: BTreeMap<String, (String, String)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     runtime: Option<WorkerRuntime>,
+    #[serde(default, skip_serializing_if = "not_denied")]
+    denied: bool,
+}
+fn not_denied(value: &bool) -> bool {
+    !*value
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -19,7 +24,10 @@ struct WorkerRuntime {
 }
 impl WorkerCopy {
     pub(super) fn compatible(&self, format: u8) -> bool {
-        format >= 5 && (self.runtime.is_none() || format >= 6) && self.valid()
+        format >= 5
+            && (self.runtime.is_none() || format >= 6)
+            && (!self.denied || format >= 7)
+            && self.valid()
     }
     pub(super) fn valid(&self) -> bool {
         !self.device.is_empty()
@@ -57,6 +65,27 @@ async fn binding(db: &mut SqliteConnection, device: &str, server: &str) -> Resul
     )
 }
 async fn replay(db: &mut SqliteConnection, copy: &WorkerCopy, opening: bool) -> Result<()> {
+    if copy.denied {
+        // Keep the fence outside SQLite. A restored body cannot be sent again.
+        Store::prune_local_memory_projection_in(db, None, true).await?;
+        sqlx::query("UPDATE local_work SET envelope='null',state='erased'")
+            .execute(&mut *db)
+            .await?;
+        sqlx::query("DELETE FROM local_worker_cleanup")
+            .execute(&mut *db)
+            .await?;
+        sqlx::query("DELETE FROM local_outbox")
+            .execute(&mut *db)
+            .await?;
+        sqlx::query("DELETE FROM local_pending")
+            .execute(&mut *db)
+            .await?;
+        sqlx::query("DELETE FROM local_meta WHERE key IN ('cache','cache_sequence','selected_text_input_v1') OR key LIKE 'computer-selection:%'").execute(&mut *db).await?;
+        sqlx::query("UPDATE local_meta SET value='true' WHERE key='stopped'")
+            .execute(&mut *db)
+            .await?;
+        return Ok(());
+    }
     for (source, (task, revision)) in &copy.groups {
         sqlx::query("UPDATE local_work SET envelope='null',state=CASE WHEN state='running' AND ?=0 THEN 'erasing' ELSE 'erased' END WHERE json_extract(envelope,'$.payload.task_id')=? AND json_extract(envelope,'$.payload.revision')=?").bind(opening).bind(task).bind(revision).execute(&mut *db).await?;
         let rows:Vec<(i64,String)>=sqlx::query_as("SELECT sequence,data FROM local_outbox WHERE json_extract(data,'$.payload.kind') IN ('result','artifact_chunk') AND ((json_extract(data,'$.payload.task_id')=? AND json_extract(data,'$.payload.revision')=?) OR (json_extract(data,'$.payload.artifact.task_id')=? AND json_extract(data,'$.payload.artifact.revision')=?))").bind(task).bind(revision).bind(task).bind(revision).fetch_all(&mut *db).await?;
@@ -92,6 +121,49 @@ async fn replay(db: &mut SqliteConnection, copy: &WorkerCopy, opening: bool) -> 
     Ok(())
 }
 impl Store {
+    /// A definitive server denial is a negative fence, never a work grant.
+    pub async fn deny_worker_access(&self, device: &str, server: &str) -> Result<()> {
+        let _lease = self.memory_guard.lease().await?;
+        let mut value = self
+            .memory_guard
+            .read()?
+            .ok_or_else(|| Error::Rejected("worker restrictions missing".into()))?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        binding(&mut tx, device, server).await?;
+        let copy = value.worker.get_or_insert_with(|| WorkerCopy {
+            device: device.into(),
+            server: server.into(),
+            groups: BTreeMap::new(),
+            runtime: None,
+            denied: false,
+        });
+        require(
+            copy.device == device && copy.server == server,
+            "worker keeper changed",
+        )?;
+        copy.denied = true;
+        require(copy.valid(), "invalid worker denial identity")?;
+        value.format = value.format.max(7);
+        self.memory_guard.write(&value)?;
+        replay(&mut tx, value.worker.as_ref().unwrap(), false).await?;
+        tx.commit().await?;
+        self.checkpoint_memory_redaction().await
+    }
+    pub async fn worker_access_denied(&self, device: &str, server: &str) -> Result<bool> {
+        let _lease = self.memory_guard.lease().await?;
+        let value = self
+            .memory_guard
+            .read()?
+            .ok_or_else(|| Error::Rejected("worker restrictions missing".into()))?;
+        let Some(copy) = value.worker else {
+            return Ok(false);
+        };
+        require(
+            copy.device == device && copy.server == server,
+            "worker keeper changed",
+        )?;
+        Ok(copy.denied)
+    }
     /// A fresh process does not prove that a previous process has stopped.
     /// Keep that distinction outside SQLite so a database restore cannot clear it.
     pub async fn begin_worker_runtime(
@@ -125,10 +197,15 @@ impl Store {
             server: server.into(),
             groups: BTreeMap::new(),
             runtime: None,
+            denied: false,
         });
         require(
             copy.device == device && copy.server == server,
             "worker keeper changed",
+        )?;
+        require(
+            !copy.denied,
+            "worker identity denied; fresh pairing required",
         )?;
         if let Some(prior) = &copy.runtime
             && prior.id == runtime
@@ -196,9 +273,10 @@ impl Store {
             copy.device == device && copy.server == server,
             "worker keeper changed",
         )?;
-        Ok(copy
-            .runtime
-            .is_some_and(|r| r.id == runtime && r.prior_clean && !r.closed))
+        Ok(!copy.denied
+            && copy
+                .runtime
+                .is_some_and(|r| r.id == runtime && r.prior_clean && !r.closed))
     }
     pub async fn record_worker_erasure(
         &self,
@@ -218,6 +296,7 @@ impl Store {
             server: server.into(),
             groups: BTreeMap::new(),
             runtime: None,
+            denied: false,
         });
         require(
             copy.device == context.device && copy.server == server,
@@ -283,9 +362,10 @@ impl Store {
             copy.device == device && copy.server == server,
             "worker keeper changed",
         )?;
-        Ok(copy
-            .groups
-            .values()
-            .any(|(id, rev)| id == task && rev == revision))
+        Ok(copy.denied
+            || copy
+                .groups
+                .values()
+                .any(|(id, rev)| id == task && rev == revision))
     }
 }

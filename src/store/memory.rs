@@ -180,7 +180,7 @@ impl MemoryGuard {
         let value: Restrictions = serde_json::from_slice(&bytes)
             .map_err(|_| Error::Rejected("invalid memory restrictions".into()))?;
         require(
-            (1..=6).contains(&value.format)
+            (1..=7).contains(&value.format)
                 && value
                     .worker
                     .as_ref()

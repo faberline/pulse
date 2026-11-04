@@ -15,11 +15,34 @@ pub enum DeviceDelivery {
 #[path = "worker_erasure_tests.rs"]
 mod tests;
 impl Journal {
+    pub(crate) async fn ensure_worker_access(&self) -> Result<()> {
+        if self.role == ClientRole::LocalExecutor
+            && self
+                .core
+                .worker_access_denied(&self.device, &hash(&self.server)?)
+                .await?
+        {
+            return Err(crate::Error::CredentialRejected);
+        }
+        Ok(())
+    }
+    pub(crate) async fn deny_worker_access(&self) -> Result<()> {
+        ensure(
+            self.role == ClientRole::LocalExecutor,
+            "worker denial requires local role",
+        )?;
+        let _lifecycle = self.memory_lifecycle.lock().await;
+        self.core
+            .deny_worker_access(&self.device, &hash(&self.server)?)
+            .await?;
+        self.flush_memory().await
+    }
     pub(crate) async fn replay_worker_erasure_rules(&self) -> Result<()> {
         if self.role == ClientRole::LocalExecutor {
             self.core
                 .replay_worker_erasures(&self.device, &hash(&self.server)?, false)
                 .await?;
+            self.ensure_worker_access().await?;
         }
         Ok(())
     }

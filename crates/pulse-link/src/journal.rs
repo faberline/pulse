@@ -195,6 +195,13 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                 .core
                 .replay_worker_erasures(&journal.device, &hash(&journal.server)?, true)
                 .await?;
+            if journal
+                .core
+                .worker_access_denied(&journal.device, &hash(&journal.server)?)
+                .await?
+            {
+                journal.flush_memory().await?;
+            }
         }
         Ok((journal, DeviceLock(lock)))
     }
@@ -269,6 +276,7 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         Ok(())
     }
     pub async fn action(&self, source_id: &str, action: HumanAction) -> Result<()> {
+        self.ensure_worker_access().await?;
         if let HumanAction::SubmitTextFile { goal, input, .. } = &action {
             ensure(self.role == ClientRole::Chat, "file input requires chat")?;
             input.validate_goal(goal)?;
@@ -430,6 +438,7 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
             return self.accept_erasure_control(&header, context).await;
         }
         let _lifecycle = self.memory_lifecycle.lock().await;
+        self.ensure_worker_access().await?;
         if let ServerPayload::Snapshot { messages, .. }
         | ServerPayload::DerivedSnapshot { messages, .. } = &envelope.payload
         {
@@ -827,6 +836,18 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         Ok(())
     }
     pub async fn view(&self) -> Result<NativeState> {
+        if self.role == ClientRole::LocalExecutor
+            && self
+                .core
+                .worker_access_denied(&self.device, &hash(&self.server)?)
+                .await?
+        {
+            return Ok(NativeState {
+                stopped: true,
+                message: "地端身分已失效。請使用新的配對身分。".into(),
+                ..Default::default()
+            });
+        }
         let cache: Option<String> =
             sqlx::query_scalar("SELECT value FROM local_meta WHERE key='cache'")
                 .fetch_optional(&self.db)

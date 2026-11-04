@@ -83,6 +83,29 @@ runtime 的開啟及正常關閉紀錄保存在 SQLite 以外。
 只還原 SQLite 也不能將它改為已核對。
 已在先前完成核對並保存的回報仍可重送。
 
+## 地端身分撤銷候選
+
+Rust local executor 現在也處理設定 server 的明確憑證拒絕。
+它先在 SQLite 以外保存格式 7 的禁止重送紀錄，再移除目前 journal 的工作正文、待送結果、圖片分塊及快取投影。
+停止按鈕、舊 SQLite 還原或新的空 runtime 都不能清除這項限制。
+舊版核心不能讀取這份新限制檔；它必須拒絕啟動。
+原操作的未知結果及費用保留不變。
+
+local process 會經過正常收尾後退出。
+Rust 會停止目前持有的 helper 與程序群組，等待圖片讀取結束，再移除自有快取。
+讀取尚未結束時，仍保留 device lock。
+無法清除未知檔案時，保留檔案並回報清除失敗。
+這不是 server 的全副本清除證明。
+
+只有明確的憑證拒絕才觸發這個流程。
+一般斷線、沒有拒絕標記的 401，以及 503 都不觸發清除。
+SQL 失敗後，外部限制仍禁止重送及顯示舊正文；修復後可重做本機清除。
+這不代表失敗當下已完成實體清除。
+
+`cargo test -p pulse-link --lib worker_denial` 核對角色與來源綁定、SQL 失敗、舊 SQLite 還原、停止按鈕、真正 server 撤銷、程序退出、讀取保護與清除失敗。
+隔離 Chrome 的同流程測試須設定 `PULSE_TEST_BROWSER_DRIVER`，再執行 `cargo test -p pulse-link --lib worker_denial_real_chrome -- --ignored`。
+一般測試使用假的憑證儲存與 native helper，不要求實際 macOS 權限。
+
 目前 process 持有的原生 PNG 已加入分任務清除與到期容量回收候選。舊共用 PNG、舊 profile 與硬退出後的孤兒程序仍須完整處理。
 provider 已加入送出前與等待核對，模型工具派工也已加入來源限制鎖；見 [任務來源核對](task-memory-sources.md)。server 的獨立自有 runtime 清除回報已有候選。其他 adapter 的完整在途取消、舊 runtime 與孤兒程序處理仍須完成。
 子任務明確採用父來源已有候選。自動規劃的完整來源繼承、關閉副本與正式還原仍未完成。
