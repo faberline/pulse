@@ -39,6 +39,7 @@ struct State {
     entries: BTreeMap<u64, Arc<Entry>>,
     blocked: BTreeSet<SourceScope>,
     closed: bool,
+    guardian: Option<crate::process_guardian::Registry>,
 }
 struct Entry {
     source: Option<SourceScope>,
@@ -47,11 +48,24 @@ struct Entry {
     live: Mutex<Option<Pid>>,
     group: Pid,
     done: watch::Sender<Option<bool>>,
+    guardian: Option<crate::process_guardian::Guardian>,
 }
 #[derive(Clone, Default)]
 pub(crate) struct ProcessTracker(Arc<Mutex<State>>);
 
 impl ProcessTracker {
+    pub(crate) fn supervise(&self, registry: crate::process_guardian::Registry) -> Result<()> {
+        let mut state = self
+            .0
+            .lock()
+            .map_err(|_| crate::Error::Rejected("process registry unavailable".into()))?;
+        ensure(
+            !state.closed && state.entries.is_empty(),
+            "process supervision must precede launch",
+        )?;
+        state.guardian = Some(registry);
+        Ok(())
+    }
     pub(crate) fn closed(&self) -> bool {
         self.0.lock().map_or(true, |state| state.closed)
     }
@@ -102,6 +116,37 @@ impl ProcessTracker {
         source: Option<SourceScope>,
         resource: Option<tempfile::TempDir>,
     ) -> Result<OwnedProcess> {
+        self.spawn_kind(
+            command,
+            source,
+            resource.map(crate::process_guardian::OwnedDirectory::Temporary),
+            false,
+            None,
+        )
+    }
+    pub(crate) fn spawn_browser(
+        &self,
+        command: &mut Command,
+        source: Option<SourceScope>,
+        resource: crate::process_guardian::OwnedDirectory,
+    ) -> Result<OwnedProcess> {
+        self.spawn_kind(command, source, Some(resource), true, None)
+    }
+    pub(crate) fn spawn_native(
+        &self,
+        command: &mut Command,
+        source: Option<SourceScope>,
+    ) -> Result<OwnedProcess> {
+        self.spawn_kind(command, source, None, false, Some(4096))
+    }
+    fn spawn_kind(
+        &self,
+        command: &mut Command,
+        source: Option<SourceScope>,
+        resource: Option<crate::process_guardian::OwnedDirectory>,
+        browser: bool,
+        diagnostics_limit: Option<usize>,
+    ) -> Result<OwnedProcess> {
         let mut state = self
             .0
             .lock()
@@ -117,11 +162,31 @@ impl ProcessTracker {
             .checked_add(1)
             .ok_or_else(|| crate::Error::Rejected("process identity exhausted".into()))?;
         let mut resource = PrivateResource::new(resource)?;
-        let mut child = match command.process_group(0).kill_on_drop(true).spawn() {
+        let launch = match &state.guardian {
+            Some(registry) => registry
+                .spawn(
+                    command,
+                    resource
+                        .0
+                        .as_ref()
+                        .map(|(dir, _, _)| crate::process_guardian::Directory::capture(dir.path()))
+                        .transpose()?,
+                    browser,
+                    diagnostics_limit,
+                )
+                .map(|(child, guardian)| (child, Some(guardian))),
+            None => command
+                .process_group(0)
+                .kill_on_drop(true)
+                .spawn()
+                .map(|child| (child, None))
+                .map_err(crate::Error::from),
+        };
+        let (mut child, guardian) = match launch {
             Ok(child) => child,
             Err(error) => {
                 resource.close();
-                return Err(error.into());
+                return Err(error);
             }
         };
         let Some(group) = child
@@ -137,6 +202,7 @@ impl ProcessTracker {
             live: Mutex::new(Some(group)),
             group,
             done: watch::channel(None).0,
+            guardian,
         });
         state.next = next;
         state.entries.insert(next, entry.clone());
@@ -233,6 +299,11 @@ async fn wait_entries(entries: Vec<Arc<Entry>>) -> Result<()> {
     .map_err(|_| crate::Error::Rejected("process stop deadline exceeded".into()))?
 }
 fn terminate(entry: &Entry) -> Result<()> {
+    if let Some(guardian) = &entry.guardian {
+        return guardian
+            .stop()
+            .or_else(|error| guardian.stopped().map_err(|_| error));
+    }
     let mut live = entry
         .live
         .lock()
@@ -245,15 +316,15 @@ fn terminate(entry: &Entry) -> Result<()> {
     }
     Ok(())
 }
-fn keep(resource: Option<tempfile::TempDir>) {
+fn keep(resource: Option<crate::process_guardian::OwnedDirectory>) {
     if let Some(resource) = resource {
-        let _ = resource.keep();
+        resource.keep();
     }
 }
 #[derive(Default)]
-struct PrivateResource(Option<(tempfile::TempDir, u64, u64)>);
+struct PrivateResource(Option<(crate::process_guardian::OwnedDirectory, u64, u64)>);
 impl PrivateResource {
-    fn new(directory: Option<tempfile::TempDir>) -> Result<Self> {
+    fn new(directory: Option<crate::process_guardian::OwnedDirectory>) -> Result<Self> {
         use std::os::unix::fs::MetadataExt;
         let Some(directory) = directory else {
             return Ok(Self::default());
@@ -328,12 +399,17 @@ impl Drop for ReapOwner {
     fn drop(&mut self) {
         if !self.finished {
             let _ = terminate(&self.entry);
-            let _ = self.child.start_kill();
+            if self.entry.guardian.is_none() {
+                let _ = self.child.start_kill();
+            }
             self.tracker.finish(self.id, &self.entry, false);
         }
     }
 }
 impl OwnedProcess {
+    pub(crate) fn supervised(&self) -> bool {
+        self.entry.guardian.is_some()
+    }
     pub(crate) fn driver_shutdown(&mut self, endpoint: &url::Url) -> Result<()> {
         ensure(
             endpoint.scheme() == "http"
@@ -346,10 +422,22 @@ impl OwnedProcess {
                 && endpoint.password().is_none(),
             "owned driver endpoint required",
         )?;
+        if let Some(guardian) = &self.entry.guardian {
+            guardian.driver(endpoint)?;
+        }
         self.shutdown = Some(endpoint.join("shutdown")?);
         Ok(())
     }
     pub(crate) async fn shutdown(&mut self) -> Result<()> {
+        if let Some(guardian) = &self.entry.guardian {
+            guardian.stop()?;
+            tokio::time::timeout(Duration::from_secs(20), self.wait())
+                .await
+                .map_err(|_| {
+                    crate::Error::Rejected("guardian shutdown exit unverified".into())
+                })??;
+            return Ok(());
+        }
         let url = self
             .shutdown
             .as_ref()
@@ -385,10 +473,21 @@ impl OwnedProcess {
                 status
             };
             if let Some(status) = status {
-                let success = (self.shutdown.is_none()
+                let success = (self.entry.guardian.is_some()
+                    || self.shutdown.is_none()
                     || (self.shutdown_confirmed && status.success()))
                     && group_empty(self.entry.group).await
-                    && self.resource.close();
+                    && self
+                        .entry
+                        .guardian
+                        .as_ref()
+                        .is_none_or(|guardian| guardian.stopped().is_ok())
+                    && self.resource.close()
+                    && self
+                        .entry
+                        .guardian
+                        .as_ref()
+                        .is_none_or(|guardian| guardian.finish().is_ok());
                 self.tracker.finish(self.id, &self.entry, success);
                 self.finished = true;
                 ensure(
@@ -406,7 +505,13 @@ impl Drop for OwnedProcess {
         if self.finished {
             return;
         }
-        let shutdown = self.shutdown.take();
+        let supervised = self.entry.guardian.is_some();
+        let shutdown = if supervised {
+            self.shutdown.take();
+            None
+        } else {
+            self.shutdown.take()
+        };
         let confirmed = self.shutdown_confirmed;
         let killed = if shutdown.is_none() {
             self.terminate().is_ok()
@@ -416,7 +521,7 @@ impl Drop for OwnedProcess {
         let Some(mut child) = self.child.take() else {
             return;
         };
-        if !killed {
+        if !killed && !supervised {
             let _ = child.start_kill();
         }
         let resource = std::mem::take(&mut self.resource);
@@ -425,7 +530,9 @@ impl Drop for OwnedProcess {
         let id = self.id;
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             let _ = terminate(&entry);
-            let _ = child.start_kill();
+            if !supervised {
+                let _ = child.start_kill();
+            }
             tracker.finish(id, &entry, false);
             return;
         };
@@ -445,7 +552,7 @@ impl Drop for OwnedProcess {
                 };
             let status = if graceful {
                 tokio::time::timeout(
-                    Duration::from_secs(5),
+                    Duration::from_secs(if supervised { 20 } else { 5 }),
                     wait_child(&mut owner.child, &owner.entry),
                 )
                 .await
@@ -459,7 +566,9 @@ impl Drop for OwnedProcess {
                 true
             } else {
                 let _ = terminate(&owner.entry);
-                let _ = owner.child.start_kill();
+                if !supervised {
+                    let _ = owner.child.start_kill();
+                }
                 matches!(
                     tokio::time::timeout(
                         Duration::from_secs(5),
@@ -474,7 +583,17 @@ impl Drop for OwnedProcess {
                 && graceful
                 && (shutdown.is_none() || clean)
                 && group_empty(owner.entry.group).await
-                && owner.resource.close();
+                && owner
+                    .entry
+                    .guardian
+                    .as_ref()
+                    .is_none_or(|guardian| guardian.stopped().is_ok())
+                && owner.resource.close()
+                && owner
+                    .entry
+                    .guardian
+                    .as_ref()
+                    .is_none_or(|guardian| guardian.finish().is_ok());
             owner.tracker.finish(owner.id, &owner.entry, success);
             owner.finished = true;
             drop(owner);
@@ -501,7 +620,7 @@ async fn wait_child(child: &mut Child, entry: &Entry) -> Result<ExitStatus> {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
-async fn request_shutdown(url: &url::Url) -> bool {
+pub(crate) async fn request_shutdown(url: &url::Url) -> bool {
     let result = async {
         let unavailable =
             |_: reqwest::Error| crate::Error::Rejected("owned driver shutdown unavailable".into());

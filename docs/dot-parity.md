@@ -26,6 +26,8 @@ Rust／Swift 邊界、共用本機協定與驗證缺口見 [macOS adapter](macos
 
 Rust server／CLI 已加入 [離線還原與中斷續接候選](offline-restore.md)。它會保留原始加密證據、套用最新刪除限制、合併可讀的目前結果與費用，並封鎖舊任務及裝置。真正 CLI／server 與中止子程序測試只驗證隔離資料；D06、D08 與完整 K15 仍未接受。
 
+官方 local executor 另已加入 [強制退出恢復候選](runtime-recovery.md)。Rust guardian 保留原工具的停止責任，重啟後核對並清理持久登記的 PNG 與 profile。受控 SIGKILL、雙任務及真實 Chrome 重啟讀取已驗證；未知舊資源、guardian 自身中止、整機斷電與完整日常驗收仍待完成。
+
 ## 實作順序
 
 1. 完成現有只讀候選的對話與接受缺口。保持 PR #8、#13、#15 的審查邊界。

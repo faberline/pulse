@@ -51,6 +51,9 @@ impl Journal {
         let absent = resources_absent(&directory.join("browser"), false)
             && resources_absent(&directory.join("computer"), true)
             && executor.prior_resources_absent();
+        if let Some(registry) = &executor.guardian {
+            return registry.begin(self, absent).await;
+        }
         self.core
             .begin_worker_runtime(
                 &self.device,
@@ -62,9 +65,15 @@ impl Journal {
         Ok(())
     }
     pub(crate) async fn close_worker_runtime(&self, executor: &Executor) -> Result<()> {
+        if let Some(registry) = &executor.guardian {
+            registry.prepare_close()?;
+        }
         self.core
             .close_worker_runtime(&self.device, &hash(&self.server)?, &executor.runtime_id)
             .await?;
+        if let Some(registry) = &executor.guardian {
+            registry.close()?;
+        }
         Ok(())
     }
     pub(crate) async fn complete_worker_cleanup(

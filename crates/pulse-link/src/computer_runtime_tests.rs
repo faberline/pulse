@@ -325,6 +325,43 @@ async fn fixed_native_bridge_validates_source_png_and_omits_local_paths() {
 }
 
 #[tokio::test]
+async fn supervised_native_bridge_keeps_ipc_limits_and_clears_only_owned_images() {
+    for mode in ["good", "stderr", "oversize"] {
+        let (dir, runtime) = fixture(mode);
+        let current = std::env::current_exe().unwrap();
+        let guardian = current
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("pulse-guardian");
+        let registry = crate::process_guardian::Registry::new(
+            &dir.path().join("runtime"),
+            guardian,
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .unwrap();
+        runtime.supervise(registry.clone()).unwrap();
+        let result = runtime.observe(&binding()).await;
+        if mode == "good" {
+            let evidence = result.unwrap();
+            assert_eq!(hash_bytes(&evidence.png), evidence.observation.image.digest);
+            assert!(
+                serde_json::to_value(&evidence.observation).unwrap()["image"]
+                    .get("path")
+                    .is_none()
+            );
+        } else {
+            assert!(result.is_err());
+        }
+        assert_reaped(&runtime).await;
+        runtime.begin_shutdown().unwrap();
+        runtime.finish_shutdown().await.unwrap();
+        registry.recover().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn bound_computer_dispatch_checks_selection_before_capture_and_returns_original_image() {
     let (dir, runtime) = fixture("selected");
     let binding = binding();

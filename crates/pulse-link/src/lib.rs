@@ -24,6 +24,8 @@ pub mod journal;
 mod operation_orchestration;
 mod owned_process;
 mod pairing;
+#[doc(hidden)]
+pub mod process_guardian;
 pub mod protocol;
 pub mod provider;
 pub mod remote;

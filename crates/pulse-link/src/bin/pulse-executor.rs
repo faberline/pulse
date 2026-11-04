@@ -9,7 +9,9 @@ use tokio::sync::{mpsc, watch};
 #[tokio::main]
 async fn main() {
     if run().await.is_err() {
-        eprintln!("Local executor stopped. Check its arguments, private directory and Keychain.");
+        eprintln!(
+            "Local executor stopped. Check its arguments, bundled guardian, private directory and Keychain."
+        );
         std::process::exit(1);
     }
 }
@@ -32,7 +34,9 @@ async fn run() -> Result<()> {
     }
     let (config, pairing) =
         Config::parse_with_pairing(std::env::args().skip(1), ClientRole::LocalExecutor)?;
-    let device = Device::open(config, std::sync::Arc::new(NativeVault)).await?;
+    let device = Device::open(config, std::sync::Arc::new(NativeVault))
+        .await?
+        .with_runtime_recovery()?;
     let (commands, receiver) = mpsc::channel(32);
     let (states, mut state) = watch::channel(NativeState::default());
     if let Some(code) = pairing {

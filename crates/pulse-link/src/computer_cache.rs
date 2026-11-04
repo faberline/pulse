@@ -17,12 +17,13 @@ use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 pub(crate) struct ImageCaches(
     Arc<Mutex<BTreeMap<SourceScope, Arc<Cache>>>>,
     Arc<AtomicBool>,
+    Arc<Mutex<Option<crate::process_guardian::Registry>>>,
 );
 struct Cache {
     path: Option<PathBuf>,
     identity: Option<(u64, u64)>,
     _directory: Mutex<Option<File>>,
-    owned: Mutex<Option<tempfile::TempDir>>,
+    owned: Mutex<Option<crate::process_guardian::OwnedDirectory>>,
     io: Arc<RwLock<()>>,
     blocked: AtomicBool,
     last_used: Mutex<Instant>,
@@ -36,7 +37,7 @@ impl Drop for Cache {
             .unwrap_or_else(|e| e.into_inner())
             .take()
         {
-            let _ = directory.keep();
+            directory.keep();
         }
     }
 }
@@ -79,15 +80,24 @@ impl Cache {
             last_used: Mutex::new(Instant::now()),
         }
     }
-    fn create(root: &Path, task: &str, revision: &str) -> Result<Self> {
+    fn create(
+        root: &Path,
+        task: &str,
+        revision: &str,
+        registry: Option<&crate::process_guardian::Registry>,
+    ) -> Result<Self> {
         private_dir(root)?;
         ensure(
             std::fs::read_dir(root)?.take(128).count() < 128,
             "computer cache directory capacity",
         )?;
-        let directory = tempfile::Builder::new()
-            .prefix(&prefix(task, revision)?)
-            .tempdir_in(root)?;
+        let prefix = prefix(task, revision)?;
+        let directory = match registry {
+            Some(registry) => registry.create_images(root, &prefix)?,
+            None => crate::process_guardian::OwnedDirectory::Temporary(
+                tempfile::Builder::new().prefix(&prefix).tempdir_in(root)?,
+            ),
+        };
         let path = directory.path().to_path_buf();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
         let fd = rustix::fs::open(
@@ -139,37 +149,12 @@ impl Cache {
             return Ok(());
         };
         self.validate()?;
-        for (count, entry) in std::fs::read_dir(directory.path())?.take(129).enumerate() {
-            ensure(count < 128, "image cache entry capacity")?;
-            let entry = entry?;
-            let name = entry.file_name();
-            let name = name
-                .to_str()
-                .ok_or_else(|| crate::Error::Rejected("unrecognized image cache entry".into()))?;
-            let png = name.strip_suffix(".png").is_some_and(|s| {
-                s.len() == 64
-                    && s.bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            });
-            let partial = name
-                .strip_prefix(".partial-")
-                .is_some_and(|s| uuid::Uuid::parse_str(s).is_ok_and(|id| id.to_string() == s));
-            let meta = std::fs::symlink_metadata(entry.path())?;
-            ensure(
-                (png || partial)
-                    && meta.is_file()
-                    && meta.nlink() == 1
-                    && meta.mode() & 0o777 == 0o600
-                    && meta.uid() == rustix::process::geteuid().as_raw()
-                    && meta.len() <= 4 * 1024 * 1024,
-                "unverified image cache entry",
-            )?;
-        }
+        validate_png_directory(directory.path())?;
         // Retain ownership on error, so a later attempt cannot claim a failed
         // removal succeeded just because its TempDir handle was consumed.
         std::fs::remove_dir_all(directory.path())?;
         if let Some(directory) = owned.take() {
-            let _ = directory.keep();
+            directory.close()?;
         }
         self._directory
             .lock()
@@ -178,7 +163,51 @@ impl Cache {
         Ok(())
     }
 }
+pub(crate) fn validate_png_directory(path: &Path) -> Result<()> {
+    for (count, entry) in std::fs::read_dir(path)?.take(129).enumerate() {
+        ensure(count < 128, "image cache entry capacity")?;
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name
+            .to_str()
+            .ok_or_else(|| crate::Error::Rejected("unrecognized image cache entry".into()))?;
+        let png = name.strip_suffix(".png").is_some_and(|s| {
+            s.len() == 64
+                && s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        });
+        let partial = name
+            .strip_prefix(".partial-")
+            .is_some_and(|s| uuid::Uuid::parse_str(s).is_ok_and(|id| id.to_string() == s));
+        let meta = std::fs::symlink_metadata(entry.path())?;
+        ensure(
+            (png || partial)
+                && meta.is_file()
+                && meta.nlink() == 1
+                && meta.mode() & 0o777 == 0o600
+                && meta.uid() == rustix::process::geteuid().as_raw()
+                && meta.len() <= 4 * 1024 * 1024,
+            "unverified image cache entry",
+        )?;
+    }
+    Ok(())
+}
 impl ImageCaches {
+    pub(crate) fn supervise(&self, registry: crate::process_guardian::Registry) -> Result<()> {
+        ensure(
+            self.0
+                .lock()
+                .map_err(|_| crate::Error::Rejected("image registry unavailable".into()))?
+                .is_empty(),
+            "image supervision must precede content",
+        )?;
+        *self
+            .2
+            .lock()
+            .map_err(|_| crate::Error::Rejected("image registry unavailable".into()))? =
+            Some(registry);
+        Ok(())
+    }
     pub(crate) fn closed(&self) -> bool {
         self.1.load(Ordering::Acquire)
     }
@@ -297,7 +326,17 @@ impl ImageCaches {
                 let root = directory.canonicalize()?.join("artifacts");
                 entries.insert(
                     scope.clone(),
-                    Arc::new(Cache::create(&root, task, revision)?),
+                    Arc::new(Cache::create(
+                        &root,
+                        task,
+                        revision,
+                        self.2
+                            .lock()
+                            .map_err(|_| {
+                                crate::Error::Rejected("image registry unavailable".into())
+                            })?
+                            .as_ref(),
+                    )?),
                 );
             }
             entries[&scope].clone()

@@ -5,6 +5,10 @@ Swift 仍只處理介面與輸入。
 Rust 管理 ChromeDriver、原生 helper 與 Git 子程序。
 模型記憶仍關閉。
 
+官方 local executor 另已加入 Rust guardian 與持久資源紀錄，見 [強制退出恢復](runtime-recovery.md)。
+它已通過自有程序的 SIGKILL／重啟測試，以及兩個真實 Chrome session 的中止與新讀取測試。
+下列未受管的舊 runtime 限制仍保留；guardian 自身中止與整機斷電也未接受。
+
 ## 停止順序
 
 Rust 以任務與修訂追蹤子程序。

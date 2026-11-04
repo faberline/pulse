@@ -76,3 +76,7 @@ if len(sys.argv) > 2:
     assert type(value["permissions"]["screen_capture"]) is bool
     assert value.get("observation") is None
     print("Rust native bridge: permission probe passed without pairing, capture or model calls.")
+    guardian = executor.with_name("pulse-guardian").resolve(strict=True)
+    result = subprocess.run([str(guardian)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+    assert result.returncode == 125 and not result.stdout and not result.stderr
+    print("Rust guardian: bundled process rejects launch without its private control channel.")

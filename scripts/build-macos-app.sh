@@ -28,6 +28,7 @@ cp "$swift_bin/pulse-desktop" "$app/Contents/MacOS/pulse-desktop"
 cp "target/$profile/pulse-computer" "$app/Contents/MacOS/pulse-computer"
 cp "target/$profile/pulse-chat" "$app/Contents/MacOS/pulse-chat"
 cp "target/$profile/pulse-executor" "$app/Contents/MacOS/pulse-executor"
+cp "target/$profile/pulse-guardian" "$app/Contents/MacOS/pulse-guardian"
 rm -f "$app/Contents/MacOS/pulse-device"
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -45,6 +46,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 </dict></plist>
 PLIST
 /usr/bin/codesign --force --sign - "$app/Contents/MacOS/pulse-executor"
+/usr/bin/codesign --force --sign - "$app/Contents/MacOS/pulse-guardian"
 /usr/bin/codesign --force --sign - "$app/Contents/MacOS/pulse-chat"
 /usr/bin/codesign --force --sign - "$app/Contents/MacOS/pulse-computer"
 /usr/bin/codesign --force --sign - "$app"

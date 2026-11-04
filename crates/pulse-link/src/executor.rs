@@ -15,8 +15,26 @@ pub struct Executor {
     browser: Option<crate::browser_runtime::BrowserRuntime>,
     computer: Option<crate::computer_runtime::ComputerRuntime>,
     processes: crate::owned_process::ProcessTracker,
+    pub(crate) guardian: Option<crate::process_guardian::Registry>,
 }
 impl Executor {
+    pub(crate) fn supervise(&mut self, directory: &Path, executable: PathBuf) -> Result<()> {
+        let registry = crate::process_guardian::Registry::new(
+            &directory.join("runtime"),
+            executable,
+            self.runtime_id.clone(),
+        )?;
+        self.processes.supervise(registry.clone())?;
+        if let Some(browser) = &mut self.browser {
+            browser.processes.supervise(registry.clone())?;
+            browser.guardian = Some(registry.clone());
+        }
+        if let Some(computer) = &self.computer {
+            computer.supervise(registry.clone())?;
+        }
+        self.guardian = Some(registry);
+        Ok(())
+    }
     pub(crate) fn prior_resources_absent(&self) -> bool {
         self.browser
             .as_ref()
@@ -106,6 +124,7 @@ impl Executor {
             browser: None,
             computer: None,
             processes: Default::default(),
+            guardian: None,
         })
     }
     pub fn with_browser(mut self, browser: Option<crate::browser_runtime::BrowserRuntime>) -> Self {

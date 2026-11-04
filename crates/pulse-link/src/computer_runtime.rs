@@ -154,6 +154,10 @@ pub struct ComputerRuntime {
     images: crate::computer_cache::ImageCaches,
 }
 impl ComputerRuntime {
+    pub(crate) fn supervise(&self, registry: crate::process_guardian::Registry) -> Result<()> {
+        self.processes.supervise(registry.clone())?;
+        self.images.supervise(registry)
+    }
     pub(crate) fn prior_resources_absent(&self) -> bool {
         crate::worker_cleanup::resources_absent(&self.directory, true)
     }
@@ -740,7 +744,7 @@ impl ComputerRuntime {
                     .env("PULSE_COMPUTER_PID", target.pid.to_string())
                     .env("PULSE_COMPUTER_WINDOW_ID", target.window_id.to_string());
             }
-            let mut owner = self.processes.spawn(&mut command, source, None)?;
+            let mut owner = self.processes.spawn_native(&mut command, source)?;
             let permission_request = args
                 .first()
                 .is_some_and(|arg| arg == "--request-permission");
@@ -755,11 +759,9 @@ impl ComputerRuntime {
                 .stdout
                 .take()
                 .ok_or_else(|| crate::Error::Rejected("native output missing".into()))?;
-            let mut stderr = owner
-                .child()
-                .stderr
-                .take()
-                .ok_or_else(|| crate::Error::Rejected("native diagnostics missing".into()))?;
+            let supervised = owner.supervised();
+            let stderr = owner.child().stderr.take();
+            ensure(supervised || stderr.is_some(), "native diagnostics missing")?;
             let stdin = owner.child().stdin.take();
             let (bytes, _) = tokio::try_join!(
                 async {
@@ -779,9 +781,11 @@ impl ComputerRuntime {
                         stdin.shutdown().await?;
                         drop(stdin);
                     }
-                    let mut discarded = Vec::new();
-                    (&mut stderr).take(4097).read_to_end(&mut discarded).await?;
-                    ensure(discarded.len() <= 4096, "native diagnostics limit")?;
+                    if let Some(mut stderr) = stderr {
+                        let mut discarded = Vec::new();
+                        (&mut stderr).take(4097).read_to_end(&mut discarded).await?;
+                        ensure(discarded.len() <= 4096, "native diagnostics limit")?;
+                    }
                     Ok::<_, crate::Error>(())
                 }
             )?;

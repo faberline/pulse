@@ -30,6 +30,7 @@ pub struct BrowserRuntime {
     >,
     pub interactions: bool,
     pub(crate) processes: ProcessTracker,
+    pub(crate) guardian: Option<crate::process_guardian::Registry>,
 }
 impl BrowserRuntime {
     pub(crate) fn prior_resources_absent(&self) -> bool {
@@ -54,6 +55,7 @@ impl BrowserRuntime {
             sessions: Default::default(),
             interactions: std::env::var("PULSE_BROWSER_INTERACTION").as_deref() == Ok("1"),
             processes: Default::default(),
+            guardian: None,
         }))
     }
     pub fn new(driver: PathBuf, policy: NetworkPolicy, directory: PathBuf) -> Result<Self> {
@@ -69,6 +71,7 @@ impl BrowserRuntime {
             sessions: Default::default(),
             interactions: false,
             processes: Default::default(),
+            guardian: None,
         })
     }
     pub async fn read(&self, url: &Url) -> Result<BrowserSnapshot> {
@@ -117,10 +120,15 @@ impl BrowserRuntime {
         use std::os::unix::fs::PermissionsExt;
         ensure(!self.processes.closed(), "browser executor is closing")?;
         self.policy.validate_url(url)?;
-        let profile = tempfile::Builder::new()
-            .prefix("session-")
-            .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir_in(&self.directory)?;
+        let profile = match &self.guardian {
+            Some(registry) => registry.create_resource(&self.directory, "session-")?,
+            None => crate::process_guardian::OwnedDirectory::Temporary(
+                tempfile::Builder::new()
+                    .prefix("session-")
+                    .permissions(std::fs::Permissions::from_mode(0o700))
+                    .tempdir_in(&self.directory)?,
+            ),
+        };
         let profile_path = profile.path().to_path_buf();
         let proxy = BrowserProxy::start(self.policy.clone()).await?;
         let mut command = Command::new(&self.driver);
@@ -137,7 +145,9 @@ impl BrowserRuntime {
         if let Some(home) = std::env::var_os("HOME") {
             command.env("HOME", home);
         }
-        let mut owner = self.processes.spawn(&mut command, source, Some(profile))?;
+        let mut owner = self
+            .processes
+            .spawn_browser(&mut command, source, profile)?;
         let stdout = owner
             .child()
             .stdout

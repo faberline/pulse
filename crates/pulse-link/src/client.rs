@@ -153,6 +153,24 @@ pub struct Device {
     account: String,
 }
 impl Device {
+    /// The official executor requires its fixed Rust guardian sibling.
+    /// Embedded test clients may supply controlled adapters separately.
+    pub fn with_runtime_recovery(mut self) -> Result<Self> {
+        ensure(
+            self.journal.role == ClientRole::LocalExecutor,
+            "chat cannot supervise tools",
+        )?;
+        let executable = std::env::current_exe()?;
+        let sibling = executable
+            .parent()
+            .ok_or_else(|| crate::Error::Rejected("executor directory unavailable".into()))?
+            .join("pulse-guardian");
+        self.executor
+            .as_mut()
+            .ok_or_else(|| crate::Error::Rejected("executor unavailable".into()))?
+            .supervise(&self.config.data_dir, sibling)?;
+        Ok(self)
+    }
     pub async fn open(config: Config, vault: Arc<dyn Vault>) -> Result<Self> {
         Self::open_role(config, vault, ClientRole::LocalExecutor).await
     }
@@ -198,11 +216,16 @@ impl Device {
         states: watch::Sender<NativeState>,
     ) -> Result<()> {
         let mut computer_control = None;
+        let mut runtime_started = false;
         let result = async {
             if let Some(executor) = &self.executor {
+                if let Some(registry) = &executor.guardian {
+                    registry.recover().await?;
+                }
                 self.journal
                     .begin_worker_runtime(executor, &self.config.data_dir)
                     .await?;
+                runtime_started = true;
             }
             if let Some(runtime) = self.executor.as_ref().and_then(Executor::computer_runtime) {
                 computer_control = Some(
@@ -222,7 +245,8 @@ impl Device {
         }
         let cleanup = match &self.executor {
             Some(executor) => match executor.shutdown().await {
-                Ok(()) => self.journal.close_worker_runtime(executor).await,
+                Ok(()) if runtime_started => self.journal.close_worker_runtime(executor).await,
+                Ok(()) => Ok(()),
                 Err(error) => Err(error),
             },
             None => Ok(()),
