@@ -93,6 +93,20 @@ pub struct TaskMemorySources {
     pub invalidated: bool,
 }
 
+/// A bounded local snapshot of explicitly adopted Human sources. This is data,
+/// not permission to call a provider, execute a tool, or reuse stale content.
+/// Memory's Debug implementation deliberately hides its label and body.
+#[derive(Clone, Debug, Serialize)]
+pub struct TaskMemoryContext {
+    pub token: crate::Token,
+    pub binding: TaskMemorySources,
+    pub memories: Vec<Memory>,
+    pub checked_at: i64,
+    pub valid_until: i64,
+}
+
+pub const TASK_MEMORY_CONTEXT_BYTES: usize = 16 * 1024;
+
 /// A server-authorized erasure of an existing chat frame. Header identity stays
 /// intact so a lost ACK does not resurrect content or create a sequence conflict.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

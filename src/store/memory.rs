@@ -23,6 +23,7 @@ mod derived_results;
 mod peer_restore;
 mod retention;
 mod revocations;
+mod task_context;
 pub(super) mod task_sources;
 mod withdrawals;
 mod worker_copy;
