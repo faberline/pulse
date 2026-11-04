@@ -25,6 +25,8 @@ pub use store::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("database missing or empty with retained storage; offline recovery required")]
+    DatabaseRecoveryRequired,
     #[error("memory storage is busy; retry required")]
     Busy,
     #[error("notification queue capacity unavailable")]

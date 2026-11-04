@@ -9,10 +9,19 @@ use std::{future::IntoFuture, path::PathBuf, time::Duration};
 
 #[tokio::main]
 async fn main() {
-    if run().await.is_err() {
-        eprintln!(
-            "Pulse server stopped. Check private database permissions and command arguments."
-        );
+    if let Err(error) = run().await {
+        if matches!(
+            error,
+            pulse_link::Error::Core(pulse_core::Error::DatabaseRecoveryRequired)
+        ) {
+            eprintln!(
+                "Pulse database is missing or empty. Retained data requires offline recovery. No new database was created."
+            );
+        } else {
+            eprintln!(
+                "Pulse server stopped. Check private database permissions and command arguments."
+            );
+        }
         std::process::exit(1);
     }
 }

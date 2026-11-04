@@ -5,6 +5,72 @@ use pulse_link::{maintenance, now};
 use std::time::Duration;
 
 #[tokio::test]
+async fn lost_local_copies_keep_external_denials_without_creating_new_authority() {
+    use pulse_core::MemoryCopyChange;
+    use pulse_link::{
+        journal::Journal,
+        protocol::{ClientRole, hash},
+    };
+    use std::os::unix::fs::PermissionsExt;
+    for role in [ClientRole::Chat, ClientRole::LocalExecutor] {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let server = "https://pulse.example/";
+        let server_hash = hash(&server).unwrap();
+        let (journal, lock) = Journal::open_role(directory.path(), server, directory.path(), role)
+            .await
+            .unwrap();
+        let database = directory.path().join("device.db");
+        let manifest = directory.path().join("device.db.memory-restrictions.json");
+        let device = journal.device.clone();
+        let core = Store::open(&database, "pulse-local-journal").await.unwrap();
+        if role == ClientRole::Chat {
+            core.memory_copy(&device, &server_hash, MemoryCopyChange::Deny)
+                .await
+                .unwrap();
+        } else {
+            core.deny_worker_access(&device, &server_hash)
+                .await
+                .unwrap();
+        }
+        let before = std::fs::read(&manifest).unwrap();
+        core.close().await;
+        drop(journal);
+        drop(lock);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let lease = loop {
+            match DatabaseMaintenance::try_acquire(&database) {
+                Ok(lease) => break lease,
+                Err(error) if std::time::Instant::now() >= deadline => panic!("{error}"),
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        };
+        std::fs::remove_file(&database).unwrap();
+        drop(lease);
+        if role == ClientRole::LocalExecutor {
+            let rebuilt = Store::open(&database, "pulse-local-journal").await.unwrap();
+            assert_eq!(std::fs::read(&manifest).unwrap(), before);
+            assert!(rebuilt.list_tasks(100).await.unwrap().is_empty());
+            assert!(
+                rebuilt
+                    .worker_access_denied(&device, &server_hash)
+                    .await
+                    .unwrap()
+            );
+            rebuilt.close().await;
+        }
+        // Losing the local device binding does not mint a replacement identity
+        // that can clear the original chat or worker denial.
+        assert!(
+            Journal::open_role(directory.path(), server, directory.path(), role)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&manifest).unwrap(), before);
+    }
+}
+
+#[tokio::test]
 async fn live_timer_wakes_for_new_earlier_expiry_without_model_work() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path().join("db"), "owner")
@@ -181,6 +247,29 @@ async fn server_process_backs_up_once_across_kill_restart_and_checks_quarantine(
     let admission = DatabaseMaintenance::try_acquire(&database).unwrap();
     std::fs::remove_file(&database).unwrap();
     drop(admission);
+    let lost_pairing = directory.path().join("lost-pairing-code");
+    let refused = tokio::time::timeout(
+        Duration::from_secs(30),
+        Command::new(env!("CARGO_BIN_EXE_pulse-server"))
+            .arg("pair-chat")
+            .arg(&database)
+            .arg(&lost_pairing)
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("ANTHROPIC_API_KEY")
+            .env("PULSE_ENV_FILE", database.with_extension("no-env"))
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("Retained data requires offline recovery")
+    );
+    assert!(refused.stdout.is_empty());
+    assert!(!lost_pairing.exists());
+    assert!(!database.exists());
     let offline = directory.path().join("offline-checked");
     // The shared legacy server lock also fences servers predating Core leases.
     let legacy = std::fs::OpenOptions::new()

@@ -663,11 +663,43 @@ async fn restore_binding(db: &mut SqliteConnection, manifest: &Restrictions) -> 
 
 pub(super) fn admit_database_open(database: &Path) -> Result<()> {
     let guard = MemoryGuard::target(database)?;
-    if let Some(fence) = guard.read()?.and_then(|manifest| manifest.restore) {
+    let manifest = guard.read()?;
+    if let Some(fence) = manifest
+        .as_ref()
+        .and_then(|manifest| manifest.restore.as_ref())
+    {
         require(
             fence.committed && database.exists(),
             "offline restore is incomplete; resume required",
         )?;
+    }
+    let missing_or_empty = match std::fs::symlink_metadata(&guard.database) {
+        Ok(metadata) => metadata.is_file() && metadata.len() == 0,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => return Err(error.into()),
+    };
+    // Local copies retain their own rebuilding and identity checks, including
+    // external denials. Server task, receipt and budget data cannot be recreated.
+    let restricted_copy = manifest
+        .as_ref()
+        .is_some_and(|value| value.copy.is_some() || value.worker.is_some());
+    if !missing_or_empty || restricted_copy {
+        return Ok(());
+    }
+    if manifest.is_some() {
+        return Err(Error::DatabaseRecoveryRequired);
+    }
+    // Empty lock files alone are not evidence of accepted application data.
+    // Inspect metadata only, including dangling links; never open SQLite or
+    // regenerate identity material while deciding whether startup is safe.
+    for ending in [".backup-key", ".backups", "-wal", "-shm", "-journal"] {
+        let mut name = guard.database.as_os_str().to_owned();
+        name.push(ending);
+        match std::fs::symlink_metadata(Path::new(&name)) {
+            Ok(_) => return Err(Error::DatabaseRecoveryRequired),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
     }
     Ok(())
 }

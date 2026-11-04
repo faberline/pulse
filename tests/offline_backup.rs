@@ -70,6 +70,85 @@ async fn forget(store: &Store, id: &str) {
 }
 
 #[tokio::test]
+async fn normal_open_cannot_silently_replace_lost_server_data_with_an_empty_store() {
+    let (_dir, database, _backup, store, _id) = fixture().await;
+    store.close().await;
+    let lease = admission(&database).await;
+    fs::remove_file(&database).unwrap();
+    drop(lease);
+    let error = Store::open(&database, "owner")
+        .await
+        .err()
+        .expect("lost server data must require recovery");
+    assert!(matches!(error, Error::DatabaseRecoveryRequired));
+    assert!(!database.exists());
+}
+
+#[tokio::test]
+async fn empty_server_file_with_retained_restrictions_is_not_initialized() {
+    let (_dir, database, _backup, store, _id) = fixture().await;
+    store.close().await;
+    let lease = admission(&database).await;
+    fs::write(&database, b"").unwrap();
+    let rules = suffix(&database, ".memory-restrictions.json");
+    let before = fs::read(&rules).unwrap();
+    drop(lease);
+    let error = Store::open(&database, "owner").await.err().unwrap();
+    assert!(matches!(error, Error::DatabaseRecoveryRequired));
+    assert!(fs::read(&database).unwrap().is_empty());
+    assert_eq!(fs::read(rules).unwrap(), before);
+}
+
+#[tokio::test]
+async fn retained_storage_without_a_manifest_cannot_start_a_fresh_server() {
+    use std::os::unix::fs::symlink;
+    for ending in [".backup-key", ".backups", "-wal", "-shm", "-journal"] {
+        for link in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let database = dir.path().join("db");
+            let artifact = suffix(&database, ending);
+            if link {
+                symlink(dir.path().join("missing-owned-target"), &artifact).unwrap();
+            } else if ending == ".backups" {
+                fs::create_dir(&artifact).unwrap();
+            } else {
+                fs::write(&artifact, b"owned retained storage").unwrap();
+            }
+            let error = Store::open(&database, "owner").await.err().unwrap();
+            assert!(matches!(error, Error::DatabaseRecoveryRequired));
+            assert!(!database.exists());
+            assert!(!suffix(&database, ".memory-restrictions.json").exists());
+            if link {
+                assert!(
+                    fs::symlink_metadata(&artifact)
+                        .unwrap()
+                        .file_type()
+                        .is_symlink()
+                );
+            } else if ending != ".backups" {
+                assert_eq!(fs::read(&artifact).unwrap(), b"owned retained storage");
+            } else {
+                assert_eq!(fs::read_dir(&artifact).unwrap().count(), 0);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn empty_admission_locks_allow_a_genuinely_new_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("db");
+    let lease = admission(&database).await;
+    let lock = suffix(&database, ".memory-lock");
+    fs::write(&lock, b"").unwrap();
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o600)).unwrap();
+    drop(lease);
+    let store = Store::open(&database, "owner").await.unwrap();
+    assert!(store.list_tasks(100).await.unwrap().is_empty());
+    store.close().await;
+}
+
+#[tokio::test]
 async fn lost_database_check_uses_original_key_and_latest_deletion_without_recreating_source() {
     let (dir, database, backup, store, id) = fixture().await;
     forget(&store, &id).await;
