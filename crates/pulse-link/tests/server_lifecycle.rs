@@ -25,6 +25,41 @@ struct Server {
     log: PathBuf,
 }
 
+fn listener_origin(log: &str) -> Option<String> {
+    log.split_inclusive('\n')
+        .filter(|line| line.ends_with('\n'))
+        .filter_map(|line| line.strip_prefix("Pulse listener: http://"))
+        .find_map(|line| {
+            let address: std::net::SocketAddr = line.split_whitespace().next()?.parse().ok()?;
+            (address.ip().is_loopback() && address.port() != 0).then(|| format!("http://{address}"))
+        })
+}
+
+#[test]
+fn fragmented_listener_records_never_become_partial_endpoints() {
+    let record = "Pulse listener: http://127.0.0.1:12345 (loopback; owned fixture)\n";
+    // Every possible short read, including valid-but-incomplete IPs and ports.
+    for end in 0..record.len() {
+        assert_eq!(listener_origin(&record[..end]), None, "prefix {end}");
+    }
+    assert_eq!(
+        listener_origin(record).as_deref(),
+        Some("http://127.0.0.1:12345")
+    );
+    assert_eq!(
+        listener_origin(&format!("owned diagnostic\n{record}")),
+        listener_origin(record)
+    );
+    for invalid in [
+        "Pulse listener: http://127.0.0.1\n",
+        "Pulse listener: http://127.0.0.1:0\n",
+        "Pulse listener: http://198.51.100.1:12345\n",
+        "Pulse listener: http://127.0.0.1:12345oops\n",
+    ] {
+        assert_eq!(listener_origin(invalid), None);
+    }
+}
+
 async fn start(database: &Path, port: u16) -> (Server, String) {
     let log = database.with_file_name(format!("server-{}.log", uuid::Uuid::new_v4()));
     let output = std::fs::OpenOptions::new()
@@ -49,11 +84,8 @@ async fn start(database: &Path, port: u16) -> (Server, String) {
     let origin = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let text = std::fs::read_to_string(&log).unwrap();
-            if let Some(line) = text
-                .lines()
-                .find_map(|line| line.strip_prefix("Pulse listener: "))
-            {
-                break line.split_whitespace().next().unwrap().to_owned();
+            if let Some(origin) = listener_origin(&text) {
+                break origin;
             }
             assert!(child.try_wait().unwrap().is_none(), "{text}");
             tokio::time::sleep(Duration::from_millis(10)).await;
