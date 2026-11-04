@@ -19,6 +19,12 @@ pub async fn run(directory: &Path) -> Result<i32> {
         state.phase == Phase::Prepared,
         "guardian launch was already attempted",
     )?;
+    if let Some(prior_boot) = &state.boot {
+        ensure(
+            boot::current().is_ok_and(|current| current == *prior_boot),
+            "guardian boot identity changed or unavailable",
+        )?;
+    }
     let request: Request = read(&directory.join("request.json"))?;
     ensure(
         request.program.is_absolute()

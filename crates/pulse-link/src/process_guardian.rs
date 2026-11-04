@@ -18,6 +18,7 @@ use std::{
 };
 use tokio::process::{Child, Command};
 
+mod boot;
 mod lifecycle;
 mod resources;
 mod runner;
@@ -32,7 +33,10 @@ pub(crate) struct Directory {
     path: PathBuf,
     device: u64,
     inode: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner: Option<String>,
 }
+pub(crate) const OWNER_FILE: &str = ".pulse-owner";
 impl Directory {
     pub(crate) fn capture(path: &Path) -> Result<Self> {
         let meta = std::fs::symlink_metadata(path)?;
@@ -42,16 +46,30 @@ impl Directory {
                 && meta.mode() & 0o777 == 0o700,
             "private owned resource required",
         )?;
+        let marker = path.join(OWNER_FILE);
+        let owner = if exists(&marker)? {
+            let owner: String = read(&marker)?;
+            ensure(
+                uuid::Uuid::parse_str(&owner).is_ok_and(|id| id.to_string() == owner),
+                "invalid resource ownership marker",
+            )?;
+            Some(owner)
+        } else {
+            None
+        };
         Ok(Self {
             path: path.canonicalize()?,
             device: meta.dev(),
             inode: meta.ino(),
+            owner,
         })
     }
     fn valid(&self) -> Result<()> {
         let current = Self::capture(&self.path)?;
         ensure(
-            current.device == self.device && current.inode == self.inode,
+            current.device == self.device
+                && current.inode == self.inode
+                && current.owner == self.owner,
             "owned resource identity changed",
         )
     }
@@ -61,8 +79,34 @@ impl Directory {
             Err(e) => return Err(e.into()),
             Ok(_) => {}
         }
-        self.valid()?;
-        std::fs::remove_dir_all(&self.path)?;
+        let current = Self::capture(&self.path)?;
+        ensure(
+            current.device == self.device && current.inode == self.inode,
+            "owned resource identity changed",
+        )?;
+        if current.owner.is_some() {
+            self.valid()?;
+            // Keep proof until all source content is gone. A crash during
+            // recursive cleanup must not strand a half-removed resource.
+            for entry in std::fs::read_dir(&self.path)? {
+                let entry = entry?;
+                if entry.file_name() == OWNER_FILE {
+                    continue;
+                }
+                let path = entry.path();
+                if std::fs::symlink_metadata(&path)?.is_dir() {
+                    std::fs::remove_dir_all(path)?;
+                } else {
+                    std::fs::remove_file(path)?;
+                }
+            }
+            File::open(&self.path)?.sync_all()?;
+            self.valid()?;
+            std::fs::remove_file(self.path.join(OWNER_FILE))?;
+            File::open(&self.path)?.sync_all()?;
+        }
+        // Without a marker, only an empty directory can be removed.
+        std::fs::remove_dir(&self.path)?;
         File::open(self.path.parent().unwrap())?.sync_all()?;
         Ok(())
     }
@@ -78,6 +122,8 @@ struct Record {
     phase: Phase,
     directory: Directory,
     driver_endpoint: Option<String>,
+    #[serde(default)]
+    boot: Option<boot::Identity>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -107,6 +153,7 @@ pub(crate) struct Registry {
     root: PathBuf,
     executable: PathBuf,
     runtime: String,
+    boot: Option<boot::Identity>,
 }
 #[derive(Clone)]
 pub(crate) struct Guardian {
@@ -238,6 +285,7 @@ impl Registry {
             root,
             executable,
             runtime,
+            boot: boot::current().ok(),
         })
     }
     pub(crate) async fn recover(&self) -> Result<()> {
@@ -274,7 +322,9 @@ impl Registry {
                     Ok(()) => {
                         let mut state = record(&dir)?;
                         validate_contents(&dir)?;
-                        if state.phase == Phase::Prepared {
+                        if state.phase == Phase::Prepared
+                            || (state.phase == Phase::Starting && self.stopped_by_reboot(&state)?)
+                        {
                             // A late guardian must acquire this same lease and
                             // observe Stopped before it can launch a tool.
                             state.phase = Phase::Stopped;
@@ -354,6 +404,7 @@ impl Registry {
                 phase: Phase::Prepared,
                 directory: Directory::capture(&directory)?,
                 driver_endpoint: None,
+                boot: self.boot.clone(),
             },
         )?;
         write(&directory.join("request.json"), &request)?;

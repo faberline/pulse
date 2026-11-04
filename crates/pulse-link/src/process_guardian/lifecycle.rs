@@ -9,6 +9,8 @@ struct Runtime {
     server: String,
     phase: RuntimePhase,
     directory: Directory,
+    #[serde(default)]
+    boot: Option<boot::Identity>,
 }
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -19,6 +21,29 @@ enum RuntimePhase {
     Closed,
 }
 impl Registry {
+    pub(super) fn stopped_by_reboot(&self, state: &Record) -> Result<bool> {
+        let Some(current) = &self.boot else {
+            return Ok(false);
+        };
+        let Some(prior_boot) = &state.boot else {
+            return Ok(false);
+        };
+        if !current.changed_from(prior_boot) {
+            return Ok(false);
+        }
+        // The original runtime and operation must agree. A missing or foreign
+        // record cannot turn an unproved launch into a stopped operation.
+        let prior: Runtime = read(&self.marker())?;
+        ensure(
+            prior.version == 1
+                && prior.id == state.runtime
+                && prior.boot.as_ref() == Some(prior_boot)
+                && prior.phase != RuntimePhase::Closed,
+            "reboot evidence does not match original runtime",
+        )?;
+        // Re-read the kernel, never infer a reboot from the cached registry alone.
+        Ok(boot::current().is_ok_and(|actual| actual == *current))
+    }
     fn crash_boundary(&self, point: &str) {
         #[cfg(test)]
         if std::env::var("PULSE_OWNED_GUARDIAN_CRASH").as_deref() == Ok(point)
@@ -101,6 +126,7 @@ impl Registry {
             server: server.clone(),
             phase: RuntimePhase::Prepared,
             directory: Directory::capture(self.root.parent().unwrap())?,
+            boot: self.boot.clone(),
         };
         write(&self.marker(), &current)?;
         journal

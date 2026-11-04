@@ -6,6 +6,9 @@ use crate::{
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+mod ownership;
+mod reboot;
+
 fn executable() -> PathBuf {
     let current = std::env::current_exe().unwrap();
     let binary = current
@@ -326,6 +329,7 @@ async fn an_unknown_guardian_file_or_missing_stop_proof_never_erases_resources()
                 },
                 directory: Directory::capture(&dir).unwrap(),
                 driver_endpoint: None,
+                boot: registry.boot.clone(),
             },
         )
         .unwrap();
@@ -374,6 +378,7 @@ async fn missing_runtime_identity_and_copied_operation_directories_cannot_erase_
                     phase: Phase::Stopped,
                     directory: Directory::capture(&dir).unwrap(),
                     driver_endpoint: None,
+                    boot: registry.boot.clone(),
                 },
             )
             .unwrap();
@@ -513,7 +518,14 @@ async fn supervised_source_stop_and_cache_erasure_leave_another_task_running() {
 
 #[tokio::test]
 async fn recovery_preserves_unknown_image_files_and_pre_inode_source_content() {
-    for kind in ["unknown-image", "pre-inode-empty", "pre-inode-content"] {
+    for kind in [
+        "unknown-image",
+        "pre-inode-empty",
+        "pre-inode-content",
+        "pre-inode-marker-partial",
+        "pre-inode-before-marker",
+        "pre-inode-partial-with-content",
+    ] {
         let root = root();
         let registry = bound_registry(root.path()).await;
         let resource = registry
@@ -521,7 +533,11 @@ async fn recovery_preserves_unknown_image_files_and_pre_inode_source_content() {
             .unwrap();
         let path = resource.path().to_path_buf();
         resource.keep();
-        if kind != "pre-inode-empty" {
+        let empty = matches!(
+            kind,
+            "pre-inode-empty" | "pre-inode-marker-partial" | "pre-inode-before-marker"
+        );
+        if !empty {
             crate::journal::private_write(&path.join("KEEP"), b"HUMAN_OR_UNVERIFIED").unwrap();
         }
         if kind.starts_with("pre-inode") {
@@ -534,8 +550,23 @@ async fn recovery_preserves_unknown_image_files_and_pre_inode_source_content() {
             let mut data: serde_json::Value = read(&file).unwrap();
             data["identity"] = serde_json::Value::Null;
             write(&file, &data).unwrap();
+            if matches!(
+                kind,
+                "pre-inode-marker-partial"
+                    | "pre-inode-before-marker"
+                    | "pre-inode-partial-with-content"
+            ) {
+                std::fs::remove_file(path.join(OWNER_FILE)).unwrap();
+                if kind != "pre-inode-before-marker" {
+                    crate::journal::private_write(
+                        &path.join(".pulse-owner.partial"),
+                        b"interrupted marker",
+                    )
+                    .unwrap();
+                }
+            }
         }
-        if kind == "pre-inode-empty" {
+        if empty {
             registry.recover().await.unwrap();
             assert!(!path.exists());
         } else {

@@ -149,10 +149,13 @@ impl Cache {
             return Ok(());
         };
         self.validate()?;
-        validate_png_directory(directory.path())?;
+        if std::fs::read_dir(directory.path())?.next().is_some() {
+            directory.validate()?;
+        }
+        validate_png_directory(directory.path(), directory.owner())?;
         // Retain ownership on error, so a later attempt cannot claim a failed
         // removal succeeded just because its TempDir handle was consumed.
-        std::fs::remove_dir_all(directory.path())?;
+        directory.remove()?;
         if let Some(directory) = owned.take() {
             directory.close()?;
         }
@@ -163,14 +166,19 @@ impl Cache {
         Ok(())
     }
 }
-pub(crate) fn validate_png_directory(path: &Path) -> Result<()> {
-    for (count, entry) in std::fs::read_dir(path)?.take(129).enumerate() {
-        ensure(count < 128, "image cache entry capacity")?;
+pub(crate) fn validate_png_directory(path: &Path, owner: Option<&str>) -> Result<()> {
+    let capacity = 128 + usize::from(owner.is_some());
+    for (count, entry) in std::fs::read_dir(path)?.take(capacity + 1).enumerate() {
+        ensure(count < capacity, "image cache entry capacity")?;
         let entry = entry?;
         let name = entry.file_name();
         let name = name
             .to_str()
             .ok_or_else(|| crate::Error::Rejected("unrecognized image cache entry".into()))?;
+        if name == crate::process_guardian::OWNER_FILE && owner.is_some() {
+            // The caller checked this exact marker against its original record.
+            continue;
+        }
         let png = name.strip_suffix(".png").is_some_and(|s| {
             s.len() == 64
                 && s.bytes()
@@ -438,7 +446,7 @@ impl ImageCaches {
     }
     pub(crate) fn capacity(&self, directory: &Path, slots: usize) -> Result<()> {
         ensure((1..=2).contains(&slots), "invalid image reservation")?;
-        let _serial = self
+        let caches = self
             .0
             .lock()
             .map_err(|_| crate::Error::Rejected("image registry unavailable".into()))?;
@@ -461,7 +469,25 @@ impl ImageCaches {
                         && meta.uid() == rustix::process::geteuid().as_raw(),
                     "unknown image directory",
                 )?;
-                files += std::fs::read_dir(entry.path())?.take(129).count();
+                let path = entry.path();
+                let mut owned_marker = false;
+                if let Some(cache) = caches
+                    .values()
+                    .find(|cache| cache.path.as_ref() == Some(&path))
+                {
+                    let owned = cache.owned.lock().map_err(|_| {
+                        crate::Error::Rejected("image directory unavailable".into())
+                    })?;
+                    if let Some(owned) = owned.as_ref().filter(|owned| owned.owner().is_some()) {
+                        owned.validate()?;
+                        owned_marker = true;
+                    }
+                }
+                // Ownership metadata does not consume the original PNG budget.
+                files += std::fs::read_dir(path)?
+                    .take(130)
+                    .count()
+                    .saturating_sub(usize::from(owned_marker));
             } else {
                 ensure(meta.is_file(), "invalid image cache entry")?;
                 files += 1;
