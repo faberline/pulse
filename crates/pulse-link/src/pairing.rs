@@ -41,6 +41,10 @@ impl Hub {
         let code = hash_bytes(request.code.as_bytes());
         let token_digest = hash_bytes(token.as_bytes());
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+        ensure(
+            !pulse_core::Store::device_retired_by_restore_in(&mut tx, &request.device).await?,
+            "restored device identity is retired; use a fresh pairing identity",
+        )?;
         if let Some(claim) = claim {
             let receipt=sqlx::query("SELECT c.request_digest,p.expires FROM link_pair_claims c JOIN link_pairings p ON p.digest=c.code_digest WHERE c.code_digest=?")
                 .bind(&code).fetch_optional(&mut *tx).await?;

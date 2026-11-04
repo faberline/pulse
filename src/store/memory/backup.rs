@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 mod crypto;
+mod dispatch;
 const DAY: i64 = 24 * 60 * 60 * 1_000;
 const RETENTION: i64 = 30 * DAY;
 const QUARANTINE_SCHEMA: i64 = 2_147_483_647;
@@ -378,6 +379,7 @@ impl Store {
         candidate.initialize_memory().await?;
         let memories = candidate.list_memories(now).await?.len();
         candidate.recover(versions, now).await?;
+        dispatch::fence(&candidate).await?;
         let tasks = candidate.list_tasks(100).await?;
         let unknown_tasks = tasks
             .iter()

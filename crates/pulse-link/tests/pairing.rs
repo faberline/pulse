@@ -3,6 +3,319 @@ use pulse_link::{protocol::*, server::Hub};
 use sqlx::Row;
 
 #[tokio::test]
+async fn checked_restore_retires_devices_and_freezes_work_without_inventing_results() {
+    use pulse_core::{Origin, Receipt, ScheduleRequest, ScheduledAction, State, Versions};
+    use serde_json::json;
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, hub) = setup().await;
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let time = pulse_link::now();
+    let chat = claim(&hub, ClientRole::Chat, time).await;
+    let worker = claim(&hub, ClientRole::LocalExecutor, time).await;
+    hub.claim_pairing(&chat, time).await.unwrap();
+    hub.claim_pairing(&worker, time).await.unwrap();
+    let epoch = hub.begin(&worker.device, 0, time).await.unwrap();
+    let unused = hub.pairing(ClientRole::Chat, time).await.unwrap();
+    let reminder = ScheduleRequest {
+        id: "restore-reminder".into(),
+        label: "owned reminder".into(),
+        source_at: time,
+        due_at: time + 60_000,
+        timezone: "UTC".into(),
+        action: ScheduledAction::Remind {
+            message: "owned fixture".into(),
+        },
+    };
+    let event = hub.core.ingest(Origin::Human,"ui","restore-create",json!({"commands":[
+        {"kind":"create","id":"terminal","goal":"owned completed fixture","scope":"pulse:read","priority":2,"requires_device":false},
+        {"kind":"create","id":"running","goal":"owned fixture","scope":"pulse:read","priority":1,"requires_device":false},
+        {"kind":"create","id":"queued","goal":"owned queued fixture","scope":"pulse:read","priority":0,"requires_device":false},
+        {"kind":"schedule","request":reminder}
+    ]}),time).await.unwrap();
+    assert!(!matches!(
+        hub.core.route(&event.event_id).await.unwrap(),
+        pulse_core::Outcome::Rejected { .. }
+    ));
+    let completed = hub
+        .core
+        .claim_next(&Versions::fixture(), time)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed.token.task_id, "terminal");
+    hub.core
+        .finish(&completed.token, true, "owned goal result", time)
+        .await
+        .unwrap();
+    let terminal_before = hub.core.task("terminal").await.unwrap();
+    let run = hub
+        .core
+        .claim_next(&Versions::fixture(), time)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.token.task_id, "running");
+    hub.core
+        .advance(
+            &run.token,
+            State::Ready,
+            json!({"step":1}),
+            "owned fixture",
+            None,
+            time,
+        )
+        .await
+        .unwrap();
+    let known = hub
+        .core
+        .prepare_operation(&run.token, "fixture:known", json!({"owned":true}), time)
+        .await
+        .unwrap();
+    hub.core
+        .record_receipt(&Receipt {
+            operation_id: known.id.clone(),
+            token: run.token.clone(),
+            success: true,
+            evidence: "owned original receipt".into(),
+        })
+        .await
+        .unwrap();
+    hub.core
+        .advance(
+            &run.token,
+            State::Ready,
+            json!({"step":2}),
+            "owned fixture",
+            None,
+            time,
+        )
+        .await
+        .unwrap();
+    let unknown = hub
+        .core
+        .prepare_operation(&run.token, "fixture:unknown", json!({"owned":true}), time)
+        .await
+        .unwrap();
+    let pending = hub.core.ingest(Origin::Human,"ui","pending-restore-event",json!({"commands":[
+        {"kind":"create","id":"must-not-start","goal":"owned pending fixture","scope":"pulse:read","priority":0,"requires_device":false}
+    ]}),time).await.unwrap();
+    let pool = hub.core.application_pool();
+    let read = ReadOp::List { path: ".".into() };
+    for (id, state, result) in [
+        (
+            &known.id,
+            "completed",
+            Some(serde_json::to_string(&ReadOutcome::text("owned result".into(), false)).unwrap()),
+        ),
+        (&unknown.id, "accepted", None),
+    ] {
+        sqlx::query("INSERT INTO link_reads VALUES(?,?,?,?,?,?,?,?)")
+            .bind(id)
+            .bind(&worker.device)
+            .bind(epoch as i64)
+            .bind("running")
+            .bind("1")
+            .bind(serde_json::to_string(&read).unwrap())
+            .bind(state)
+            .bind(result)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let frame = Envelope::new(
+        &worker.device,
+        1,
+        epoch,
+        ServerPayload::Read {
+            operation_id: unknown.id.clone(),
+            task_id: "running".into(),
+            revision: "1".into(),
+            operation: read,
+        },
+    )
+    .unwrap();
+    sqlx::query("INSERT INTO link_outbox VALUES(?,?,?, ?,0)")
+        .bind(&worker.device)
+        .bind(1_i64)
+        .bind(&frame.id)
+        .bind(serde_json::to_string(&frame).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE link_device SET worker_cleanup=1,worker_erasure=1,projection_erasure=1,schedule_notices=1 WHERE id=?")
+        .bind(&worker.device).execute(&pool).await.unwrap();
+    let before_receipt: (String, String) =
+        sqlx::query_as("SELECT digest,data FROM receipts WHERE operation_id=?")
+            .bind(&known.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let schema: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let backup = hub.core.maintain(time).await.unwrap().backup.unwrap();
+    let checked = hub
+        .core
+        .check_backup(
+            &backup,
+            &dir.path().join("checked"),
+            &Versions::fixture(),
+            time + 1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(checked.unknown_tasks, 1);
+    assert!(Store::open(&checked.candidate, "owner").await.is_err());
+
+    // Test only: open an isolated COPY to exercise the independent auth gates.
+    // The actual candidate keeps its unsupported quarantine marker throughout.
+    let fixture = dir.path().join("runnable-test-copy.db");
+    let mut bytes = std::fs::read(&checked.candidate).unwrap();
+    bytes[60..64].copy_from_slice(&u32::try_from(schema).unwrap().to_be_bytes());
+    std::fs::write(&fixture, bytes).unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let sidecar = |p: &std::path::Path| {
+        let mut name = p.as_os_str().to_owned();
+        name.push(".memory-restrictions.json");
+        std::path::PathBuf::from(name)
+    };
+    std::fs::copy(sidecar(&checked.candidate), sidecar(&fixture)).unwrap();
+    let restored = Hub::new(Store::open(&fixture, "owner").await.unwrap());
+    let restored_pool = restored.core.application_pool();
+    for request in [&chat, &worker] {
+        assert!(restored.authenticate(&request.token).await.is_err());
+        assert!(restored.claim_pairing(request, time + 2).await.is_err());
+        assert!(restored.begin(&request.device, 0, time + 2).await.is_err());
+        assert_eq!(
+            hub.authenticate(&request.token).await.unwrap(),
+            request.device
+        );
+    }
+    let late = Envelope::new(
+        &worker.device,
+        1,
+        epoch,
+        DevicePayload::Result {
+            operation_id: unknown.id.clone(),
+            task_id: "running".into(),
+            revision: "1".into(),
+            outcome: ReadOutcome::text("owned late result".into(), false),
+        },
+    )
+    .unwrap();
+    assert!(
+        restored
+            .receive(&worker.device, &late, time + 2)
+            .await
+            .is_err()
+    );
+    assert_eq!(restored.core.receipts("running").await.unwrap().len(), 1);
+    let flags:(i64,i64,i64,i64,i64,i64,i64,i64)=sqlx::query_as("SELECT revoked,stopped,lease_until,epoch,worker_cleanup,worker_erasure,projection_erasure,schedule_notices FROM link_device WHERE id=?")
+        .bind(&worker.device).fetch_one(&restored_pool).await.unwrap();
+    assert_eq!(flags, (1, 1, 0, epoch as i64 + 1, 0, 0, 0, 0));
+    let old_code = PairRequest {
+        code: unused.clone(),
+        device: uuid::Uuid::new_v4().to_string(),
+        role: ClientRole::Chat,
+    };
+    assert!(restored.redeem(old_code, time + 2).await.is_err());
+    assert_eq!(used(&hub, &unused).await, 0);
+    let mut fresh = claim(&restored, ClientRole::LocalExecutor, time + 2).await;
+    fresh.device = worker.device.clone();
+    assert!(restored.claim_pairing(&fresh, time + 2).await.is_err());
+    assert_eq!(used(&restored, &fresh.code).await, 0);
+    fresh.device = uuid::Uuid::new_v4().to_string();
+    restored.claim_pairing(&fresh, time + 2).await.unwrap();
+    assert_eq!(
+        restored.authenticate(&fresh.token).await.unwrap(),
+        fresh.device
+    );
+    restored.begin(&fresh.device, 0, time + 2).await.unwrap();
+    assert!(
+        restored
+            .outgoing(&fresh.device)
+            .await
+            .unwrap()
+            .iter()
+            .all(|f| !matches!(f.payload, ServerPayload::Read { .. }))
+    );
+    let queued: (String, i64) =
+        sqlx::query_as("SELECT data,acknowledged FROM link_outbox WHERE device=? AND sequence=1")
+            .bind(&worker.device)
+            .fetch_one(&restored_pool)
+            .await
+            .unwrap();
+    assert_eq!(queued, (serde_json::to_string(&frame).unwrap(), 0));
+    assert!(restored.core.pending_events(100).await.unwrap().is_empty());
+    assert!(
+        matches!(restored.core.route(&pending.event_id).await.unwrap(),pulse_core::Outcome::Rejected{reason} if reason=="backup_restore_review_required")
+    );
+    assert!(restored.core.task("must-not-start").await.is_err());
+    assert_eq!(
+        restored.core.task("queued").await.unwrap().state,
+        State::Blocked
+    );
+    assert_eq!(
+        serde_json::to_value(restored.core.task("terminal").await.unwrap()).unwrap(),
+        serde_json::to_value(terminal_before).unwrap()
+    );
+    assert_eq!(
+        restored.core.task("running").await.unwrap().state,
+        State::OutcomeUnknown
+    );
+    let schedule = restored.core.schedules(100).await.unwrap().pop().unwrap();
+    assert_eq!(schedule.state, pulse_core::ScheduleState::Cancelled);
+    assert_eq!(schedule.revision, 2);
+    assert!(
+        !restored
+            .core
+            .fire_schedule(time + 60_000)
+            .await
+            .unwrap()
+            .fired
+    );
+    restored
+        .core
+        .recover(&Versions::fixture(), time + 3)
+        .await
+        .unwrap();
+    restored.recover().await.unwrap();
+    assert!(
+        restored
+            .core
+            .claim_next(&Versions::fixture(), time + 3)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let after_receipt: (String, String) =
+        sqlx::query_as("SELECT digest,data FROM receipts WHERE operation_id=?")
+            .bind(&known.id)
+            .fetch_one(&restored_pool)
+            .await
+            .unwrap();
+    assert_eq!(after_receipt, before_receipt);
+    let states: Vec<(String, String)> =
+        sqlx::query_as("SELECT id,state FROM link_reads ORDER BY id")
+            .fetch_all(&restored_pool)
+            .await
+            .unwrap();
+    assert!(states.contains(&(known.id.clone(), "completed".into())));
+    assert!(states.contains(&(unknown.id.clone(), "unknown".into())));
+    assert_eq!(hub.core.task("queued").await.unwrap().state, State::Queued);
+    assert_eq!(
+        hub.core.pending_events(100).await.unwrap(),
+        vec![pending.event_id]
+    );
+    assert_eq!(
+        hub.core.schedules(100).await.unwrap()[0].state,
+        pulse_core::ScheduleState::Armed
+    );
+    assert!(Store::open(&checked.candidate, "owner").await.is_err());
+}
+
+#[tokio::test]
 async fn schema_ten_upgrade_preserves_identity_and_seeds_existing_token_history() {
     use sqlx::{Connection, Executor};
     let (dir, hub) = setup().await;

@@ -337,6 +337,18 @@ async fn snapshot_contains_committed_tasks_and_unknown_operation_stays_unknown()
         .await
         .unwrap()
         .unwrap();
+    assert!(
+        store
+            .reserve(
+                &run.token,
+                "restore-held-call",
+                20_000,
+                "fixture-rate",
+                NOW + 1
+            )
+            .await
+            .unwrap()
+    );
     store
         .advance(
             &run.token,
@@ -372,7 +384,116 @@ async fn snapshot_contains_committed_tasks_and_unknown_operation_stays_unknown()
         .unwrap();
     let restored: Operation = serde_json::from_str(&data).unwrap();
     assert_eq!(restored.state, OperationState::Unknown);
+    let budget: (String, i64, i64) = sqlx::query_as(
+        "SELECT state,reserved,charged FROM budget WHERE call_id='restore-held-call'",
+    )
+    .fetch_one(&mut db)
+    .await
+    .unwrap();
+    assert_eq!(budget, ("unknown".into(), 20_000, 20_000));
+    let live: (String, i64, i64) = sqlx::query_as(
+        "SELECT state,reserved,charged FROM budget WHERE call_id='restore-held-call'",
+    )
+    .fetch_one(&store.application_pool())
+    .await
+    .unwrap();
+    assert_eq!(live, ("reserved".into(), 20_000, 20_000));
     assert!(store.pending_operations("task").await.unwrap().len() == 1);
+}
+
+#[tokio::test]
+async fn restore_dispatch_sql_failure_rolls_back_fences_and_keeps_quarantine() {
+    let (dir, store) = setup().await;
+    let pool = store.application_pool();
+    sqlx::query("INSERT INTO link_device(id,token_digest,epoch,lease_until) VALUES('device','fixture-token',7,99)")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO link_pairings(digest,expires) VALUES('fixture-code',99)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TRIGGER fixture_restore_failure BEFORE UPDATE ON link_device BEGIN SELECT RAISE(ABORT,'owned restore failure'); END")
+        .execute(&pool).await.unwrap();
+    let backup = store.maintain(NOW).await.unwrap().backup.unwrap();
+    let destination = dir.path().join("failed");
+    assert!(
+        store
+            .check_backup(&backup, &destination, &Versions::fixture(), NOW + 1)
+            .await
+            .is_err()
+    );
+    let candidate = destination.join("candidate.db");
+    let mut db = raw(&candidate).await;
+    let state: (i64, i64, i64) =
+        sqlx::query_as("SELECT revoked,epoch,lease_until FROM link_device WHERE id='device'")
+            .fetch_one(&mut db)
+            .await
+            .unwrap();
+    assert_eq!(state, (0, 7, 99));
+    let retired: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM settings WHERE key LIKE 'restore_retired_device:%'",
+    )
+    .fetch_one(&mut db)
+    .await
+    .unwrap();
+    assert_eq!(retired, 0);
+    let marker: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&mut db)
+        .await
+        .unwrap();
+    assert_eq!(marker, 2_147_483_647);
+    db.close().await.unwrap();
+    assert!(Store::open(&candidate, "owner").await.is_err());
+    let live: (i64, i64, i64) =
+        sqlx::query_as("SELECT revoked,epoch,lease_until FROM link_device WHERE id='device'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(live, state);
+    let used: i64 =
+        sqlx::query_scalar("SELECT used FROM link_pairings WHERE digest='fixture-code'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(used, 0);
+}
+
+#[tokio::test]
+async fn invalid_restore_device_epochs_never_wrap_or_produce_a_runnable_candidate() {
+    for epoch in [-1, i64::MAX] {
+        let (dir, store) = setup().await;
+        sqlx::query(
+            "INSERT INTO link_device(id,token_digest,epoch) VALUES('device','fixture-token',?)",
+        )
+        .bind(epoch)
+        .execute(&store.application_pool())
+        .await
+        .unwrap();
+        let backup = store.maintain(NOW).await.unwrap().backup.unwrap();
+        let destination = dir.path().join("failed");
+        assert!(
+            store
+                .check_backup(&backup, &destination, &Versions::fixture(), NOW + 1)
+                .await
+                .is_err()
+        );
+        let path = destination.join("candidate.db");
+        let mut db = raw(&path).await;
+        let actual: (i64, i64) =
+            sqlx::query_as("SELECT revoked,epoch FROM link_device WHERE id='device'")
+                .fetch_one(&mut db)
+                .await
+                .unwrap();
+        assert_eq!(actual, (0, epoch));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("PRAGMA user_version")
+                .fetch_one(&mut db)
+                .await
+                .unwrap(),
+            2_147_483_647
+        );
+        db.close().await.unwrap();
+        assert!(Store::open(&path, "owner").await.is_err());
+    }
 }
 
 #[tokio::test]
