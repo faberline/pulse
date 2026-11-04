@@ -10,6 +10,8 @@ use std::{
 };
 
 static FIXTURES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+#[path = "pairing_restore_tests.rs"]
+mod restore;
 #[derive(Default)]
 struct TestVault {
     active: Mutex<Option<Credential>>,
@@ -17,6 +19,8 @@ struct TestVault {
     fail_pending: AtomicBool,
     fail_save: AtomicBool,
     fail_clear: AtomicBool,
+    pending_saves: AtomicUsize,
+    fail_pending_at: AtomicUsize,
 }
 impl Vault for TestVault {
     fn load(&self, _: &str) -> Result<Option<Credential>> {
@@ -34,8 +38,10 @@ impl Vault for TestVault {
         Ok(())
     }
     fn save_pending(&self, _: &str, value: &PairClaim) -> Result<()> {
+        let save = self.pending_saves.fetch_add(1, Ordering::SeqCst) + 1;
         ensure(
-            !self.fail_pending.load(Ordering::SeqCst),
+            !self.fail_pending.load(Ordering::SeqCst)
+                && self.fail_pending_at.load(Ordering::SeqCst) != save,
             "fixture pending save failed",
         )?;
         *self.pending.lock().unwrap() = Some(value.clone());
@@ -404,6 +410,7 @@ async fn pairing_endpoints_fail_closed_on_storage_errors_and_disable_caching() {
         device: value.device,
         role: value.role,
         attempt_id: uuid::Uuid::new_v4().to_string(),
+        server_generation: None,
     };
     let response = client
         .post(f.config.server.join("v1/device-pairings/claim").unwrap())

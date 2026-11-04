@@ -20,6 +20,7 @@ mod checkpoint;
 mod copy;
 pub(super) mod derived_messages;
 mod derived_results;
+mod peer_restore;
 mod revocations;
 pub(super) mod task_sources;
 mod withdrawals;
@@ -51,6 +52,8 @@ struct Restrictions {
     worker: Option<worker_copy::WorkerCopy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     restore: Option<RestoreFence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    peer_restore: Option<peer_restore::PeerRestore>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -207,13 +210,16 @@ impl MemoryGuard {
         let value: Restrictions = serde_json::from_slice(&bytes)
             .map_err(|_| Error::Rejected("invalid memory restrictions".into()))?;
         require(
-            (1..=8).contains(&value.format)
+            (1..=9).contains(&value.format)
                 && match &value.restore {
                     Some(restore) => {
                         value.format == 8 && uuid::Uuid::parse_str(&restore.generation).is_ok()
                     }
-                    None => value.format < 8,
+                    None => value.format < 8 || (value.format == 9 && value.peer_restore.is_some()),
                 }
+                && value.peer_restore.as_ref().is_none_or(|peer| {
+                    value.format == 9 && value.restore.is_none() && peer.valid()
+                })
                 && value
                     .worker
                     .as_ref()
@@ -304,6 +310,7 @@ impl Store {
                             withdrawals: BTreeMap::new(),
                             worker: None,
                             restore: None,
+                            peer_restore: None,
                         };
                         self.memory_guard.write(&manifest)?;
                         manifest
@@ -707,10 +714,11 @@ pub(super) fn admit_database_open(database: &Path) -> Result<()> {
 pub(super) async fn admit_database_pool(database: &Path, pool: &sqlx::SqlitePool) -> Result<()> {
     let guard = MemoryGuard::target(database)?;
     if let Some(manifest) = guard.read()?
-        && manifest.restore.is_some()
+        && (manifest.restore.is_some() || manifest.peer_restore.is_some())
     {
         let mut db = pool.acquire().await?;
         restore_binding(&mut db, &manifest).await?;
+        peer_restore::check(&mut db, &manifest).await?;
     }
     Ok(())
 }

@@ -9,6 +9,20 @@ use axum::{
 use sqlx::Row;
 use std::sync::Arc;
 
+async fn generation(db: &mut sqlx::SqliteConnection) -> Result<Option<String>> {
+    let value: Option<String> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key='restore_generation'")
+            .fetch_optional(db)
+            .await?;
+    if value
+        .as_ref()
+        .is_some_and(|value| !uuid::Uuid::parse_str(value).is_ok_and(|id| id.to_string() == *value))
+    {
+        return Err(pulse_core::Error::Rejected("invalid server restore generation".into()).into());
+    }
+    Ok(value)
+}
+
 impl Hub {
     pub async fn redeem(&self, request: PairRequest, time: i64) -> Result<Credential> {
         self.install_pairing(request, secret()?, None, time).await
@@ -41,6 +55,12 @@ impl Hub {
         let code = hash_bytes(request.code.as_bytes());
         let token_digest = hash_bytes(token.as_bytes());
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+        let current_generation = generation(&mut tx).await?;
+        ensure(
+            claim.and_then(|claim| claim.server_generation.as_deref())
+                == current_generation.as_deref(),
+            "pairing belongs to another server restore generation",
+        )?;
         ensure(
             !pulse_core::Store::device_retired_by_restore_in(&mut tx, &request.device).await?,
             "restored device identity is retired; use a fresh pairing identity",
@@ -141,6 +161,7 @@ impl Hub {
         Ok(PairIdentity {
             device: row.get("id"),
             role: serde_json::from_value(serde_json::Value::String(row.get("role")))?,
+            server_generation: generation(&mut *self.db.acquire().await?).await?,
         })
     }
 }
@@ -173,6 +194,13 @@ pub(crate) async fn claim(State(hub): State<Arc<Hub>>, bytes: Bytes) -> Response
     }
 }
 pub(crate) async fn identity(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Response {
+    let server_generation = match hub.db.acquire().await {
+        Ok(mut connection) => match generation(&mut connection).await {
+            Ok(value) => value,
+            Err(_) => return private(StatusCode::SERVICE_UNAVAILABLE),
+        },
+        Err(_) => return private(StatusCode::SERVICE_UNAVAILABLE),
+    };
     let Some(token) = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -180,11 +208,23 @@ pub(crate) async fn identity(State(hub): State<Arc<Hub>>, headers: HeaderMap) ->
     else {
         return private(StatusCode::UNAUTHORIZED);
     };
-    match hub.pairing_identity(token).await {
+    let mut response = match hub.pairing_identity(token).await {
         Ok(value) => private(axum::Json(value)),
         Err(error) => private(crate::server::authentication_response(
             &error,
             StatusCode::UNAUTHORIZED,
         )),
+    };
+    if response.status() == StatusCode::UNAUTHORIZED
+        && response
+            .headers()
+            .get("x-pulse-credential-denied")
+            .is_some_and(|value| value == "1")
+        && let Some(value) = server_generation
+    {
+        response
+            .headers_mut()
+            .insert("x-pulse-restore-generation", value.parse().unwrap());
     }
+    response
 }

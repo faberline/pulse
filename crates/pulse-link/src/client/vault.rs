@@ -60,11 +60,16 @@ mod record {
             device: credential.device.clone(),
             role: credential.role,
             token: "c".repeat(64),
+            server_generation: None,
         });
         let bytes = serde_json::to_vec(&record).unwrap();
         let current = Record::decode(&bytes).unwrap();
         assert!(current.active.is_some());
         assert!(current.pending.unwrap().valid());
+        let generation = uuid::Uuid::new_v4().to_string();
+        record.pending.as_mut().unwrap().server_generation = Some(generation.clone());
+        let current = Record::decode(&serde_json::to_vec(&record).unwrap()).unwrap();
+        assert_eq!(current.pending.unwrap().server_generation, Some(generation));
         record.format = 2;
         assert!(Record::decode(&serde_json::to_vec(&record).unwrap()).is_err());
         assert!(

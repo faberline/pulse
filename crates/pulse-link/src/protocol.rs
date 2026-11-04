@@ -498,6 +498,8 @@ pub struct PairClaim {
     pub device: String,
     pub role: ClientRole,
     pub token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_generation: Option<String>,
 }
 impl PairClaim {
     pub fn valid(&self) -> bool {
@@ -507,6 +509,9 @@ impl PairClaim {
             && [&self.code, &self.token]
                 .iter()
                 .all(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+            && self.server_generation.as_ref().is_none_or(|value| {
+                uuid::Uuid::parse_str(value).is_ok_and(|id| id.to_string() == *value)
+            })
     }
     pub fn credential(&self) -> Credential {
         Credential {
@@ -521,6 +526,8 @@ impl PairClaim {
 pub struct PairIdentity {
     pub device: String,
     pub role: ClientRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_generation: Option<String>,
 }
 
 pub(crate) fn secret() -> crate::Result<String> {

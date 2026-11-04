@@ -39,6 +39,7 @@ pub(super) async fn begin(
             role: journal.role,
             attempt_id: uuid::Uuid::new_v4().to_string(),
             token: secret()?,
+            server_generation: None,
         };
         let copy = vault.clone();
         let key = account.clone();
@@ -56,12 +57,18 @@ pub(super) async fn recover(
     journal: Journal,
     vault: Arc<dyn Vault>,
     account: String,
-    claim: PairClaim,
+    mut claim: PairClaim,
 ) -> Result<Credential> {
     ensure(
         claim.valid() && claim.device == journal.device && claim.role == journal.role,
         "pending pairing identity mismatch",
     )?;
+    if let Some(generation) = &claim.server_generation {
+        journal
+            .core
+            .require_peer_restore(&journal.device, &hash(&journal.server)?, generation)
+            .await?;
+    }
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -78,7 +85,9 @@ pub(super) async fn recover(
         reqwest::StatusCode::OK => {
             let identity: PairIdentity = body(response).await?;
             ensure(
-                identity.device == claim.device && identity.role == claim.role,
+                identity.device == claim.device
+                    && identity.role == claim.role
+                    && identity.server_generation == claim.server_generation,
                 "pair identity proof mismatch",
             )?;
             claim.credential()
@@ -89,6 +98,50 @@ pub(super) async fn recover(
                 .get("x-pulse-credential-denied")
                 .is_some_and(|v| v == "1") =>
         {
+            let generation = response
+                .headers()
+                .get("x-pulse-restore-generation")
+                .map(|value| value.to_str().map(str::to_owned))
+                .transpose()
+                .map_err(|_| crate::Error::Rejected("invalid server restore generation".into()))?;
+            ensure(
+                generation.as_ref().is_none_or(|value| {
+                    uuid::Uuid::parse_str(value).is_ok_and(|id| id.to_string() == *value)
+                }),
+                "invalid server restore generation",
+            )?;
+            if generation != claim.server_generation {
+                ensure(
+                    claim.server_generation.is_none() && generation.is_some(),
+                    "restored server requires a new empty data directory",
+                )?;
+                let copy = vault.clone();
+                let key = account.clone();
+                let active = tokio::task::spawn_blocking(move || copy.load(&key))
+                    .await
+                    .map_err(|_| crate::Error::Rejected("Keychain worker failed".into()))??;
+                ensure(
+                    active.is_none(),
+                    "restored server requires a new empty data directory; pair before submitting input",
+                )?;
+                journal
+                    .core
+                    .bind_peer_restore(
+                        &journal.device,
+                        &hash(&journal.server)?,
+                        generation.as_deref().unwrap(),
+                    )
+                    .await?;
+                claim.server_generation = generation;
+                claim.token = secret()?;
+                claim.attempt_id = uuid::Uuid::new_v4().to_string();
+                let copy = vault.clone();
+                let key = account.clone();
+                let saved = claim.clone();
+                tokio::task::spawn_blocking(move || copy.save_pending(&key, &saved))
+                    .await
+                    .map_err(|_| crate::Error::Rejected("Keychain worker failed".into()))??;
+            }
             let response = client
                 .post(config.server.join("v1/device-pairings/claim")?)
                 .json(&claim)

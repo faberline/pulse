@@ -22,6 +22,9 @@ fn fingerprint(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 impl CopyFence {
+    pub(super) fn pristine(&self) -> bool {
+        self.generation == 0 && !self.denied && self.credential.is_none() && self.pending.is_none()
+    }
     pub(super) fn valid(&self) -> bool {
         revocations::canonical(&self.device).is_ok_and(|v| v == self.device)
             && fingerprint(&self.server)

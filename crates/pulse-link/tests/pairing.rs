@@ -379,6 +379,7 @@ async fn claim(hub: &Hub, role: ClientRole, time: i64) -> PairClaim {
         device: uuid::Uuid::new_v4().to_string(),
         role,
         attempt_id: uuid::Uuid::new_v4().to_string(),
+        server_generation: None,
         token: format!(
             "{}{}",
             uuid::Uuid::new_v4().simple(),
@@ -392,6 +393,53 @@ async fn used(hub: &Hub, code: &str) -> i64 {
         .fetch_one(&hub.core.application_pool())
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn restored_server_requires_the_current_generation_before_consuming_pairing_authority() {
+    let (_dir, hub) = setup().await;
+    let time = pulse_link::now();
+    let generation = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO settings VALUES('restore_generation',?)")
+        .bind(&generation)
+        .execute(&hub.core.application_pool())
+        .await
+        .unwrap();
+    let mut request = claim(&hub, ClientRole::Chat, time).await;
+    assert!(hub.claim_pairing(&request, time).await.is_err());
+    assert_eq!(used(&hub, &request.code).await, 0);
+    assert!(
+        hub.redeem(
+            PairRequest {
+                code: request.code.clone(),
+                device: request.device.clone(),
+                role: request.role
+            },
+            time
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(used(&hub, &request.code).await, 0);
+    request.server_generation = Some(uuid::Uuid::new_v4().to_string());
+    assert!(hub.claim_pairing(&request, time).await.is_err());
+    assert_eq!(used(&hub, &request.code).await, 0);
+    request.server_generation = Some(generation.clone());
+    let credential = hub.claim_pairing(&request, time).await.unwrap();
+    let repeated = hub.claim_pairing(&request, time).await.unwrap();
+    assert_eq!(hash(&credential).unwrap(), hash(&repeated).unwrap());
+    let identity = hub.pairing_identity(&credential.token).await.unwrap();
+    assert_eq!(
+        identity.server_generation.as_deref(),
+        Some(generation.as_str())
+    );
+    sqlx::query("UPDATE settings SET value=? WHERE key='restore_generation'")
+        .bind(uuid::Uuid::new_v4().to_string())
+        .execute(&hub.core.application_pool())
+        .await
+        .unwrap();
+    assert!(hub.claim_pairing(&request, time).await.is_err());
+    assert_eq!(used(&hub, &request.code).await, 1);
 }
 
 #[tokio::test]
