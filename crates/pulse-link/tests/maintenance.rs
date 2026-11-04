@@ -1,4 +1,6 @@
-use pulse_core::{MEMORY_RETENTION_MS, MemoryCommand, MemoryRequest, Origin, Store};
+use pulse_core::{
+    DatabaseMaintenance, MEMORY_RETENTION_MS, MemoryCommand, MemoryRequest, Origin, Store,
+};
 use pulse_link::{maintenance, now};
 use std::time::Duration;
 
@@ -111,14 +113,39 @@ async fn server_process_backs_up_once_across_kill_restart_and_checks_quarantine(
             .unwrap();
         assert_eq!(response.text().await.unwrap(), "live");
         assert!(child.try_wait().unwrap().is_none());
+        assert!(DatabaseMaintenance::try_acquire(database).is_err());
         child
     }
     let directory = tempfile::tempdir().unwrap();
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let database = directory.path().join("db");
     let mut child = start(&database).await;
+    let pairing = tokio::time::timeout(
+        Duration::from_secs(30),
+        Command::new(env!("CARGO_BIN_EXE_pulse-server"))
+            .arg("pair-chat")
+            .arg(&database)
+            .arg(directory.path().join("pairing-code"))
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("ANTHROPIC_API_KEY")
+            .env("PULSE_ENV_FILE", database.with_extension("no-env"))
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        pairing.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pairing.stderr)
+    );
+    assert!(pairing.stdout.is_empty());
+    assert!(directory.path().join("pairing-code").is_file());
+    assert!(child.try_wait().unwrap().is_none());
+    assert!(DatabaseMaintenance::try_acquire(&database).is_err());
     child.start_kill().unwrap();
     child.wait().await.unwrap();
+    drop(DatabaseMaintenance::try_acquire(&database).unwrap());
     let backups = directory.path().join("db.backups");
     let files: Vec<_> = std::fs::read_dir(&backups)
         .unwrap()

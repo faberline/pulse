@@ -317,6 +317,7 @@ impl Store {
         )?;
         std::fs::DirBuilder::new().mode(0o700).create(destination)?;
         let database = destination.join("candidate.db");
+        let pool_options = super::super::database_access::shared_pool(&database)?;
         let mut file = self.memory_guard.open_private(&database, true, true)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
@@ -328,10 +329,7 @@ impl Store {
             .synchronous(sqlx::sqlite::SqliteSynchronous::Full)
             .foreign_keys(true)
             .pragma("secure_delete", "ON");
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await?;
+        let pool = pool_options.connect_with(options).await?;
         let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
             .fetch_one(&pool)
             .await?;

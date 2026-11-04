@@ -5,6 +5,7 @@
 *.memory-restrictions.json
 *.memory-restrictions.*.tmp
 *.memory-lock
+*.use-lock
 *.backup-key
 *.backups/
 *.pulsebak

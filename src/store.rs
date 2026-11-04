@@ -17,6 +17,8 @@ const DEADLINE_MS: i64 = 15 * 60 * 1_000;
 const SCHEMA: i64 = 18;
 
 mod approvals;
+mod database_access;
+pub use database_access::DatabaseMaintenance;
 mod memory;
 mod schedules;
 pub use memory::{
@@ -34,7 +36,9 @@ pub struct Store {
 impl Store {
     pub async fn open(path: impl AsRef<Path>, owner: &str) -> Result<Self> {
         require(!owner.is_empty(), "owner must not be empty")?;
+        let pool_options = database_access::shared_pool(path.as_ref())?;
         private_database(path.as_ref())?;
+        database_access::validate_database(path.as_ref())?;
         let memory_guard = memory::MemoryGuard::new(path.as_ref())?;
         let options = SqliteConnectOptions::new()
             .filename(path)
@@ -44,10 +48,7 @@ impl Store {
             .pragma("secure_delete", "ON")
             .foreign_keys(true)
             .busy_timeout(Duration::from_secs(5));
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await?;
+        let pool = pool_options.connect_with(options).await?;
         let version: String = sqlx::query_scalar("SELECT sqlite_version()")
             .fetch_one(&pool)
             .await?;
@@ -88,6 +89,8 @@ impl Store {
     }
 
     /// Trusted application extension storage, never exposed to remote callers.
+    /// Keep this pool bound to this database. Open other databases with Store::open.
+    /// Drop all exported handles and close detached connections before maintenance.
     pub fn application_pool(&self) -> SqlitePool {
         self.pool.clone()
     }
