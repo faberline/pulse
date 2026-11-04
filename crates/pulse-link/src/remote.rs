@@ -9,7 +9,7 @@ pub fn versions() -> Versions {
 }
 fn manifest(provider: Option<&Provider>) -> Versions {
     Versions {
-        workflow: "pulse-remote-22".into(),
+        workflow: "pulse-remote-23".into(),
         schema: "1".into(),
         prompt: "effective-read-7".into(),
         tools: "pulse-tools-6".into(),

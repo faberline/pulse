@@ -4,7 +4,7 @@
 Swift 只顯示 Rust 回傳的狀態。來源核對、清除、重送與恢復都由 Rust 處理。
 其他介面可以使用同一套 Rust 命令與狀態契約。
 
-資料庫 schema 為 19。remote workflow 為 `pulse-remote-22`。
+資料庫 schema 為 19。remote workflow 為 `pulse-remote-23`。
 policy 為 `approved-effects-memory-fences-9`。不相容的舊 run 仍須重新核對。
 
 ## 保存與移除

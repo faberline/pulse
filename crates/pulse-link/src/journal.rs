@@ -277,6 +277,26 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
     }
     pub async fn action(&self, source_id: &str, action: HumanAction) -> Result<()> {
         self.ensure_worker_access().await?;
+        let review = match &action {
+            HumanAction::AcceptResult { .. } => true,
+            HumanAction::Submit { goal, .. } => crate::result_acceptance::target(goal).is_some(),
+            HumanAction::SubmitTextFile { goal, .. } | HumanAction::SubmitComputer { goal, .. } => {
+                ensure(
+                    crate::result_acceptance::target(goal).is_none(),
+                    "result review requires plain input",
+                )?;
+                false
+            }
+            _ => false,
+        };
+        if review {
+            ensure(self.role == ClientRole::Chat, "result review requires chat")?;
+        }
+        let _review = if review {
+            Some(self.memory_lifecycle.lock().await)
+        } else {
+            None
+        };
         if let HumanAction::SubmitTextFile { goal, input, .. } = &action {
             ensure(self.role == ClientRole::Chat, "file input requires chat")?;
             input.validate_goal(goal)?;
@@ -288,6 +308,11 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         }
         let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
         let mut action = action;
+        if let HumanAction::Submit { goal, .. } = &action
+            && let Some(frozen) = crate::result_acceptance::freeze(&mut tx, source_id, goal).await?
+        {
+            action = frozen;
+        }
         if let HumanAction::Submit { id, goal } = &action {
             let prior: Option<(String, String)> =
                 sqlx::query_as("SELECT text,request FROM local_schedule_inputs WHERE source_id=?")
@@ -323,7 +348,8 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
         if let HumanAction::Submit { goal, .. }
         | HumanAction::SubmitComputer { goal, .. }
         | HumanAction::SubmitTextFile { goal, .. }
-        | HumanAction::Schedule { text: goal, .. } = &action
+        | HumanAction::Schedule { text: goal, .. }
+        | HumanAction::AcceptResult { text: goal, .. } = &action
         {
             ensure(
                 !goal.trim().is_empty() && goal.len() <= 4096,
@@ -349,6 +375,7 @@ CREATE TABLE IF NOT EXISTS local_pending(id TEXT PRIMARY KEY,body TEXT NOT NULL,
                 | HumanAction::SubmitComputer { .. }
                 | HumanAction::SubmitTextFile { .. }
                 | HumanAction::Schedule { .. }
+                | HumanAction::AcceptResult { .. }
         ) {
             self.enqueue_conversation_boundary_in(&mut tx).await?;
         }

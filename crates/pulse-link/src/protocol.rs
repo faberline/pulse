@@ -223,6 +223,13 @@ impl ReadOp {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HumanAction {
+    AcceptResult {
+        task_id: String,
+        revision: String,
+        message_id: String,
+        chat_digest: String,
+        text: String,
+    },
     SubmitTextFile {
         id: String,
         goal: String,

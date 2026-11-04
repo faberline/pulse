@@ -221,6 +221,9 @@ impl Hub {
             crate::conversation::label(&task),
             reply.text
         );
+        run.checkpoint["result_review"] = json!({
+            "version":1, "message_id":id, "chat_digest":hash_bytes(chat.as_bytes()), "saved_at":time
+        });
         if let Some(result) = Self::make_text_result(&mut tx, &task, &run, &id, &chat, time).await?
         {
             let result = serde_json::to_value(result)?;
@@ -983,6 +986,24 @@ impl Hub {
                 };
                 let mut pending_targets = None;
                 let commands = match action {
+                    HumanAction::AcceptResult {
+                        task_id,
+                        revision,
+                        message_id,
+                        chat_digest,
+                        text,
+                    } => {
+                        ensure(
+                            !text.trim().is_empty() && text.len() <= 4096,
+                            "result review text size",
+                        )?;
+                        vec![Command::AcceptResult {
+                            id: task_id.clone(),
+                            expected_revision: number(revision)?,
+                            message_id: message_id.clone(),
+                            chat_digest: chat_digest.clone(),
+                        }]
+                    }
                     HumanAction::SubmitTextFile { id, goal, input } => {
                         input.validate_goal(goal)?;
                         ensure(
@@ -1177,7 +1198,8 @@ impl Hub {
                     HumanAction::Submit { goal, .. }
                     | HumanAction::SubmitTextFile { goal, .. }
                     | HumanAction::SubmitComputer { goal, .. }
-                    | HumanAction::Schedule { text: goal, .. },
+                    | HumanAction::Schedule { text: goal, .. }
+                    | HumanAction::AcceptResult { text: goal, .. },
                 ) = (&outcome, action)
                 {
                     let notice = match reason.as_str() {
@@ -1194,6 +1216,15 @@ impl Hub {
                         "task history capacity; retirement space unavailable" => {
                             "工作歷史容量已滿，目前不能新增工作。仍可查詢與取消。"
                         }
+                        "memory-derived result review is not enabled" => {
+                            "此成果仍有記憶來源待驗收，尚不能確認完成。"
+                        }
+                        "result is not current or has unresolved work"
+                        | "result review evidence unavailable or changed"
+                        | "displayed result changed"
+                        | "result task was retired" => {
+                            "成果、修訂或操作狀態已變更，未確認完成。請重新查看目前成果。"
+                        }
                         _ => "要求未執行。請查詢目前任務狀態，核對對象與限制。",
                     };
                     self.chat(source_id, &format!("已保存訊息：{goal}"), time)
@@ -1206,6 +1237,20 @@ impl Hub {
                     "task control rejected",
                 )?;
                 match action {
+                    HumanAction::AcceptResult { task_id, text, .. } => {
+                        self.chat(source_id, &format!("已保存訊息：{text}"), time)
+                            .await?;
+                        let task = self.core.task(task_id).await?;
+                        self.chat(
+                            &format!("reply:{source_id}"),
+                            &format!(
+                                "已接受 {} 的成果，任務完成。",
+                                crate::conversation::label(&task)
+                            ),
+                            time,
+                        )
+                        .await?;
+                    }
                     HumanAction::RebindComputer { task_id, .. } => {
                         let task = self.core.task(task_id).await?;
                         self.chat(

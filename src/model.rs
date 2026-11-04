@@ -178,6 +178,13 @@ pub enum Command {
         #[serde(with = "decimal")]
         expected_revision: u64,
     },
+    AcceptResult {
+        id: String,
+        #[serde(with = "decimal")]
+        expected_revision: u64,
+        message_id: String,
+        chat_digest: String,
+    },
     Query {
         ids: Vec<String>,
     },

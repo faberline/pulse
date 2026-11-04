@@ -20,6 +20,8 @@ use tokio_tungstenite::{
 };
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+#[path = "server_lifecycle/result_acceptance.rs"]
+mod result_acceptance;
 struct Server {
     child: Child,
     log: PathBuf,

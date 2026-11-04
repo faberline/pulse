@@ -25,6 +25,7 @@ pub(crate) fn status(task: &Task) -> String {
         OutcomeUnknown | Reconciling => "結果待核對，暫不繼續",
         CancelRequested => "取消中",
         Cancelled => "已取消",
+        Succeeded if task.reason.as_deref() == Some("human_accepted_result") => "成果已接受",
         Succeeded => "已完成驗收",
         Failed => "未完成",
         Blocked if task.reason.as_deref() == Some("model_reply_ready") => "分析已保存，待確認",
@@ -385,6 +386,12 @@ fn line(id: &str, text: &str, tasks: &[Task]) -> Vec<Command> {
 }
 
 pub(crate) fn plan(id: &str, text: &str, tasks: &[Task]) -> Vec<Command> {
+    if crate::result_acceptance::target(text).is_some() {
+        return vec![Command::Clarify {
+            question: "請先在目前對話顯示成果，再接受該成果；不能由 server 猜測你看過的版本。"
+                .into(),
+        }];
+    }
     let lines: Vec<&str> = text
         .lines()
         .map(str::trim)

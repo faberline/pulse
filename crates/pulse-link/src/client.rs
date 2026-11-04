@@ -651,8 +651,10 @@ impl Device {
                         if self.journal.role != ClientRole::Chat {message="executor 不接受人類輸入。請使用對話框。".into();continue;}
                         let receipt_id=source_id.clone();
                         let memory_control=matches!(&action,HumanAction::Submit{goal,..} if crate::memory_chat::parse(goal).is_some());
+                        let result_review=matches!(&action,HumanAction::AcceptResult{..})
+                            || matches!(&action,HumanAction::Submit{goal,..}|HumanAction::SubmitTextFile{goal,..}|HumanAction::SubmitComputer{goal,..} if crate::result_acceptance::target(goal).is_some());
                         if matches!(&action,HumanAction::Submit{..}) {computer_failure=None;}
-                        match self.journal.action(&source_id,action).await {Ok(())=>{input_failure=None;message="已存入本機待送佇列。".into();},Err(crate::Error::CredentialRejected)=>{input_failure=Some(source_id);message="記憶要求未保存，草稿已保留。請重新配對。".into();},Err(crate::Error::Rejected(_)|crate::Error::Capacity)=>{input_failure=Some(source_id);message=if memory_control {"記憶要求未保存。請先查詢目前來源，並核對名稱及內容長度；草稿已保留。"}else{"要求未保存：內容或待送數量已超過限制；草稿已保留。"}.into();},Err(e)=>return Err(e)}
+                        match self.journal.action(&source_id,action).await {Ok(())=>{input_failure=None;message="已存入本機待送佇列。".into();},Err(crate::Error::CredentialRejected)=>{input_failure=Some(source_id);message="記憶要求未保存，草稿已保留。請重新配對。".into();},Err(crate::Error::Rejected(_)|crate::Error::Capacity)=>{input_failure=Some(source_id);message=if memory_control {"記憶要求未保存。請先查詢目前來源，並核對名稱及內容長度；草稿已保留。"}else if result_review {"成果確認未保存。請先顯示該成果，並指明任務；不要附加檔案。草稿已保留。"}else{"要求未保存：內容或待送數量已超過限制；草稿已保留。"}.into();},Err(e)=>return Err(e)}
                         input_receipt=Some(InputReceipt{source_id:receipt_id,saved:input_failure.is_none()});
                     }
                     Some(NativeCommand::Pair{code})=>{

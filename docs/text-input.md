@@ -53,7 +53,7 @@ provider 仍會重查完整內容上限；超過時不呼叫模型。
 既有模型、每日 US$1、每任務 US$0.25、每次 20,000 microUSD 保留及未知費用規則不變。
 回覆附檔名與選取時間，不自動傳送本機絕對路徑。
 
-執行版本為 `pulse-remote-22`、`effective-read-7`。
+執行版本為 `pulse-remote-23`、`effective-read-7`。
 schema 為 19，tools 仍為 `pulse-tools-6`，policy 仍為 `approved-effects-memory-fences-9`。
 舊 checkpoint 不會自動採用新版本。模型記憶保持關閉。
 

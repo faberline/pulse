@@ -2,7 +2,7 @@
 
 這是 D06 的必要前置工作。它不開啟模型記憶，也不代表 D06、D08 或 K15 已接受。
 Swift 沒有新增任務或記憶規則。這些規則由 Rust Core 處理。
-schema 為 19。remote workflow 為 `pulse-remote-22`，policy 為 `approved-effects-memory-fences-9`。
+schema 為 19。remote workflow 為 `pulse-remote-23`，policy 為 `approved-effects-memory-fences-9`。
 地端工作與雙向傳輸清除見 [地端工作清除](worker-source-erasure.md)。
 模型聊天的來源追蹤與清除候選見 [衍生聊天清除](derived-chat-erasure.md)。
 版本不符的舊 run 需重新核對，不能自動視為新規則已驗收。

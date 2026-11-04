@@ -19,6 +19,7 @@ const SCHEMA: i64 = 19;
 
 mod approvals;
 mod database_access;
+mod result_review;
 pub use database_access::DatabaseMaintenance;
 mod memory;
 mod schedules;
@@ -318,6 +319,20 @@ impl Store {
         event_id: &str,
         processing_at: Option<i64>,
     ) -> Result<Outcome> {
+        // Take the keeper before the SQL writer if a restored result may have
+        // been retired outside SQLite. Ordinary untracked tasks need no lease.
+        let candidate: Option<String> = sqlx::query_scalar("SELECT payload FROM events WHERE id=?")
+            .bind(event_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        let reviewed = candidate
+            .as_deref()
+            .map(result_review::targets)
+            .unwrap_or_default();
+        let _review = match reviewed.as_slice() {
+            [id] => self.lease_retained_task_data(Some(id)).await?,
+            _ => None,
+        };
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query("SELECT origin,payload,received_at,outcome FROM events WHERE id=?")
             .bind(event_id)
@@ -348,6 +363,12 @@ impl Store {
             Err(error) => return Err(error),
         };
         sqlx::query("RELEASE routing").execute(&mut *tx).await?;
+        // A stale but correctly addressed review still belongs to its task's
+        // retention lifecycle. Do not retain its direct body fingerprint forever.
+        for id in reviewed {
+            sqlx::query("INSERT OR IGNORE INTO event_tasks(event_id,task_id) SELECT ?,id FROM tasks WHERE id=?")
+                .bind(event_id).bind(id).execute(&mut *tx).await?;
+        }
         sqlx::query("UPDATE events SET outcome=? WHERE id=?")
             .bind(serde_json::to_string(&outcome)?)
             .bind(event_id)
@@ -1166,6 +1187,13 @@ async fn apply(
     require(
         !commands
             .iter()
+            .any(|c| matches!(c, Command::AcceptResult { .. }))
+            || commands.len() == 1,
+        "result review must be a standalone event",
+    )?;
+    require(
+        !commands
+            .iter()
             .any(|c| matches!(c, Command::Clarify { .. }))
             || commands.len() == 1,
         "clarification must be a standalone event",
@@ -1335,6 +1363,24 @@ async fn apply(
                     State::Queued
                 };
                 put(db, "tasks", &id, &task).await?;
+                id
+            }
+            Command::AcceptResult {
+                id,
+                expected_revision,
+                message_id,
+                chat_digest,
+            } => {
+                result_review::accept(
+                    db,
+                    event_id,
+                    &id,
+                    expected_revision,
+                    &message_id,
+                    &chat_digest,
+                    terminal_at,
+                )
+                .await?;
                 id
             }
             Command::Cancel {
