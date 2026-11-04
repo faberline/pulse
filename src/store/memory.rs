@@ -25,7 +25,7 @@ mod revocations;
 pub(super) mod task_sources;
 mod withdrawals;
 mod worker_copy;
-pub use backup::{BackupCheck, Maintenance, OfflineBackupCheck};
+pub use backup::{BackupCheck, Maintenance, OfflineBackupCheck, RestoreReport};
 pub use checkpoint::truncate as truncate_wal;
 pub use copy::MemoryCopyChange;
 pub use task_sources::TaskMemoryLease;

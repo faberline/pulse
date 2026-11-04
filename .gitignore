@@ -9,6 +9,8 @@
 *.backup-key
 *.backups/
 *.pulsebak
+*.restores/
+*.evidence
 /coverage/
 /apps/pulse-desktop/.build/
 /apps/pulse-desktop/.swiftpm/

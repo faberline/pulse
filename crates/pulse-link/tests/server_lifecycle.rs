@@ -204,6 +204,222 @@ async fn closed(socket: &mut Socket) {
     .unwrap();
 }
 
+async fn offline_command(mode: &str, database: &Path, value: Option<&Path>) -> String {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pulse-server"));
+    command.arg(mode).arg(database);
+    if let Some(value) = value {
+        command.arg(value);
+    }
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        command
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("ANTHROPIC_API_KEY")
+            .env("PULSE_ENV_FILE", database.with_extension("no-env"))
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let text = String::from_utf8(output.stderr).unwrap();
+    assert!(output.status.success(), "{text}");
+    assert!(output.stdout.is_empty());
+    text
+}
+
+async fn exclusive(database: &Path) -> pulse_core::DatabaseMaintenance {
+    let until = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match pulse_core::DatabaseMaintenance::try_acquire(database) {
+            Ok(lease) => return lease,
+            Err(error) if tokio::time::Instant::now() >= until => panic!("{error}"),
+            Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+        }
+    }
+}
+
+#[tokio::test]
+async fn real_cli_restore_and_server_require_fresh_generation_pairing_without_replaying_work() {
+    for mode in ["readable", "missing", "corrupt"] {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("server.db");
+        let hub = Hub::new(Store::open(&database, "pulse-owner").await.unwrap());
+        let mut old = Vec::new();
+        for role in [ClientRole::Chat, ClientRole::LocalExecutor] {
+            let code = hub.pairing(role, now()).await.unwrap();
+            old.push(
+                hub.redeem(
+                    PairRequest {
+                        code,
+                        role,
+                        device: uuid::Uuid::new_v4().to_string(),
+                    },
+                    now(),
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let backup = hub.core.maintain(now()).await.unwrap().backup.unwrap();
+        // This identity exists only after the backup. It must also be retired
+        // when its original records are still readable at cutover.
+        hub.revoke(&old[0].device).await.unwrap();
+        let code = hub.pairing(ClientRole::Chat, now()).await.unwrap();
+        old.push(
+            hub.redeem(
+                PairRequest {
+                    code,
+                    role: ClientRole::Chat,
+                    device: uuid::Uuid::new_v4().to_string(),
+                },
+                now(),
+            )
+            .await
+            .unwrap(),
+        );
+        hub.core.clone().close().await;
+        drop(hub);
+        let lease = exclusive(&database).await;
+        match mode {
+            "missing" => std::fs::remove_file(&database).unwrap(),
+            "corrupt" => std::fs::write(&database, b"owned unreadable original").unwrap(),
+            _ => {}
+        }
+        drop(lease);
+        let restored = offline_command("restore-backup", &database, Some(&backup)).await;
+        assert!(restored.contains("No tasks started."));
+        assert!(restored.contains(if mode == "readable" {
+            "records imported: true"
+        } else {
+            "records imported: false"
+        }));
+        assert!(!restored.contains(database.to_str().unwrap()));
+        let chat_code = root.path().join("chat.code");
+        offline_command("pair-chat", &database, Some(&chat_code)).await;
+        let (mut server, origin) = start(&database, 0).await;
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let mut generation = None;
+        for credential in &old {
+            let response = http
+                .get(format!("{origin}/v1/device-pairings/identity"))
+                .bearer_auth(&credential.token)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 401);
+            let actual = response
+                .headers()
+                .get("x-pulse-restore-generation")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned();
+            assert!(generation.as_ref().is_none_or(|g| g == &actual));
+            generation = Some(actual);
+        }
+        let mut claim = PairClaim {
+            code: std::fs::read_to_string(&chat_code).unwrap(),
+            attempt_id: uuid::Uuid::new_v4().to_string(),
+            device: uuid::Uuid::new_v4().to_string(),
+            role: ClientRole::Chat,
+            token: "73".repeat(32),
+            server_generation: None,
+        };
+        let claim_url = format!("{origin}/v1/device-pairings/claim");
+        assert_eq!(
+            http.post(&claim_url)
+                .json(&claim)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+        claim.server_generation = generation.clone();
+        // A retained token cannot acquire authority under a fresh device ID.
+        let fresh_token = claim.token.clone();
+        claim.token = old[0].token.clone();
+        assert_eq!(
+            http.post(&claim_url)
+                .json(&claim)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+        claim.token = fresh_token;
+        let fresh_device = claim.device.clone();
+        claim.device = old[0].device.clone();
+        assert_eq!(
+            http.post(&claim_url)
+                .json(&claim)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+        claim.device = fresh_device;
+        let response = http.post(&claim_url).json(&claim).send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        let credential: Credential = response.json().await.unwrap();
+        let (mut chat, _) = connect(&origin, &credential).await;
+        let local_code = root.path().join("local.code");
+        offline_command("pair-local", &database, Some(&local_code)).await;
+        let local_claim = PairClaim {
+            code: std::fs::read_to_string(local_code).unwrap(),
+            attempt_id: uuid::Uuid::new_v4().to_string(),
+            device: uuid::Uuid::new_v4().to_string(),
+            role: ClientRole::LocalExecutor,
+            token: "74".repeat(32),
+            server_generation: generation,
+        };
+        let response = http
+            .post(&claim_url)
+            .json(&local_claim)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let local: Credential = response.json().await.unwrap();
+        let (mut worker, _) = connect(&origin, &local).await;
+        stop(&mut server).await;
+        closed(&mut chat).await;
+        closed(&mut worker).await;
+        let repeated = offline_command("resume-restore", &database, None).await;
+        assert!(repeated.contains("already committed"));
+        let store = Store::open(&database, "pulse-owner").await.unwrap();
+        for query in [
+            "SELECT count(*) FROM tasks",
+            "SELECT count(*) FROM budget",
+            "SELECT count(*) FROM link_reads",
+        ] {
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(query)
+                    .fetch_one(&store.application_pool())
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM link_device WHERE revoked=0")
+                .fetch_one(&store.application_pool())
+                .await
+                .unwrap(),
+            2
+        );
+        store.close().await;
+    }
+}
+
 #[tokio::test]
 async fn sigint_stops_an_incomplete_http_body_without_waiting_for_the_client() {
     let root = tempfile::tempdir().unwrap();

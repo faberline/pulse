@@ -20,7 +20,7 @@ pub use schedule::*;
 pub use scope::*;
 pub use store::{
     BackupCheck, DatabaseMaintenance, Maintenance, MemoryCopyChange, MemoryWithdrawalRules,
-    OfflineBackupCheck, Store, TaskMemoryLease, truncate_wal,
+    OfflineBackupCheck, RestoreReport, Store, TaskMemoryLease, truncate_wal,
 };
 
 #[derive(Debug, thiserror::Error)]

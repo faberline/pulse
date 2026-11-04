@@ -16,13 +16,15 @@ Rust／Swift 邊界、共用本機協定與驗證缺口見 [macOS adapter](macos
 | D03 | 開啟網頁，導覽、讀取內容、截圖，附 URL 與取得時間 | 部分。已接上兩家模型與 local Chrome 讀取，原圖可在 SwiftUI 預覽。互動元件測試已通過，完整桌面批准流程仍待驗收。頁面腳本停用；見 browser-chat.md 與 browser-interaction.md |
 | D04 | 觀察指定 app，點擊與輸入，能隨時停止 | 實作中。原生觀察 helper 與 Rust 地端接入已建置；權限、來源／圖片核對與程序中止測試通過。server／模型只讀派工已接上；固定按鈕／文字、模型提議、server 派工、原圖回報與桌面批准流程已串接。真正視窗操作仍待實機驗收，見 computer-observation.md |
 | D05 | 操作前看清楚目標與效果，批准後才執行；改動後的舊批准失效 | 部分。已接 Swift 批准卡片與真實 Chrome 點擊／輸入。元件測試已核對來源截圖、修訂、一次性批准、畫面變更與重啟；完整桌面驗收及 macOS 操作仍待完成 |
-| D06 | 明確要求記住偏好，能查來源、修正與刪除，重啟仍有效 | 實作中。單一對話框已接記住／查詢／修正／忘記、待送取消、來源卡片與刪除限制。server 已接 90 天期限、加密備份與隔離檢查。Rust 已加入任務來源關聯、明確父來源採用、撤銷、本機提交與 provider 等待核對，以及模型／工具聊天、事件與 server 圖片清除候選；模型引用、完整衍生內容與副本清理、正式還原仍待完成；見 memory.md、task-memory-sources.md、derived-chat-erasure.md、derived-tool-results.md 與 backups.md |
+| D06 | 明確要求記住偏好，能查來源、修正與刪除，重啟仍有效 | 實作中。單一對話框已接記住／查詢／修正／忘記、待送取消、來源卡片與刪除限制。server 已接 90 天期限、加密備份、隔離檢查及 Rust 離線還原候選。Rust 已加入任務來源關聯、明確父來源採用、撤銷、本機提交與 provider 等待核對，以及模型／工具聊天、事件與 server 圖片清除候選；模型引用、完整衍生內容與副本清理、日常資料還原仍待驗收；見 memory.md、task-memory-sources.md、derived-chat-erasure.md、derived-tool-results.md、backups.md 與 offline-restore.md |
 | D07 | 建立、查詢與取消排程，到期才喚醒，重啟不重複通知或執行 | 實作中。Rust 已接單次提醒與定時工作、UTC 時間凍結、取消、交易去重、獨立通知交接與本機顯示狀態。Swift 已接使用者啟用及系統顯示；真正系統橫幅／權限、兩家 provider 完整流程、事件訂閱與長時間運行仍待驗收；見 schedules.md |
 | D08 | 本機離線時仍能交談；重連、重啟與晚到結果可核對續跑 | 部分。repo 只讀流程已有證據；computer 已實作離線保存與原任務重新選擇的元件測試。browser／computer／排程仍須完整故障與實機驗證 |
 | D09 | 在明確選定的檔案範圍讀取輸入，產生成果與可查證來源 | 部分。已有 Pulse repo 只讀、文字副本及 Rust Markdown 成果匯出候選。來源、保存、取消、重送與未知結果由 Rust 處理；Swift 只選擇與顯示。實際桌面／模型、PDF、圖片模型輸入、受限寫入及成果副本清除仍待完成；見 text-input.md 與 text-results.md |
 | D10 | 長輸出時仍可輸入、捲動、取消；完整中文輸入與 8 小時運行可靠 | 待整合驗收。沿用 acceptance.md 的 T01–T20、200 次互動量測與 T18，不降低既有門檻 |
 
 每項須連到實作、測試與當前 head CI。涉及原生 UI、瀏覽器或電腦時，還須有真實程序與操作證據。模擬 adapter 只驗契約，不能通過 D03／D04。功能表、文件或成功的收件訊息均不代表任務成功。
+
+Rust server／CLI 已加入 [離線還原與中斷續接候選](offline-restore.md)。它會保留原始加密證據、套用最新刪除限制、合併可讀的目前結果與費用，並封鎖舊任務及裝置。真正 CLI／server 與中止子程序測試只驗證隔離資料；D06、D08 與完整 K15 仍未接受。
 
 ## 實作順序
 

@@ -9,8 +9,15 @@ use std::{future::IntoFuture, path::PathBuf, time::Duration};
 
 #[tokio::main]
 async fn main() {
+    let restoring = std::env::args()
+        .nth(1)
+        .is_some_and(|mode| matches!(mode.as_str(), "restore-backup" | "resume-restore"));
     if let Err(error) = run().await {
-        if matches!(
+        if restoring {
+            eprintln!(
+                "Offline restore did not complete. Keep the original key, restrictions and recovery files. Keep all database users stopped. Use pulse-server resume-restore PRIVATE_DB to resume an interrupted restore. No tasks started."
+            );
+        } else if matches!(
             error,
             pulse_link::Error::Core(pulse_core::Error::DatabaseRecoveryRequired)
         ) {
@@ -30,11 +37,48 @@ async fn run() -> Result<()> {
     let mode = args.next().unwrap_or_default();
     let database = PathBuf::from(args.next().ok_or_else(|| {
         pulse_link::Error::Rejected(
-            "use pulse-server serve|pair-chat|pair-local|revoke PRIVATE_DB [VALUE], or check-backup|check-offline-backup PRIVATE_DB BACKUP NEW_DIRECTORY"
+            "use pulse-server serve|pair-chat|pair-local|revoke PRIVATE_DB [VALUE], check-backup|check-offline-backup PRIVATE_DB BACKUP NEW_DIRECTORY, restore-backup PRIVATE_DB BACKUP, or resume-restore PRIVATE_DB"
                 .into(),
         )
     })?);
     let value = args.next();
+    if matches!(mode.as_str(), "restore-backup" | "resume-restore") {
+        if args.next().is_some() || (mode == "resume-restore" && value.is_some()) {
+            return Err(pulse_link::Error::Rejected(
+                "unexpected restore arguments".into(),
+            ));
+        }
+        let _server_lock = server_lock(&database)?;
+        let admission = pulse_core::DatabaseMaintenance::try_acquire(&database)?;
+        let restored = if mode == "restore-backup" {
+            let input = value
+                .ok_or_else(|| pulse_link::Error::Rejected("encrypted backup required".into()))?;
+            admission
+                .restore_backup(
+                    std::path::Path::new(&input),
+                    "pulse-owner",
+                    &pulse_link::remote::versions(),
+                    now(),
+                )
+                .await?
+        } else {
+            admission
+                .resume_restore("pulse-owner", &pulse_link::remote::versions(), now())
+                .await?
+        };
+        eprintln!(
+            "Offline restore {}. Generation: {}. Readable current records imported: {}. New model spending is held through {} (Asia/Taipei). Old tasks require a new reviewed task. Unknown costs remain charged. No tasks started.",
+            if restored.already_committed {
+                "was already committed"
+            } else {
+                "committed"
+            },
+            restored.generation,
+            restored.current_records_imported,
+            restored.budget_held_through
+        );
+        return Ok(());
+    }
     if matches!(mode.as_str(), "check-backup" | "check-offline-backup") {
         let backup =
             value.ok_or_else(|| pulse_link::Error::Rejected("encrypted backup required".into()))?;

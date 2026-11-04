@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 mod crypto;
 mod dispatch;
+mod restore;
+pub use restore::RestoreReport;
 const DAY: i64 = 24 * 60 * 60 * 1_000;
 const RETENTION: i64 = 30 * DAY;
 const QUARANTINE_SCHEMA: i64 = 2_147_483_647;
@@ -35,7 +37,7 @@ pub struct OfflineBackupCheck {
     pub source_identity_verified: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Secret {
     version: u8,
@@ -97,16 +99,23 @@ impl Store {
         let guard = self.memory_guard.clone();
         let directory_copy = directory.clone();
         let validation_key = key.key;
+        let recovery_secret = key.clone();
         let keeper = manifest.keeper.clone();
         let (removed, next_removal, current) = tokio::task::spawn_blocking(move || {
-            manage_files(
+            let recovery_expiry = restore::cleanup(&guard, &recovery_secret, now)?;
+            let (removed, next, current) = manage_files(
                 &guard,
                 &directory_copy,
                 last.as_ref(),
                 &validation_key,
                 &keeper,
                 now,
-            )
+            )?;
+            Ok::<_, Error>((
+                removed,
+                next.min(recovery_expiry.unwrap_or(i64::MAX)),
+                current,
+            ))
         })
         .await
         .map_err(|_| Error::Rejected("backup file worker stopped".into()))??;
@@ -457,6 +466,32 @@ async fn stage_backup(
         versions.valid() && now >= 0,
         "invalid restore manifest or clock",
     )?;
+    let file = source.guard.open_private(input, false, false)?;
+    require(
+        file.metadata()?.len() <= crypto::MAX_DATABASE as u64 + 64 * 1024,
+        "encrypted backup capacity",
+    )?;
+    let key = source.secret.key;
+    let (header, bytes) = tokio::task::spawn_blocking(move || crypto::open(&key, file))
+        .await
+        .map_err(|_| Error::Rejected("backup decryption worker stopped".into()))??;
+    require(
+        header.keeper == source.manifest.keeper
+            && header.created_at <= now
+            && now - header.created_at < RETENTION,
+        "backup is expired, future-dated or belongs to another keeper",
+    )?;
+    stage_image(source, bytes, destination, versions, now, false).await
+}
+
+async fn stage_image(
+    source: BackupSource<'_>,
+    mut bytes: Vec<u8>,
+    destination: &Path,
+    versions: &Versions,
+    now: i64,
+    already_fenced: bool,
+) -> Result<Store> {
     let BackupSource {
         guard: source_guard,
         manifest,
@@ -464,20 +499,6 @@ async fn stage_backup(
         secret,
     } = source;
     let fingerprint = format!("{:x}", Sha256::digest(secret.key));
-    let file = source_guard.open_private(input, false, false)?;
-    require(
-        file.metadata()?.len() <= crypto::MAX_DATABASE as u64 + 64 * 1024,
-        "encrypted backup capacity",
-    )?;
-    let (header, mut bytes) = tokio::task::spawn_blocking(move || crypto::open(&secret.key, file))
-        .await
-        .map_err(|_| Error::Rejected("backup decryption worker stopped".into()))??;
-    require(
-        header.keeper == manifest.keeper
-            && header.created_at <= now
-            && now - header.created_at < RETENTION,
-        "backup is expired, future-dated or belongs to another keeper",
-    )?;
     require(
         bytes.starts_with(b"SQLite format 3\0")
             && bytes.len() >= 100
@@ -567,8 +588,14 @@ async fn stage_backup(
     };
     candidate.initialize_memory().await?;
     candidate.list_memories(now).await?;
-    candidate.recover(versions, now).await?;
-    dispatch::fence(&candidate).await?;
+    if already_fenced {
+        let active: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM link_device d WHERE revoked!=1 OR stopped!=1 OR lease_until!=0 OR NOT EXISTS(SELECT 1 FROM settings s WHERE s.key='restore_retired_device:'||d.id))+(SELECT count(*) FROM tasks t WHERE NOT EXISTS(SELECT 1 FROM settings s WHERE s.key='restore_retired_task:'||t.id))+(SELECT count(*) FROM schedules WHERE json_extract(data,'$.state')='armed')+(SELECT count(*) FROM events WHERE outcome IS NULL)")
+            .fetch_one(&candidate.pool).await?;
+        require(active == 0, "paused image still carries work authority")?;
+    } else {
+        candidate.recover(versions, now).await?;
+        dispatch::fence(&candidate).await?;
+    }
     Ok(candidate)
 }
 

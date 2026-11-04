@@ -23,7 +23,7 @@ mod memory;
 mod schedules;
 pub use memory::{
     BackupCheck, Maintenance, MemoryCopyChange, MemoryWithdrawalRules, OfflineBackupCheck,
-    TaskMemoryLease, truncate_wal,
+    RestoreReport, TaskMemoryLease, truncate_wal,
 };
 
 #[derive(Clone)]
@@ -119,6 +119,10 @@ impl Store {
         now: i64,
     ) -> Result<()> {
         let mut task: Task = load(db, "tasks", id).await?;
+        require(
+            !retired_task(db, id).await?,
+            "restored task requires a new reviewed task",
+        )?;
         memory::task_sources::validate(db, id, revision, now).await?;
         require(
             task.revision == revision
@@ -356,8 +360,16 @@ impl Store {
         require(versions.valid(), "invalid version manifest")?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut changed = approvals::expire(&mut tx, now).await?;
-        let mut tasks = tasks(&mut tx).await?;
+        let rows: Vec<String> = sqlx::query_scalar("SELECT data FROM tasks t WHERE json_extract(t.data,'$.state') NOT IN ('succeeded','failed','cancelled') AND NOT EXISTS(SELECT 1 FROM settings s WHERE s.key='restore_retired_task:'||t.id)")
+            .fetch_all(&mut *tx).await?;
+        let mut tasks: Vec<Task> = rows
+            .into_iter()
+            .map(|data| serde_json::from_str(&data).map_err(Error::from))
+            .collect::<Result<_>>()?;
         for task in &mut tasks {
+            if retired_task(&mut tx, &task.id).await? {
+                continue;
+            }
             if !task.state.terminal() && task.deadline <= now {
                 let state = if unresolved(&mut tx, &task.id).await? {
                     State::OutcomeUnknown
@@ -383,6 +395,9 @@ impl Store {
         }
         tasks.sort_by_key(|t| (std::cmp::Reverse(t.priority), t.created_at, t.id.clone()));
         for mut task in tasks {
+            if retired_task(&mut tx, &task.id).await? {
+                continue;
+            }
             if task.state != State::Queued || task.cancel_requested || task.deadline <= now {
                 continue;
             }
@@ -526,6 +541,18 @@ impl Store {
             if task.state.terminal() {
                 continue;
             }
+            if retired_task(&mut tx, &task.id).await? {
+                task.state = if task.state == State::OutcomeUnknown
+                    || unresolved(&mut tx, &task.id).await?
+                {
+                    State::OutcomeUnknown
+                } else {
+                    State::Blocked
+                };
+                task.reason = Some("restore_review_required".into());
+                put(&mut tx, "tasks", &task.id, &task).await?;
+                continue;
+            }
             if let Some(run_id) = &task.active_run {
                 let invalidated = approvals::invalidate(&mut tx, &task.id, "run_restarted").await?;
                 let mut run: Run = load(&mut tx, "runs", run_id).await?;
@@ -615,6 +642,25 @@ impl Store {
             .to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let (mut task, _) = current(&mut tx, token, now).await?;
+        let recovery_floor: Option<String> =
+            sqlx::query_scalar("SELECT value FROM settings WHERE key='restore_budget_floor_day'")
+                .fetch_optional(&mut *tx)
+                .await?;
+        if let Some(floor) = &recovery_floor {
+            require(
+                floor.len() == 10
+                    && chrono::NaiveDate::parse_from_str(floor, "%Y-%m-%d")
+                        .is_ok_and(|date| date.format("%Y-%m-%d").to_string() == *floor),
+                "invalid restore accounting floor",
+            )?;
+        }
+        if recovery_floor.as_ref().is_some_and(|floor| day <= *floor) {
+            block(&mut tx, &mut task, "restore_budget_hold").await?;
+            tx.commit().await?;
+            return Err(Error::Rejected(
+                "restored accounting is incomplete for this day".into(),
+            ));
+        }
         if let Some(row) =
             sqlx::query("SELECT task_id,reserved,rate_version FROM budget WHERE call_id=?")
                 .bind(call_id)
@@ -1089,12 +1135,12 @@ async fn apply(
                     .await?;
                 require(existing == 0, "task ID already exists")?;
                 require(
-                    tasks(db)
-                        .await?
-                        .iter()
-                        .filter(|t| !t.state.terminal())
-                        .count()
-                        < TASK_LIMIT,
+                    !retired_task(db, &id).await?,
+                    "task ID was retired by restore",
+                )?;
+                require(
+                    sqlx::query_scalar::<_,i64>("SELECT count(*) FROM tasks t WHERE json_extract(t.data,'$.state') NOT IN ('succeeded','failed','cancelled') AND NOT EXISTS(SELECT 1 FROM settings s WHERE s.key='restore_retired_task:'||t.id)")
+                        .fetch_one(&mut *db).await? < TASK_LIMIT as i64,
                     "task queue full",
                 )?;
                 if let Some(parent) = &parent {
@@ -1145,6 +1191,10 @@ async fn apply(
                 goal,
                 scope,
             } => {
+                require(
+                    !retired_task(db, &id).await?,
+                    "restored task requires a new reviewed task",
+                )?;
                 let mut task: Task = load(db, "tasks", &id).await?;
                 require(
                     task.revision == expected_revision
@@ -1220,6 +1270,10 @@ async fn apply(
                 id,
                 expected_revision,
             } => {
+                require(
+                    !retired_task(db, &id).await?,
+                    "restored task requires a new reviewed task",
+                )?;
                 let mut task: Task = load(db, "tasks", &id).await?;
                 require(
                     task.revision == expected_revision
@@ -1293,6 +1347,10 @@ async fn apply(
 }
 
 async fn current(db: &mut SqliteConnection, token: &Token, now: i64) -> Result<(Task, Run)> {
+    require(
+        !retired_task(db, &token.task_id).await?,
+        "restored task requires a new reviewed task",
+    )?;
     let task: Task = load(db, "tasks", &token.task_id).await?;
     let run: Run = load(db, "runs", &token.run_id).await?;
     require(
@@ -1343,7 +1401,8 @@ async fn receipt_in(db: &mut SqliteConnection, receipt: &Receipt) -> Result<Rece
     let mut task: Task = load(db, "tasks", &receipt.token.task_id).await?;
     task.evidence.push(receipt.evidence.clone());
     let run: Run = load(db, "runs", &receipt.token.run_id).await?;
-    let applicable = !task.state.terminal()
+    let applicable = !retired_task(db, &task.id).await?
+        && !task.state.terminal()
         && !task.cancel_requested
         && task.revision == receipt.token.revision
         && task.active_run.as_deref() == Some(&receipt.token.run_id)
@@ -1480,6 +1539,16 @@ async fn unresolved(db: &mut SqliteConnection, task_id: &str) -> Result<bool> {
     let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM operations WHERE json_extract(data,'$.token.task_id')=? AND json_extract(data,'$.state') IN ('unknown','ambiguous')").bind(task_id).fetch_one(&mut *db).await?;
     let reads:i64=sqlx::query_scalar("SELECT COUNT(*) FROM link_reads WHERE task_id=? AND state IN ('sent','accepted','unknown')").bind(task_id).fetch_one(db).await?;
     Ok(count > 0 || reads > 0)
+}
+
+async fn retired_task(db: &mut SqliteConnection, id: &str) -> Result<bool> {
+    Ok(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM settings WHERE key=?")
+            .bind(format!("restore_retired_task:{id}"))
+            .fetch_one(db)
+            .await?
+            != 0,
+    )
 }
 
 async fn tasks(db: &mut SqliteConnection) -> Result<Vec<Task>> {
