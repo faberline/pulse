@@ -178,4 +178,48 @@ async fn server_process_backs_up_once_across_kill_restart_and_checks_quarantine(
             .await
             .is_err()
     );
+    let admission = DatabaseMaintenance::try_acquire(&database).unwrap();
+    std::fs::remove_file(&database).unwrap();
+    drop(admission);
+    let offline = directory.path().join("offline-checked");
+    // The shared legacy server lock also fences servers predating Core leases.
+    let legacy = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(database.with_extension("server.lock"))
+        .unwrap();
+    fs2::FileExt::try_lock_exclusive(&legacy).unwrap();
+    let run_check = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pulse-server"));
+        command
+            .arg("check-offline-backup")
+            .arg(&database)
+            .arg(&files[0])
+            .arg(&offline)
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("ANTHROPIC_API_KEY")
+            .env("PULSE_ENV_FILE", database.with_extension("no-env"));
+        command
+    };
+    assert!(!run_check().output().await.unwrap().status.success());
+    assert!(!offline.exists());
+    assert!(!database.exists());
+    fs2::FileExt::unlock(&legacy).unwrap();
+    drop(legacy);
+    let checked = run_check().output().await.unwrap();
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    assert!(checked.stdout.is_empty());
+    let message = String::from_utf8_lossy(&checked.stderr);
+    assert!(message.contains("Original database identity: unverified"));
+    assert!(message.contains("No tasks started."));
+    assert!(!database.exists());
+    assert!(
+        Store::open(offline.join("candidate.db"), "pulse-owner")
+            .await
+            .is_err()
+    );
 }

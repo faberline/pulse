@@ -4,7 +4,7 @@ use crate::{MemoryOutcome, MemoryRef, MemoryRequest};
 const UNKNOWN_LIMIT: usize = 10_000;
 const SOURCE_LIMIT: usize = 20_100;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SourceRestriction {
     pub id: String,
@@ -12,7 +12,7 @@ pub(super) struct SourceRestriction {
     pub unknown: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Cancellation {
     pub fingerprint: String,

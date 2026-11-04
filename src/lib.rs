@@ -19,8 +19,8 @@ pub use read::*;
 pub use schedule::*;
 pub use scope::*;
 pub use store::{
-    BackupCheck, DatabaseMaintenance, Maintenance, MemoryCopyChange, MemoryWithdrawalRules, Store,
-    TaskMemoryLease, truncate_wal,
+    BackupCheck, DatabaseMaintenance, Maintenance, MemoryCopyChange, MemoryWithdrawalRules,
+    OfflineBackupCheck, Store, TaskMemoryLease, truncate_wal,
 };
 
 #[derive(Debug, thiserror::Error)]

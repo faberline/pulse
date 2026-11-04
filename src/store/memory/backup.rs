@@ -26,6 +26,15 @@ pub struct BackupCheck {
     pub unknown_tasks: usize,
 }
 
+/// Offline validation only. This never replaces the original database.
+#[derive(Debug)]
+pub struct OfflineBackupCheck {
+    pub backup: BackupCheck,
+    /// Owner, keeper and key match a readable current database. This is not
+    /// proof that its complete receipt, credential or financial ledger is current.
+    pub source_identity_verified: bool,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Secret {
@@ -232,18 +241,7 @@ impl Store {
             }
             Err(e) => return Err(e),
         };
-        require(file.metadata()?.len() <= 1024, "invalid backup key file")?;
-        use std::io::{Seek, SeekFrom};
-        let mut file = file;
-        file.seek(SeekFrom::Start(0))?;
-        let mut encoded = Vec::new();
-        file.take(1025).read_to_end(&mut encoded)?;
-        let secret: Secret = serde_json::from_slice(&encoded)
-            .map_err(|_| Error::Rejected("invalid backup key file".into()))?;
-        require(
-            secret.version == 1 && secret.keeper == keeper,
-            "wrong backup key keeper",
-        )?;
+        let secret = read_secret(file, keeper)?;
         let fingerprint = format!("{:x}", Sha256::digest(secret.key));
         if let Some(bound) = bound {
             require(bound == fingerprint, "backup key fingerprint mismatch")?;
@@ -280,127 +278,298 @@ impl Store {
         reconcile(&mut tx, &manifest).await?;
         tx.commit().await?;
         let secret = self.backup_secret(&manifest.keeper, false).await?;
-        let file = self.memory_guard.open_private(input, false, false)?;
-        require(
-            file.metadata()?.len() <= crypto::MAX_DATABASE as u64 + 64 * 1024,
-            "encrypted backup capacity",
-        )?;
-        let (header, mut bytes) =
-            tokio::task::spawn_blocking(move || crypto::open(&secret.key, file))
-                .await
-                .map_err(|_| Error::Rejected("backup decryption worker stopped".into()))??;
-        require(
-            header.keeper == manifest.keeper
-                && header.created_at <= now
-                && now - header.created_at < RETENTION,
-            "backup is expired, future-dated or belongs to another keeper",
-        )?;
-        require(
-            bytes.starts_with(b"SQLite format 3\0")
-                && bytes.len() >= 100
-                && u32::from_be_bytes(bytes[60..64].try_into().unwrap())
-                    == crate::store::SCHEMA as u32,
-            "backup schema incompatible",
-        )?;
-        // SQLite header offset60 is user_version. Quarantine BEFORE any plaintext
-        // is written. Every released Pulse binary rejects this schema marker.
-        bytes[60..64].copy_from_slice(&(QUARANTINE_SCHEMA as u32).to_be_bytes());
-        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
-        let parent = destination
-            .parent()
-            .ok_or_else(|| Error::Rejected("restore parent directory missing".into()))?;
-        let metadata = std::fs::symlink_metadata(parent)?;
-        require(
-            metadata.is_dir()
-                && metadata.uid() == self.memory_guard.owner
-                && metadata.permissions().mode() & 0o077 == 0,
-            "restore parent must be a private owned directory",
-        )?;
-        std::fs::DirBuilder::new().mode(0o700).create(destination)?;
-        let database = destination.join("candidate.db");
-        let pool_options = super::super::database_access::shared_pool(&database)?;
-        let mut file = self.memory_guard.open_private(&database, true, true)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        drop(bytes);
-        File::open(destination)?.sync_all()?;
-        let options = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(&database)
-            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-            .synchronous(sqlx::sqlite::SqliteSynchronous::Full)
-            .foreign_keys(true)
-            .pragma("secure_delete", "ON");
-        let pool = pool_options.connect_with(options).await?;
-        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
-            .fetch_one(&pool)
-            .await?;
-        require(integrity == "ok", "backup database integrity failed")?;
-        let foreign_keys = sqlx::query("PRAGMA foreign_key_check")
-            .fetch_all(&pool)
-            .await?;
-        require(foreign_keys.is_empty(), "backup foreign keys failed")?;
-        // Validate, never migrate a candidate: a migration could reset its
-        // quarantine schema marker before a later validation failure.
-        let rows =
-            sqlx::query("SELECT version,success,checksum FROM _sqlx_migrations ORDER BY version")
-                .fetch_all(&pool)
-                .await?;
-        let migrator = sqlx::migrate!();
-        let expected: Vec<_> = migrator
-            .iter()
-            .filter(|m| m.migration_type.is_up_migration())
-            .collect();
-        require(
-            rows.len() == expected.len(),
-            "backup migration set incompatible",
-        )?;
-        for (row, migration) in rows.iter().zip(expected) {
-            require(
-                row.get::<i64, _>("version") == migration.version
-                    && row.get::<bool, _>("success")
-                    && row.get::<Vec<u8>, _>("checksum").as_slice() == migration.checksum.as_ref(),
-                "backup migration checksum mismatch",
-            )?;
-        }
-        let live_owner: String = sqlx::query_scalar("SELECT value FROM settings WHERE key='owner'")
+        let owner: String = sqlx::query_scalar("SELECT value FROM settings WHERE key='owner'")
             .fetch_one(&self.pool)
             .await?;
-        let owner: String = sqlx::query_scalar("SELECT value FROM settings WHERE key='owner'")
-            .fetch_one(&pool)
-            .await?;
-        require(owner == live_owner, "backup owner mismatch")?;
-        let guard = super::MemoryGuard::new(&database)?;
-        guard.write(&manifest)?;
-        let candidate = Store {
-            schedule_wake: tokio::sync::watch::channel(0).0,
-            pool,
-            memory_guard: Arc::new(guard),
-        };
-        candidate.initialize_memory().await?;
-        let memories = candidate.list_memories(now).await?.len();
-        candidate.recover(versions, now).await?;
-        dispatch::fence(&candidate).await?;
-        let tasks = candidate.list_tasks(100).await?;
-        let unknown_tasks = tasks
-            .iter()
-            .filter(|t| t.state == crate::State::OutcomeUnknown)
-            .count();
-        let marker: i64 = sqlx::query_scalar("PRAGMA user_version")
-            .fetch_one(&candidate.pool)
-            .await?;
+        let candidate = stage_backup(
+            BackupSource {
+                guard: &self.memory_guard,
+                manifest: &manifest,
+                owner: &owner,
+                secret,
+            },
+            input,
+            destination,
+            versions,
+            now,
+        )
+        .await?;
+        finish_check(candidate, destination, now).await
+    }
+}
+
+fn read_secret(mut file: File, keeper: &str) -> Result<Secret> {
+    use std::io::{Seek, SeekFrom};
+    require(file.metadata()?.len() <= 1024, "invalid backup key file")?;
+    file.seek(SeekFrom::Start(0))?;
+    let mut encoded = Vec::new();
+    file.take(1025).read_to_end(&mut encoded)?;
+    let secret: Secret = serde_json::from_slice(&encoded)
+        .map_err(|_| Error::Rejected("invalid backup key file".into()))?;
+    require(
+        secret.version == 1 && secret.keeper == keeper,
+        "wrong backup key keeper",
+    )?;
+    Ok(secret)
+}
+
+impl crate::DatabaseMaintenance {
+    /// Validate an encrypted backup with the original key and current external
+    /// restrictions, even when the current database is missing or unreadable.
+    /// No source database is created, migrated, replaced or granted work.
+    pub async fn check_backup(
+        &self,
+        input: &Path,
+        destination: &Path,
+        owner: &str,
+        versions: &Versions,
+        now: i64,
+    ) -> Result<OfflineBackupCheck> {
         require(
-            marker == QUARANTINE_SCHEMA,
-            "restore quarantine marker changed",
+            !owner.is_empty() && versions.valid() && now >= 0,
+            "invalid offline backup check",
         )?;
-        candidate.close().await;
-        File::open(destination)?.sync_all()?;
-        Ok(BackupCheck {
-            candidate: database,
-            memories,
-            tasks: tasks.len(),
-            unknown_tasks,
+        let guard = MemoryGuard::target(self.database())?;
+        let _lease = guard.lease().await?;
+        let manifest = guard
+            .read()?
+            .ok_or_else(|| Error::Rejected("latest restrictions missing".into()))?;
+        require(
+            manifest.restore.as_ref().is_none_or(|f| f.committed),
+            "offline restore is incomplete; resume required",
+        )?;
+        let secret = read_secret(
+            guard.open_private(&suffix(self.database(), ".backup-key"), false, false)?,
+            &manifest.keeper,
+        )?;
+        let source_identity_verified = source_identity(self, owner, &manifest, &secret).await?;
+        let candidate = stage_backup(
+            BackupSource {
+                guard: &guard,
+                manifest: &manifest,
+                owner,
+                secret,
+            },
+            input,
+            destination,
+            versions,
+            now,
+        )
+        .await?;
+        Ok(OfflineBackupCheck {
+            backup: finish_check(candidate, destination, now).await?,
+            source_identity_verified,
         })
     }
+}
+
+async fn source_identity(
+    admission: &crate::DatabaseMaintenance,
+    owner: &str,
+    manifest: &Restrictions,
+    secret: &Secret,
+) -> Result<bool> {
+    if !admission.database().exists() {
+        return Ok(false);
+    }
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(admission.database())
+        .read_only(true)
+        .create_if_missing(false)
+        .busy_timeout(std::time::Duration::from_millis(250));
+    let Ok(pool) = admission.pool_options().connect_with(options).await else {
+        return Ok(false);
+    };
+    let result = async {
+        let rows: std::result::Result<Vec<(String, String)>, sqlx::Error> = sqlx::query_as(
+            "SELECT key,value FROM settings WHERE key IN ('owner','memory_keeper_id','backup_key_fingerprint')",
+        )
+        .fetch_all(&pool)
+        .await;
+        let Ok(rows) = rows else { return Ok(false) };
+        let values: BTreeMap<_, _> = rows.into_iter().collect();
+        let fingerprint = format!("{:x}", Sha256::digest(secret.key));
+        for (key, expected) in [
+            ("owner", owner),
+            ("memory_keeper_id", manifest.keeper.as_str()),
+            ("backup_key_fingerprint", fingerprint.as_str()),
+        ] {
+            if let Some(value) = values.get(key) {
+                require(value == expected, "current database binding mismatch")?;
+            }
+        }
+        let schema: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await?;
+        if let Some(fence) = &manifest.restore {
+            let generation: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key='restore_generation'")
+                .fetch_optional(&pool)
+                .await?;
+            require(
+                generation.as_deref() == Some(fence.generation.as_str()),
+                "current database predates restore generation",
+            )?;
+        }
+        Ok(values.len() == 3 && schema == crate::store::SCHEMA)
+    }
+    .await;
+    pool.close().await;
+    result
+}
+
+async fn finish_check(candidate: Store, destination: &Path, now: i64) -> Result<BackupCheck> {
+    let memories = candidate.list_memories(now).await?.len();
+    let tasks = candidate.list_tasks(100).await?;
+    let unknown_tasks = tasks
+        .iter()
+        .filter(|t| t.state == crate::State::OutcomeUnknown)
+        .count();
+    let marker: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&candidate.pool)
+        .await?;
+    require(
+        marker == QUARANTINE_SCHEMA,
+        "restore quarantine marker changed",
+    )?;
+    candidate.close().await;
+    File::open(destination)?.sync_all()?;
+    Ok(BackupCheck {
+        candidate: destination.join("candidate.db"),
+        memories,
+        tasks: tasks.len(),
+        unknown_tasks,
+    })
+}
+
+struct BackupSource<'a> {
+    guard: &'a MemoryGuard,
+    manifest: &'a Restrictions,
+    owner: &'a str,
+    secret: Secret,
+}
+
+async fn stage_backup(
+    source: BackupSource<'_>,
+    input: &Path,
+    destination: &Path,
+    versions: &Versions,
+    now: i64,
+) -> Result<Store> {
+    require(
+        versions.valid() && now >= 0,
+        "invalid restore manifest or clock",
+    )?;
+    let BackupSource {
+        guard: source_guard,
+        manifest,
+        owner: live_owner,
+        secret,
+    } = source;
+    let fingerprint = format!("{:x}", Sha256::digest(secret.key));
+    let file = source_guard.open_private(input, false, false)?;
+    require(
+        file.metadata()?.len() <= crypto::MAX_DATABASE as u64 + 64 * 1024,
+        "encrypted backup capacity",
+    )?;
+    let (header, mut bytes) = tokio::task::spawn_blocking(move || crypto::open(&secret.key, file))
+        .await
+        .map_err(|_| Error::Rejected("backup decryption worker stopped".into()))??;
+    require(
+        header.keeper == manifest.keeper
+            && header.created_at <= now
+            && now - header.created_at < RETENTION,
+        "backup is expired, future-dated or belongs to another keeper",
+    )?;
+    require(
+        bytes.starts_with(b"SQLite format 3\0")
+            && bytes.len() >= 100
+            && u32::from_be_bytes(bytes[60..64].try_into().unwrap()) == crate::store::SCHEMA as u32,
+        "backup schema incompatible",
+    )?;
+    // SQLite header offset60 is user_version. Quarantine BEFORE any plaintext
+    // is written. Every released Pulse binary rejects this schema marker.
+    bytes[60..64].copy_from_slice(&(QUARANTINE_SCHEMA as u32).to_be_bytes());
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    let parent = destination
+        .parent()
+        .ok_or_else(|| Error::Rejected("restore parent directory missing".into()))?;
+    let metadata = std::fs::symlink_metadata(parent)?;
+    require(
+        metadata.is_dir()
+            && metadata.uid() == source_guard.owner
+            && metadata.permissions().mode() & 0o077 == 0,
+        "restore parent must be a private owned directory",
+    )?;
+    std::fs::DirBuilder::new().mode(0o700).create(destination)?;
+    let database = destination.join("candidate.db");
+    let pool_options = super::super::database_access::shared_pool(&database)?;
+    let mut file = source_guard.open_private(&database, true, true)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(bytes);
+    File::open(destination)?.sync_all()?;
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&database)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Full)
+        .foreign_keys(true)
+        .pragma("secure_delete", "ON");
+    let pool = pool_options.connect_with(options).await?;
+    let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(&pool)
+        .await?;
+    require(integrity == "ok", "backup database integrity failed")?;
+    let foreign_keys = sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(&pool)
+        .await?;
+    require(foreign_keys.is_empty(), "backup foreign keys failed")?;
+    // Validate, never migrate a candidate: a migration could reset its
+    // quarantine schema marker before a later validation failure.
+    let rows =
+        sqlx::query("SELECT version,success,checksum FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(&pool)
+            .await?;
+    let migrator = sqlx::migrate!();
+    let expected: Vec<_> = migrator
+        .iter()
+        .filter(|m| m.migration_type.is_up_migration())
+        .collect();
+    require(
+        rows.len() == expected.len(),
+        "backup migration set incompatible",
+    )?;
+    for (row, migration) in rows.iter().zip(expected) {
+        require(
+            row.get::<i64, _>("version") == migration.version
+                && row.get::<bool, _>("success")
+                && row.get::<Vec<u8>, _>("checksum").as_slice() == migration.checksum.as_ref(),
+            "backup migration checksum mismatch",
+        )?;
+    }
+    let owner: String = sqlx::query_scalar("SELECT value FROM settings WHERE key='owner'")
+        .fetch_one(&pool)
+        .await?;
+    require(owner == live_owner, "backup owner mismatch")?;
+    let bound: String =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key='backup_key_fingerprint'")
+            .fetch_one(&pool)
+            .await?;
+    require(bound == fingerprint, "backup key fingerprint mismatch")?;
+    if let Some(restore) = &manifest.restore {
+        require(restore.committed, "restore source is incomplete")?;
+        sqlx::query("INSERT INTO settings(key,value) VALUES('restore_generation',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+            .bind(&restore.generation).execute(&pool).await?;
+    }
+    let guard = super::MemoryGuard::new(&database)?;
+    guard.write(manifest)?;
+    let candidate = Store {
+        schedule_wake: tokio::sync::watch::channel(0).0,
+        pool,
+        memory_guard: Arc::new(guard),
+    };
+    candidate.initialize_memory().await?;
+    candidate.list_memories(now).await?;
+    candidate.recover(versions, now).await?;
+    dispatch::fence(&candidate).await?;
+    Ok(candidate)
 }
 
 fn managed_name(name: &str) -> Option<i64> {

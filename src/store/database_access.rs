@@ -13,21 +13,24 @@ impl Drop for Lease {
     }
 }
 
-/// Exclusive admission for a future offline maintenance operation.
+/// Exclusive admission for offline maintenance.
 /// This performs no database replacement, recovery, migration or execution.
 /// Every Store, derived pool and detached connection must be closed and dropped first.
 /// This is cooperative admission; it does not constrain arbitrary raw SQLite users.
 pub struct DatabaseMaintenance {
-    lease: Lease,
+    lease: Arc<Lease>,
 }
 impl DatabaseMaintenance {
     pub fn try_acquire(database: impl AsRef<Path>) -> Result<Self> {
         Ok(Self {
-            lease: acquire(database.as_ref(), true)?,
+            lease: Arc::new(acquire(database.as_ref(), true)?),
         })
     }
     pub fn database(&self) -> &Path {
         &self.lease.database
+    }
+    pub(super) fn pool_options(&self) -> SqlitePoolOptions {
+        pool_options(self.lease.clone())
     }
 }
 
@@ -114,10 +117,13 @@ pub(super) fn validate_database(_: &Path) -> Result<()> {
 }
 
 pub(super) fn shared_pool(database: &Path) -> Result<SqlitePoolOptions> {
-    let lease = Arc::new(acquire(database, false)?);
+    Ok(pool_options(Arc::new(acquire(database, false)?)))
+}
+
+fn pool_options(lease: Arc<Lease>) -> SqlitePoolOptions {
     // PoolOptions is retained by SQLx's pool inner state. Keep the shared lease
     // there, so an exported SqlitePool cannot outlive admission protection.
-    Ok(SqlitePoolOptions::new()
+    SqlitePoolOptions::new()
         .max_connections(1)
         .after_connect(move |connection, _| {
             let lease = lease.clone();
@@ -134,5 +140,5 @@ pub(super) fn shared_pool(database: &Path) -> Result<SqlitePoolOptions> {
                 )?;
                 Ok(())
             })
-        }))
+        })
 }

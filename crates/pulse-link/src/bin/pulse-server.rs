@@ -21,12 +21,12 @@ async fn run() -> Result<()> {
     let mode = args.next().unwrap_or_default();
     let database = PathBuf::from(args.next().ok_or_else(|| {
         pulse_link::Error::Rejected(
-            "use pulse-server serve|pair-chat|pair-local|revoke PRIVATE_DB [VALUE], or check-backup PRIVATE_DB BACKUP NEW_DIRECTORY"
+            "use pulse-server serve|pair-chat|pair-local|revoke PRIVATE_DB [VALUE], or check-backup|check-offline-backup PRIVATE_DB BACKUP NEW_DIRECTORY"
                 .into(),
         )
     })?);
     let value = args.next();
-    if mode == "check-backup" {
+    if matches!(mode.as_str(), "check-backup" | "check-offline-backup") {
         let backup =
             value.ok_or_else(|| pulse_link::Error::Rejected("encrypted backup required".into()))?;
         let destination = args.next().ok_or_else(|| {
@@ -34,6 +34,32 @@ async fn run() -> Result<()> {
         })?;
         if args.next().is_some() {
             return Err(pulse_link::Error::Rejected("too many arguments".into()));
+        }
+        if mode == "check-offline-backup" {
+            let _server_lock = server_lock(&database)?;
+            let admission = pulse_core::DatabaseMaintenance::try_acquire(&database)?;
+            let checked = admission
+                .check_backup(
+                    std::path::Path::new(&backup),
+                    std::path::Path::new(&destination),
+                    "pulse-owner",
+                    &pulse_link::remote::versions(),
+                    now(),
+                )
+                .await?;
+            let check = checked.backup;
+            eprintln!(
+                "Offline backup checked: {} tasks, {} unknown tasks, {} live memories. Original database identity: {}. Candidate stays isolated. No tasks started.",
+                check.tasks,
+                check.unknown_tasks,
+                check.memories,
+                if checked.source_identity_verified {
+                    "verified"
+                } else {
+                    "unverified"
+                },
+            );
+            return Ok(());
         }
         let core = pulse_core::Store::open(database, "pulse-owner").await?;
         let check = core
@@ -55,18 +81,7 @@ async fn run() -> Result<()> {
         return Err(pulse_link::Error::Rejected("too many arguments".into()));
     }
     let _server_lock = if mode == "serve" {
-        use std::os::unix::fs::OpenOptionsExt;
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(database.with_extension("server.lock"))?;
-        fs2::FileExt::try_lock_exclusive(&file)
-            .map_err(|_| pulse_link::Error::Rejected("another server owns this database".into()))?;
-        Some(file)
+        Some(server_lock(&database)?)
     } else {
         None
     };
@@ -138,4 +153,19 @@ async fn run() -> Result<()> {
         _ => return Err(pulse_link::Error::Rejected("unknown mode".into())),
     }
     Ok(())
+}
+
+fn server_lock(database: &std::path::Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(database.with_extension("server.lock"))?;
+    fs2::FileExt::try_lock_exclusive(&file)
+        .map_err(|_| pulse_link::Error::Rejected("another server owns this database".into()))?;
+    Ok(file)
 }

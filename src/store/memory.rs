@@ -24,7 +24,7 @@ mod revocations;
 pub(super) mod task_sources;
 mod withdrawals;
 mod worker_copy;
-pub use backup::{BackupCheck, Maintenance};
+pub use backup::{BackupCheck, Maintenance, OfflineBackupCheck};
 pub use checkpoint::truncate as truncate_wal;
 pub use copy::MemoryCopyChange;
 pub use task_sources::TaskMemoryLease;
@@ -32,7 +32,7 @@ pub use withdrawals::MemoryWithdrawalRules;
 
 /// This file is deliberately outside the database backup. It is restriction
 /// evidence, not another task or knowledge store. Never put source text in it.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Restrictions {
     format: u8,
@@ -49,6 +49,15 @@ struct Restrictions {
     withdrawals: BTreeMap<String, withdrawals::Withdrawal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     worker: Option<worker_copy::WorkerCopy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restore: Option<RestoreFence>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestoreFence {
+    generation: String,
+    committed: bool,
 }
 
 pub(super) struct MemoryGuard {
@@ -75,10 +84,28 @@ impl Drop for Lease<'_> {
 
 impl MemoryGuard {
     pub(super) fn new(database: &Path) -> Result<Self> {
+        std::fs::metadata(database)?;
+        Self::target(database)
+    }
+
+    fn target(database: &Path) -> Result<Self> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            let absolute = std::fs::canonicalize(database)?;
+            let name = database
+                .file_name()
+                .ok_or_else(|| Error::Rejected("database filename required".into()))?;
+            let parent = database
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let parent = parent.canonicalize()?;
+            let metadata = std::fs::metadata(&parent)?;
+            require(
+                metadata.uid() == rustix::process::geteuid().as_raw(),
+                "database directory must be owned",
+            )?;
+            let absolute = parent.join(name);
             let mut manifest = absolute.as_os_str().to_owned();
             manifest.push(".memory-restrictions.json");
             let mut lock = absolute.as_os_str().to_owned();
@@ -87,7 +114,7 @@ impl MemoryGuard {
                 database: absolute,
                 manifest: manifest.into(),
                 lock: lock.into(),
-                owner: std::fs::metadata(database)?.uid(),
+                owner: metadata.uid(),
                 serial: Mutex::new(()),
                 changed: tokio::sync::Notify::new(),
             })
@@ -180,7 +207,13 @@ impl MemoryGuard {
         let value: Restrictions = serde_json::from_slice(&bytes)
             .map_err(|_| Error::Rejected("invalid memory restrictions".into()))?;
         require(
-            (1..=7).contains(&value.format)
+            (1..=8).contains(&value.format)
+                && match &value.restore {
+                    Some(restore) => {
+                        value.format == 8 && uuid::Uuid::parse_str(&restore.generation).is_ok()
+                    }
+                    None => value.format < 8,
+                }
                 && value
                     .worker
                     .as_ref()
@@ -237,6 +270,9 @@ impl Store {
                 .fetch_optional(&mut *tx)
                 .await?;
         let manifest = self.memory_guard.read()?;
+        if let Some(manifest) = &manifest {
+            restore_binding(&mut tx, manifest).await?;
+        }
         let mut manifest = match (bound, manifest) {
             (Some(keeper), Some(manifest)) => {
                 require(keeper == manifest.keeper, "wrong memory restriction keeper")?;
@@ -267,6 +303,7 @@ impl Store {
                             copy: None,
                             withdrawals: BTreeMap::new(),
                             worker: None,
+                            restore: None,
                         };
                         self.memory_guard.write(&manifest)?;
                         manifest
@@ -568,6 +605,7 @@ fn restrict(value: &mut Restrictions, id: &str, revision: u64) -> Result<()> {
 }
 
 async fn reconcile(db: &mut SqliteConnection, manifest: &Restrictions) -> Result<()> {
+    restore_binding(db, manifest).await?;
     let keeper: String =
         sqlx::query_scalar("SELECT value FROM settings WHERE key='memory_keeper_id'")
             .fetch_one(&mut *db)
@@ -602,6 +640,46 @@ async fn reconcile(db: &mut SqliteConnection, manifest: &Restrictions) -> Result
         .bind(manifest.epoch.to_string())
         .execute(&mut *db)
         .await?;
+    Ok(())
+}
+
+async fn restore_binding(db: &mut SqliteConnection, manifest: &Restrictions) -> Result<()> {
+    if let Some(fence) = &manifest.restore {
+        require(
+            fence.committed,
+            "offline restore is incomplete; resume required",
+        )?;
+        let generation: Option<String> =
+            sqlx::query_scalar("SELECT value FROM settings WHERE key='restore_generation'")
+                .fetch_optional(&mut *db)
+                .await?;
+        require(
+            generation.as_deref() == Some(fence.generation.as_str()),
+            "database predates the current restore; offline recovery required",
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn admit_database_open(database: &Path) -> Result<()> {
+    let guard = MemoryGuard::target(database)?;
+    if let Some(fence) = guard.read()?.and_then(|manifest| manifest.restore) {
+        require(
+            fence.committed && database.exists(),
+            "offline restore is incomplete; resume required",
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) async fn admit_database_pool(database: &Path, pool: &sqlx::SqlitePool) -> Result<()> {
+    let guard = MemoryGuard::target(database)?;
+    if let Some(manifest) = guard.read()?
+        && manifest.restore.is_some()
+    {
+        let mut db = pool.acquire().await?;
+        restore_binding(&mut db, &manifest).await?;
+    }
     Ok(())
 }
 

@@ -22,8 +22,8 @@ pub use database_access::DatabaseMaintenance;
 mod memory;
 mod schedules;
 pub use memory::{
-    BackupCheck, Maintenance, MemoryCopyChange, MemoryWithdrawalRules, TaskMemoryLease,
-    truncate_wal,
+    BackupCheck, Maintenance, MemoryCopyChange, MemoryWithdrawalRules, OfflineBackupCheck,
+    TaskMemoryLease, truncate_wal,
 };
 
 #[derive(Clone)]
@@ -37,11 +37,12 @@ impl Store {
     pub async fn open(path: impl AsRef<Path>, owner: &str) -> Result<Self> {
         require(!owner.is_empty(), "owner must not be empty")?;
         let pool_options = database_access::shared_pool(path.as_ref())?;
+        memory::admit_database_open(path.as_ref())?;
         private_database(path.as_ref())?;
         database_access::validate_database(path.as_ref())?;
         let memory_guard = memory::MemoryGuard::new(path.as_ref())?;
         let options = SqliteConnectOptions::new()
-            .filename(path)
+            .filename(path.as_ref())
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Full)
@@ -49,6 +50,7 @@ impl Store {
             .foreign_keys(true)
             .busy_timeout(Duration::from_secs(5));
         let pool = pool_options.connect_with(options).await?;
+        memory::admit_database_pool(path.as_ref(), &pool).await?;
         let version: String = sqlx::query_scalar("SELECT sqlite_version()")
             .fetch_one(&pool)
             .await?;
