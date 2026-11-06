@@ -1,5 +1,28 @@
 use super::*;
+use rustix::io::Errno;
 use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
+use std::process::ExitStatus;
+
+const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn signal_group_for_stop(
+    child: &mut tokio::process::Child,
+    group: Pid,
+) -> Result<Option<ExitStatus>> {
+    match kill_process_group(group, Signal::KILL) {
+        Ok(()) | Err(Errno::SRCH) => Ok(None),
+        Err(error @ Errno::PERM) => {
+            // macOS can still find a group whose last member exited but has
+            // not been reaped. Wait for our child; the caller must still
+            // verify the whole group is gone before recording Stopped.
+            let status = tokio::time::timeout(STOP_TIMEOUT, child.wait())
+                .await
+                .map_err(|_| error)??;
+            Ok(Some(status))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
 
 /// Entry for the fixed sibling binary. No HTTP, model or task scheduler runs here.
 pub async fn run(directory: &Path) -> Result<i32> {
@@ -119,8 +142,12 @@ pub async fn run(directory: &Path) -> Result<i32> {
                         if stop {
                             stopping=true;
                             graceful=match &driver {Some(endpoint)=>crate::owned_process::request_shutdown(&endpoint.join("shutdown")?).await,None=>true};
-                            if driver.is_none() || !graceful {match kill_process_group(group,Signal::KILL) {Ok(())|Err(rustix::io::Errno::SRCH)=>{},Err(e)=>return Err(e.into())};}
-                            stop_until=Some(tokio::time::Instant::now()+Duration::from_secs(5));
+                            if (driver.is_none() || !graceful)
+                                && let Some(status) = signal_group_for_stop(&mut child, group).await?
+                            {
+                                break status;
+                            }
+                            stop_until=Some(tokio::time::Instant::now()+STOP_TIMEOUT);
                         }
                     }
                     Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>{},
@@ -130,7 +157,7 @@ pub async fn run(directory: &Path) -> Result<i32> {
             result=&mut diagnostics,if !diagnostics_done=>{
                 diagnostics_done=true;
                 diagnostic_ok=matches!(result,Ok(Ok(true)));
-                if !diagnostic_ok {let _=kill_process_group(group,Signal::KILL);stopping=true;stop_until=Some(tokio::time::Instant::now()+Duration::from_secs(5));}
+                if !diagnostic_ok {let _=kill_process_group(group,Signal::KILL);stopping=true;stop_until=Some(tokio::time::Instant::now()+STOP_TIMEOUT);}
             }
             _=tokio::time::sleep(Duration::from_millis(10))=>{
                 if stop_until.is_some_and(|until|tokio::time::Instant::now()>=until) {let _=kill_process_group(group,Signal::KILL);return Err(crate::Error::Rejected("guardian stop deadline exceeded".into()));}
@@ -168,4 +195,42 @@ pub async fn run(directory: &Path) -> Result<i32> {
     } else {
         125
     })
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use rustix::process::{WaitId, WaitIdOptions, waitid};
+
+    #[tokio::test]
+    async fn stop_reaps_an_exited_group_leader_after_eperm() {
+        let mut child = Command::new("/usr/bin/true")
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let group = Pid::from_raw(child.id().unwrap().try_into().unwrap()).unwrap();
+        // Wait for exit without reaping. This holds the exact state that can
+        // arise between the guardian's try_wait and its Stop message.
+        loop {
+            match waitid(
+                WaitId::Pid(group),
+                WaitIdOptions::EXITED | WaitIdOptions::NOWAIT,
+            ) {
+                Ok(Some(status)) => {
+                    assert_eq!(status.exit_status(), Some(0));
+                    break;
+                }
+                Err(Errno::INTR) => continue,
+                other => panic!("could not observe the owned child's exit: {other:?}"),
+            }
+        }
+        assert_eq!(kill_process_group(group, Signal::KILL), Err(Errno::PERM));
+        let status = signal_group_for_stop(&mut child, group)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(test_kill_process_group(group), Err(Errno::SRCH));
+    }
 }
